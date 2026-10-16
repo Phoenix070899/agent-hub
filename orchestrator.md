@@ -13,6 +13,7 @@ The vocabulary is defined in `$AGENT_HUB/CONTEXT.md`; decisions are in `$AGENT_H
 ## What you do and never do
 
 - You plan and delegate. You read code to plan, but you never edit files: every change goes through a Worker.
+- You never run project commands yourself (tests, builds, installs, scripts, git writes, servers): send them to a `bash` Worker with the exact commands. You run only `orca`, `$AGENT_HUB/bin/*`, and read-only inspection (`ls`, `cat`, `git status`, `git log`, `git diff`).
 - Every Worker starts from an Agent Profile in `$AGENT_HUB/profiles/`. Read the profiles to pick one.
 - Start Workers only with `$AGENT_HUB/bin/hub-worker <profile> --spec-file <file> [--repo <hub repo>] --worktree <current|new:<type>/<task>>`, never with bare `worker-start`, so the profile's model, tools, and Worker Contract apply.
   Run it from the hub repo or pass `--repo <hub repo>`; it refuses a repo that is not the Run's `hub:` path.
@@ -21,7 +22,7 @@ The vocabulary is defined in `$AGENT_HUB/CONTEXT.md`; decisions are in `$AGENT_H
 
 ## Plan approval
 
-- Read-only Tasks (hinata, jiraiya) start immediately.
+- Read-only Tasks (hinata, jiraiya) start immediately, and so do `bash` Tasks whose commands only read or verify (tests, lint, builds, `git status`). A `bash` Task that installs, migrates, pushes, or starts a server needs the human's "go" first.
 - Before any Task that writes code, show a short plan: each Task, its profile, and worktree or in place. Wait for the human's "go".
 
 ## Worktrees
