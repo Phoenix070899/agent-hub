@@ -1,6 +1,7 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
+import { needsHuman } from '../hooks/report'
 import { header, toRows } from '../hooks/dashboard'
 import type { DispatchRecord } from '../hooks/dashboard'
 
@@ -181,4 +182,47 @@ test('worker badges are yellow needs you, blue running, green done', async ($, o
   expect((await ui.find({ type: 'Text', text: /^◆ needs you/ }))?.props.color).toBe('yellow')
   expect((await ui.find({ type: 'Text', text: /^● running/ }))?.props.color).toBe('blue')
   expect((await ui.find({ type: 'Text', text: /^✓ done/ }))?.props.color).toBe('green')
+})
+
+test('needsHuman reads the Needs you section', () => {
+  expect(needsHuman('Needs you\n- Nothing.\nDone\n- Task 1')).toBe(false)
+  expect(needsHuman('**Needs you**\n- Approve `rm -rf build`\n**Done**\n- none')).toBe(true)
+  expect(needsHuman('## Needs you\n1. Merge feat/x?\n## Running\n- naruto')).toBe(true)
+  expect(needsHuman('Needs you: nothing\nDone: Task 2')).toBe(false)
+  expect(needsHuman('The test passed.')).toBe(false)
+})
+
+for (const surface of ['terminal', 'desktop'] as const) {
+  test(`replies draw in a box, yellow when they need the human, on ${surface}`, async ($, on) => {
+    world(on)
+    on('ui.render', { component: 'AssistantMessage' }, ($, e) => {
+      const { Text } = $.ui.resolve(e)
+      return <Text>{e.props.text}</Text>
+    })
+    const reply = (text: string) =>
+      $.ui.mount({ plugin: 'hub', surface, component: 'AssistantMessage', props: { text, isFirstOfReply: true } })
+    const calm = await reply('Needs you\n- Nothing.\nDone\n- ok')
+    expect((await calm.find({ type: 'Box' }))?.props.borderColor).toBe('cyan')
+    const urgent = await reply('Needs you\n- Approve the merge of feat/x')
+    expect((await urgent.find({ type: 'Box' }))?.props.borderColor).toBe('yellow')
+  })
+}
+
+test('background rows are one dim line; the human prompt is untouched', async ($, on) => {
+  world(on)
+  on('ui.render', { component: 'UserMessage' }, ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>{e.props.text}</Text>
+  })
+  const row = (text: string, kind: 'composer' | 'task-notification') =>
+    $.ui.mount({ plugin: 'hub', surface: 'terminal', component: 'UserMessage', props: { text, origin: { kind }, isExpanded: false } as never })
+  const mine = await row('run the tests', 'composer')
+  const plain = await mine.find({ type: 'Text', text: /run the tests/ })
+  expect(plain).toBeDefined()
+  expect(plain?.props.dimColor).toBeUndefined()
+  const task = await row('Background command "Listen" completed\nmore', 'task-notification')
+  const dim = await task.find({ type: 'Text', text: /Background command "Listen" completed/ })
+  expect(dim?.props.dimColor).toBe(true)
+  const nudge = await row('You have 1 orchestration message. Run `orca orchestration check`.', 'composer')
+  expect((await nudge.find({ type: 'Text', text: /You have 1 orchestration message/ }))?.props.dimColor).toBe(true)
 })

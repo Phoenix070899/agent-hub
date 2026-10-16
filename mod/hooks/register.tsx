@@ -4,6 +4,7 @@ import type { EngineInterface, Register } from 'claude-code'
 import type { WorkerRow, WorkerState } from '../types'
 import { dispatchQuery, formatAge, toRows } from './dashboard'
 import type { DispatchRecord } from './dashboard'
+import { needsHuman } from './report'
 
 const workers = atom({ plugin: 'hub', key: 'workers' } as const, [])
 const showTools = atom({ plugin: 'hub', key: 'showTools' } as const, false)
@@ -126,6 +127,35 @@ export const register: Register = on => {
         {count === 1 ? 'call' : 'calls'} · {hint}
       </Text>
     )
+  })
+
+  // Replies are the content the human reads: boxed in a pop color so they stand apart from
+  // folded tool rows. Yellow when the reply's Needs you section lists something.
+  on('ui.render', { component: 'AssistantMessage' }, async ($, e, next) => {
+    if (!e.props.text.trim()) return next(e)
+    const { Box, Markdown } = $.ui.resolve(e)
+    if (e.props.isSummary) return <Markdown text={e.props.text} dimColor />
+    return (
+      <Box borderStyle="round" borderColor={needsHuman(e.props.text) ? 'yellow' : 'cyan'} paddingX={1}>
+        <Markdown text={e.props.text} />
+      </Box>
+    )
+  })
+
+  // Everything that is not the human's own message or a reply is background: one dim line.
+  on('ui.render', { component: 'UserMessage' }, async ($, e, next) => {
+    const kind = e.props.origin.kind
+    const isOrcaNudge = /^You have \d+ orchestration messages?\b/.test(e.props.text.trim())
+    if (e.props.isExpanded || ((kind === 'composer' || kind === 'bridge') && !isOrcaNudge)) return next(e)
+    const { Text } = $.ui.resolve(e)
+    const line = e.props.text.trim().split('\n')[0] ?? ''
+    return <Text dimColor wrap="truncate-end">⏺ {line}</Text>
+  })
+
+  on('ui.render', { component: 'CommandOutput' }, async ($, e, next) => {
+    if (!e.props.text.trim()) return next(e)
+    const { Markdown } = $.ui.resolve(e)
+    return <Markdown text={e.props.text} dimColor />
   })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
