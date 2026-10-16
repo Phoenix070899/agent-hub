@@ -16,4 +16,4 @@ PROMPT="$(sed "s|\$AGENT_HUB|$AGENT_HUB|g" "$AGENT_HUB/orchestrator.md")
 $(cat "$AGENT_HUB/memory/preferences.md")
 
 Repo for this Hub Session: $REPO"
-exec claude -n "hub: $(basename "$REPO")" --add-dir "$AGENT_HUB" --append-system-prompt "$PROMPT" "$@"
+exec claude -n "hub: $(basename "$REPO")" --plugin-dir "$AGENT_HUB/mod" --add-dir "$AGENT_HUB" --append-system-prompt "$PROMPT" "$@"

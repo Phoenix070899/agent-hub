@@ -182,7 +182,7 @@ def main():
 
     profile = load_profile(args.profile)
     task = args.spec if args.spec is not None else Path(args.spec_file).read_text()
-    title = args.title or task.strip().splitlines()[0][:60]
+    title = args.title or task.strip().splitlines()[0].lstrip("# ").removeprefix("Task: ")[:60]
     selector = resolve_worktree(args.worktree, args.repo)
 
     LAUNCH_DIR.mkdir(parents=True, exist_ok=True)

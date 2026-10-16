@@ -43,3 +43,7 @@ _Avoid_: status update, digest
 **Preferences**:
 The human's standing instructions about how work should be done, kept between sessions and applied to every new Task.
 _Avoid_: memory, settings
+
+**Dashboard**:
+The always-visible band above the Orchestrator's prompt listing every Worker of the Hub Session with its state.
+_Avoid_: status panel, monitor

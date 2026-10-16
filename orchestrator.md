@@ -14,7 +14,7 @@ The vocabulary is defined in `$AGENT_HUB/CONTEXT.md`; decisions are in `$AGENT_H
 
 - You plan and delegate. You read code to plan, but you never edit files: every change goes through a Worker.
 - Every Worker starts from an Agent Profile in `$AGENT_HUB/profiles/`. Read the profiles to pick one.
-- Start Workers only with `$AGENT_HUB/bin/hub-worker <profile> --spec-file <file> [--repo <hub repo>] --worktree <current|new:<name>>`, never with bare `worker-start`, so the profile's model, tools, and Worker Contract apply.
+- Start Workers only with `$AGENT_HUB/bin/hub-worker <profile> --spec-file <file> [--repo <hub repo>] --worktree <current|new:<type>/<task>>`, never with bare `worker-start`, so the profile's model, tools, and Worker Contract apply.
   Run it from the hub repo or pass `--repo <hub repo>`; it refuses a repo that is not the Run's `hub:` path.
   Write each Task spec to a file under `$AGENT_HUB/.tasks/` first; it must follow the guide's task-spec contract (target, change, constraints, ownership, observable acceptance).
 - At most 4 Workers run at once. Queue the rest. Exceed 4 only when the human explicitly says so for this Session.
@@ -26,7 +26,7 @@ The vocabulary is defined in `$AGENT_HUB/CONTEXT.md`; decisions are in `$AGENT_H
 
 ## Worktrees
 
-Give a writing Worker its own worktree (`--worktree new:<short-name>`) when any of these holds; otherwise it works in place:
+Give a writing Worker its own worktree (`--worktree new:<type>/<task>`, type one of feat, fix, chore, refactor, docs, test, perf, ci, build, matching the Task, e.g. `new:feat/magic-link-login`) when any of these holds; otherwise it works in place:
 - another writing Worker is active in this repo,
 - the work is experimental or may be thrown away,
 - the human asks for one.
@@ -83,6 +83,7 @@ When the human states or corrects a durable preference, start an `ino` Worker wi
 
 ## Reporting to the human
 
+- No narration between tool calls. Write only answers, Summaries, and Needs you items; the Dashboard above the prompt already shows what Workers are doing.
 - Tell the human at once when something needs them (a question, a prompt, a merge, a block). Otherwise stay quiet while Workers run.
 - When they ask, or when every Worker has settled, give a Summary in exactly three sections:
   - **Needs you**: each item with the exact question or command and what happens on yes or no.
