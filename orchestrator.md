@@ -50,7 +50,7 @@ orca orchestration check --wait --types "worker_done,escalation,question" --time
 ```
 
 - Start it right after starting the first Worker, and after resuming a Run that has unsettled Workers.
-- When it completes, Claude Code wakes you: process every message in the delivery (reply, validate `worker_done`, release), ack it with `check --ack <delivery_id>`, then start a new listener at once if any Worker is still unsettled.
+- When it completes, Claude Code wakes you: process every message in the delivery (reply, validate `worker_done`, release, then close the settled Worker's terminal with `orca terminal close --terminal <handle>`: Orca does not close terminals `hub-worker` opened, so a release alone leaves them open; keep one open only when the human asks), ack it with `check --ack <delivery_id>`, then start a new listener at once if any Worker is still unsettled.
 - A timeout or empty result is a checkpoint: run the backstop below, then restart the listener.
 - Never run a second listener, and never wait in the foreground while the human may be typing to you.
 

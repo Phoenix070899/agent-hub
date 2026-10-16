@@ -2,7 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { WorkerRow, WorkerState } from '../types'
-import { dispatchQuery, formatAge, header, toRows } from './dashboard'
+import { dispatchQuery, formatAge, toRows } from './dashboard'
 import type { DispatchRecord } from './dashboard'
 
 const workers = atom({ plugin: 'hub', key: 'workers' } as const, [])
@@ -11,12 +11,16 @@ const turnTools = atom({ plugin: 'hub', key: 'turnTools' } as const, 0)
 
 const POLL_MS = 5000
 
-const STATE_COLOR: Record<WorkerState, string | undefined> = {
-  'needs you': 'yellow',
-  running: undefined,
-  failed: 'red',
-  done: undefined,
+/** Each state's badge color: yellow needs you, blue running, green done, red failed. */
+const STATE_BADGE: Record<WorkerState, { icon: string; color: string }> = {
+  'needs you': { icon: '◆', color: 'yellow' },
+  running: { icon: '●', color: 'blue' },
+  failed: { icon: '✗', color: 'red' },
+  done: { icon: '✓', color: 'green' },
 }
+
+/** One color per Worker row, cycled; none is a badge color (yellow, blue, green, red). */
+const ROW_COLORS = ['cyan', 'magenta', 'white', 'cyanBright', 'magentaBright']
 
 const formatDuration = (ms: number) => {
   const seconds = Math.round(ms / 1000)
@@ -129,36 +133,65 @@ export const register: Register = on => {
     if (e.props.hasSurvey || rows.length === 0) return next(e)
 
     const { Box, Button, Text } = $.ui.resolve(e)
-    const width = e.props.bodyColumns
-    const shown = rows.slice(0, Math.max(1, Math.min(9, e.props.maxRows - 1)))
-    // hotkey "1: " (3) + profile (8) + gaps; the title takes what is left.
-    const fixed = 3 + 8 + 1 + 10 + 1 + 5 + 2 + 16
-    const titleWidth = Math.max(10, width - fixed)
+    // The border takes 2 columns and 2 rows, the header and its rule 2 rows.
+    const width = e.props.bodyColumns - 4
+    const shown = rows.slice(0, Math.max(1, Math.min(9, e.props.maxRows - 4)))
+    const divider = <Text dimColor> │ </Text>
+    // "1: " hotkey + "↗ " + profile 8 + badge 11 + age 4 + place 16 + four dividers of 3.
+    const titleWidth = Math.max(10, width - (3 + 2 + 8 + 11 + 4 + 16 + 4 * 3))
+    const count = (state: WorkerState) => rows.filter(row => row.state === state).length
+    const metric = (state: WorkerState, label: string) => {
+      const n = count(state)
+      const badge = STATE_BADGE[state]
+      return (
+        <Text color={n > 0 ? badge.color : undefined} dimColor={n === 0} bold={n > 0 && state === 'needs you'}>
+          {badge.icon} {label} {n}
+        </Text>
+      )
+    }
 
     return (
-      <Box flexDirection="column">
-        <Text bold>Workers · {header(rows)}</Text>
-        {shown.map((row, index) => (
-          <Box key={row.dispatchId} flexDirection="row">
-            <Button
-              key={`go-${row.dispatchId}`}
-              hotkey={String(index + 1)}
-              plain
-              label={fit(row.profile, 8)}
-              onPress={() => void $.process.run(['orca', 'terminal', 'switch', '--terminal', row.handle])}
-            />
-            <Text wrap="truncate-end">
-              {' '}
-              <Text color={STATE_COLOR[row.state]} bold={row.state === 'needs you'} dimColor={row.state === 'done'}>
-                {fit(row.state, 10)}
-              </Text>{' '}
-              <Text dimColor={row.state === 'done'}>{fit(row.title, titleWidth)}</Text>
-              <Text dimColor>
-                {formatAge(row.quietSeconds).padStart(5)}  {fit(row.place, 16)}
+      <Box flexDirection="column" borderStyle="round" borderDimColor paddingX={1}>
+        <Text wrap="truncate-end">
+          <Text bold>Workers</Text>
+          {'   '}
+          {metric('needs you', 'Needs you')}
+          {'   '}
+          {metric('running', 'Running')}
+          {'   '}
+          {metric('done', 'Done')}
+          {count('failed') > 0 ? <Text>{'   '}{metric('failed', 'Failed')}</Text> : null}
+        </Text>
+        <Text dimColor>{'─'.repeat(Math.max(0, width))}</Text>
+        {shown.map((row, index) => {
+          const color = ROW_COLORS[index % ROW_COLORS.length]
+          const badge = STATE_BADGE[row.state]
+          return (
+            <Box key={row.dispatchId} flexDirection="row">
+              <Button
+                key={`go-${row.dispatchId}`}
+                hotkey={String(index + 1)}
+                plain
+                label="↗"
+                onPress={() => void $.process.run(['orca', 'terminal', 'switch', '--terminal', row.handle])}
+              />
+              <Text wrap="truncate-end">
+                {' '}
+                <Text color={color} bold>{fit(row.profile, 8)}</Text>
+                {divider}
+                <Text color={badge.color} bold={row.state === 'needs you'}>
+                  {fit(`${badge.icon} ${row.state}`, 11)}
+                </Text>
+                {divider}
+                <Text color={color}>{fit(row.title, titleWidth)}</Text>
+                {divider}
+                <Text dimColor>{formatAge(row.quietSeconds).padStart(4)}</Text>
+                {divider}
+                <Text dimColor>{fit(row.place, 16)}</Text>
               </Text>
-            </Text>
-          </Box>
-        ))}
+            </Box>
+          )
+        })}
       </Box>
     )
   })

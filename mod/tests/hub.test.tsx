@@ -101,7 +101,9 @@ for (const surface of ['terminal', 'desktop'] as const) {
     await $.session.start({ cwd: REPO, surface, isInteractive: true })
 
     const ui = await $.ui.mount({ plugin: 'hub', surface, component: 'AbovePrompt', props: band(100) })
-    expect(await ui.find({ type: 'Text', text: /Needs you 1 · Running 0 · Done 0/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /◆ Needs you 1/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /● Running 0/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /◆ needs you/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /map auth flow/ })).toBeDefined()
 
     const query = ran.find(argv => argv[0] === 'sqlite3')
@@ -157,3 +159,26 @@ for (const surface of ['terminal', 'desktop'] as const) {
     expect(await shown.find({ type: 'Text', text: 'Bash(ls)' })).toBeDefined()
   })
 }
+
+test('worker badges are yellow needs you, blue running, green done', async ($, on) => {
+  world(on)
+  const rows = JSON.stringify([
+    record({ id: 'n', handle: 'term_n', title: 'hinata: blocked one', open_questions: 1 }),
+    record({ id: 'r', handle: 'term_r', title: 'naruto: running one' }),
+    record({ id: 'd', handle: 'term_d', title: 'sasuke: done one', status: 'completed', completed_at: '2026-10-16 09:58:00' }),
+  ])
+  on('process.run', ($, e) => ({
+    value: {
+      exitCode: 0,
+      stdout: e.argv[0] === 'sqlite3' ? rows : e.argv[0] === 'printenv' ? '/home/me\n' : `${REPO}\n`,
+      stderr: '',
+      isStdoutTruncated: false,
+      isStderrTruncated: false,
+    },
+  }))
+  await $.session.start({ cwd: REPO, surface: 'terminal', isInteractive: true })
+  const ui = await $.ui.mount({ plugin: 'hub', surface: 'terminal', component: 'AbovePrompt', props: band(120) })
+  expect((await ui.find({ type: 'Text', text: /^◆ needs you/ }))?.props.color).toBe('yellow')
+  expect((await ui.find({ type: 'Text', text: /^● running/ }))?.props.color).toBe('blue')
+  expect((await ui.find({ type: 'Text', text: /^✓ done/ }))?.props.color).toBe('green')
+})
