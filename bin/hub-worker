@@ -2,7 +2,7 @@
 """Start one supervised Worker from an Agent Profile in its own Orca terminal.
 
 Usage:
-  hub-worker <profile> (--spec <text> | --spec-file <path>) [--repo <abs path>] [--worktree current|new:<name>|<orca selector>] [--title <text>]
+  hub-worker <profile> (--spec <text> | --spec-file <path>) [--repo <abs path>] [--worktree current|new:<type>/<task>|<orca selector>] [--title <text>]
 
 The target repo is --repo, else the caller's cwd. It must be the Hub Session's repo (the bound Run's
 `hub: <path>` objective); otherwise nothing is started. An explicit --repo elsewhere only warns.
@@ -88,6 +88,9 @@ def system_prompt(profile):
     return "\n\n".join(parts)
 
 
+BRANCH_TYPES = ("feat", "fix", "chore", "refactor", "docs", "test", "perf", "ci", "build")
+
+
 def git_path(cwd, *args):
     result = subprocess.run(["git", "-C", cwd, "rev-parse", "--path-format=absolute", *args],
                             capture_output=True, text=True)
@@ -149,11 +152,15 @@ def resolve_worktree(choice, repo_arg):
     if choice == "current":
         return f"path:{checkout}"
     if choice.startswith("new:"):
-        created = orca("worktree", "create", "--name", choice[4:], "--repo", f"path:{repo}",
+        branch = choice[4:]
+        kind, _, task = branch.partition("/")
+        if kind not in BRANCH_TYPES or not task or "/" in task:
+            sys.exit(f"--worktree new:{branch}: use new:<type>/<task>, type one of "
+                     f"{', '.join(BRANCH_TYPES)} (e.g. new:feat/magic-link-login)")
+        created = orca("worktree", "create", "--name", f"{kind}-{task}", "--repo", f"path:{repo}",
                        "--setup", "run")
         worktree = created.get("worktree", created)
-        # Orca names the branch <git user>/<name>; Hub branches are <project>/<task>.
-        branch = f"{Path(repo).name}/{choice[4:]}"
+        # Orca names the branch <git user>/<name>; Hub branches are <type>/<task>.
         rename = subprocess.run(["git", "-C", worktree["path"], "branch", "-m", branch],
                                 capture_output=True, text=True)
         if rename.returncode != 0:
