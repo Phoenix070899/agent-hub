@@ -86,11 +86,34 @@ def system_prompt(profile):
     return "\n\n".join(parts)
 
 
+def git_path(*args):
+    result = subprocess.run(["git", "rev-parse", "--path-format=absolute", *args],
+                            capture_output=True, text=True)
+    return result.stdout.strip() if result.returncode == 0 else None
+
+
+def ensure_registered(repo, checkout):
+    """Register the repo with Orca if Orca cannot find this checkout, so Workers start here."""
+    probe = subprocess.run(["orca", "worktree", "show", "--worktree", f"path:{checkout}", "--json"],
+                           capture_output=True, text=True)
+    if probe.returncode == 0 and json.loads(probe.stdout).get("ok"):
+        return
+    orca("repo", "add", "--path", repo)
+    print(f"hub-worker: registered {repo} with Orca", file=sys.stderr)
+
+
 def resolve_worktree(choice):
+    # Use explicit paths, not `active`: `active` only resolves when the caller runs in an
+    # Orca-managed terminal, and the Orchestrator may not.
+    checkout = git_path("--show-toplevel") or os.getcwd()
+    common = git_path("--git-common-dir")
+    repo = str(Path(common).parent) if common else checkout
+    ensure_registered(repo, checkout)
     if choice == "current":
-        return "active"
+        return f"path:{checkout}"
     if choice.startswith("new:"):
-        created = orca("worktree", "create", "--name", choice[4:], "--setup", "run")
+        created = orca("worktree", "create", "--name", choice[4:], "--repo", f"path:{repo}",
+                       "--setup", "run")
         worktree = created.get("worktree", created)
         return f"path:{worktree['path']}"
     return choice  # any other Orca worktree selector, e.g. path:/abs/path
