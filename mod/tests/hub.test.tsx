@@ -193,7 +193,7 @@ test('needsHuman reads the Needs you section', () => {
 })
 
 for (const surface of ['terminal', 'desktop'] as const) {
-  test(`replies draw in a box, yellow when they need the human, on ${surface}`, async ($, on) => {
+  test(`replies draw on a background, amber when they need the human, on ${surface}`, async ($, on) => {
     world(on)
     on('ui.render', { component: 'AssistantMessage' }, ($, e) => {
       const { Text } = $.ui.resolve(e)
@@ -202,9 +202,9 @@ for (const surface of ['terminal', 'desktop'] as const) {
     const reply = (text: string) =>
       $.ui.mount({ plugin: 'hub', surface, component: 'AssistantMessage', props: { text, isFirstOfReply: true } })
     const calm = await reply('Needs you\n- Nothing.\nDone\n- ok')
-    expect((await calm.find({ type: 'Box' }))?.props.borderColor).toBe('cyan')
+    expect((await calm.find({ type: 'Box' }))?.props.backgroundColor).toBe('#1f2d3d')
     const urgent = await reply('Needs you\n- Approve the merge of feat/x')
-    expect((await urgent.find({ type: 'Box' }))?.props.borderColor).toBe('yellow')
+    expect((await urgent.find({ type: 'Box' }))?.props.backgroundColor).toBe('#3d3200')
   })
 }
 

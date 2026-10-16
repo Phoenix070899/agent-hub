@@ -12,6 +12,10 @@ const turnTools = atom({ plugin: 'hub', key: 'turnTools' } as const, 0)
 
 const POLL_MS = 5000
 
+/** Reply backgrounds, for a dark terminal theme: navy, or amber when the human must act. */
+const REPLY_BG = '#1f2d3d'
+const REPLY_NEEDS_YOU_BG = '#3d3200'
+
 /** Each state's badge color: yellow needs you, blue running, green done, red failed. */
 const STATE_BADGE: Record<WorkerState, { icon: string; color: string }> = {
   'needs you': { icon: '◆', color: 'yellow' },
@@ -129,14 +133,14 @@ export const register: Register = on => {
     )
   })
 
-  // Replies are the content the human reads: boxed in a pop color so they stand apart from
-  // folded tool rows. Yellow when the reply's Needs you section lists something.
+  // Replies are the content the human reads: drawn on a colored background so they stand
+  // apart from folded tool rows. Amber when the reply's Needs you section lists something.
   on('ui.render', { component: 'AssistantMessage' }, async ($, e, next) => {
     if (!e.props.text.trim()) return next(e)
     const { Box, Markdown } = $.ui.resolve(e)
     if (e.props.isSummary) return <Markdown text={e.props.text} dimColor />
     return (
-      <Box borderStyle="round" borderColor={needsHuman(e.props.text) ? 'yellow' : 'cyan'} paddingX={1}>
+      <Box backgroundColor={needsHuman(e.props.text) ? REPLY_NEEDS_YOU_BG : REPLY_BG} paddingX={2} paddingY={1}>
         <Markdown text={e.props.text} />
       </Box>
     )
