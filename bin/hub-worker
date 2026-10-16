@@ -1,0 +1,145 @@
+#!/usr/bin/env python3
+"""Start one supervised Worker from an Agent Profile in its own Orca terminal.
+
+Usage:
+  hub-worker <profile> (--spec <text> | --spec-file <path>) [--worktree current|new:<name>|<orca selector>] [--title <text>]
+
+Prints the `orca orchestration worker-start` JSON receipt. Exit code is non-zero on failure.
+"""
+import argparse
+import json
+import os
+import shlex
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+HUB = Path(__file__).resolve().parent.parent
+LAUNCH_DIR = Path.home() / ".agent-hub" / "launch"
+
+
+def load_profile(name):
+    path = HUB / "profiles" / f"{name}.md"
+    if not path.exists():
+        known = ", ".join(p.stem for p in sorted((HUB / "profiles").glob("*.md")))
+        sys.exit(f"unknown profile {name!r}; known: {known}")
+    text = path.read_text()
+    _, front, body = text.split("---", 2)
+    profile = {}
+    for line in front.strip().splitlines():
+        key, _, value = line.partition(":")
+        profile[key.strip()] = value.strip()
+    for key in ("tools", "skills", "context"):
+        profile[key] = [v.strip() for v in profile.get(key, "").split(",") if v.strip()]
+    profile["writes"] = profile.get("writes") == "true"
+    profile["role"] = body.strip()
+    if profile.get("cli") != "claude":
+        sys.exit(f"profile {name}: cli {profile.get('cli')!r} is not supported yet (only claude)")
+    return profile
+
+
+def orca(*args):
+    result = subprocess.run(["orca", *args, "--json"], capture_output=True, text=True)
+    try:
+        data = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        sys.exit(f"orca {' '.join(args[:2])} failed: {result.stderr or result.stdout}")
+    if result.returncode != 0 or not data.get("ok", True):
+        print(json.dumps(data, indent=2))
+        sys.exit(f"orca {' '.join(args[:2])} failed")
+    return data["result"]
+
+
+def wait_ready(handle):
+    """Wait until the agent TUI is idle, accepting Claude's folder-trust prompt once.
+
+    New worktrees are folders Claude has not seen; the human approved the Task, so trusting
+    its worktree is part of starting it.
+    """
+    for attempt in range(2):
+        result = subprocess.run(["orca", "terminal", "wait", "--terminal", handle, "--for", "tui-idle",
+                                 "--timeout-ms", "60000", "--json"], capture_output=True, text=True)
+        wait = json.loads(result.stdout)["result"]["wait"]
+        if wait.get("satisfied"):
+            return
+        if wait.get("blockedReason") == "agent-trust-workspace" and attempt == 0:
+            orca("terminal", "send", "--terminal", handle, "--text", "\x1b[B")
+            time.sleep(1)
+            orca("terminal", "send", "--terminal", handle, "--enter")
+            time.sleep(5)  # the TUI reports idle on the stale dialog frame; let it redraw first
+            continue
+        print(json.dumps(wait, indent=2))
+        sys.exit(f"worker terminal {handle} never became ready")
+
+
+def system_prompt(profile):
+    parts = [(HUB / "worker-contract.md").read_text()]
+    parts.append("# Preferences\n\nApply these standing instructions from the human.\n\n"
+                 + (HUB / "memory" / "preferences.md").read_text())
+    parts.append(f"# Your role: {profile['name']}\n\n{profile['role']}")
+    if profile["skills"]:
+        parts.append("Use these skills when they fit the Task: " + ", ".join(profile["skills"]) + ".")
+    if profile["context"]:
+        parts.append("Before starting, read whichever of these files exist (paths relative to your "
+                     "working directory unless absolute): " + ", ".join(profile["context"]) + ".")
+    return "\n\n".join(parts)
+
+
+def resolve_worktree(choice):
+    if choice == "current":
+        return "active"
+    if choice.startswith("new:"):
+        created = orca("worktree", "create", "--name", choice[4:], "--setup", "run")
+        worktree = created.get("worktree", created)
+        return f"path:{worktree['path']}"
+    return choice  # any other Orca worktree selector, e.g. path:/abs/path
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("profile")
+    spec = parser.add_mutually_exclusive_group(required=True)
+    spec.add_argument("--spec")
+    spec.add_argument("--spec-file")
+    parser.add_argument("--worktree", default="current")
+    parser.add_argument("--title")
+    args = parser.parse_args()
+
+    profile = load_profile(args.profile)
+    task = args.spec if args.spec is not None else Path(args.spec_file).read_text()
+    title = args.title or task.strip().splitlines()[0][:60]
+    selector = resolve_worktree(args.worktree)
+
+    LAUNCH_DIR.mkdir(parents=True, exist_ok=True)
+    stamp = f"{profile['name']}-{int(time.time() * 1000)}"
+    prompt_file = LAUNCH_DIR / f"{stamp}.prompt.md"
+    prompt_file.write_text(system_prompt(profile))
+    argv = ["claude", "--model", profile["model"], "--permission-mode", "auto",
+            "--settings", str(HUB / "settings" / "worker.json"),
+            "--add-dir", str(HUB), "-n", f"{profile['name']}: {title}"]
+    if profile.get("effort"):
+        argv += ["--effort", profile["effort"]]
+    if profile["tools"]:
+        argv += ["--tools", ",".join(profile["tools"])]
+    script = LAUNCH_DIR / f"{stamp}.sh"
+    script.write_text(f'#!/bin/sh\nexec {shlex.join(argv)} --append-system-prompt "$(cat {shlex.quote(str(prompt_file))})"\n')
+    script.chmod(0o755)
+
+    terminal = orca("terminal", "create", "--worktree", selector,
+                    "--title", f"{profile['name']}: {title}", "--command", str(script))
+    handle = terminal.get("handle") or terminal["terminal"]["handle"]
+    wait_ready(handle)
+
+    receipt = orca("orchestration", "worker-start", "--spec", task, "--task-title",
+                   f"{profile['name']}: {title}", "--terminal", handle, "--worktree", selector)
+    if receipt.get("turnStart") != "observed":
+        print(json.dumps(receipt, indent=2))
+        sys.exit(f"worker {handle} accepted the Task but never started a turn; "
+                 f"stop it with: orca orchestration worker-stop --dispatch {receipt.get('dispatchId')}")
+    print(json.dumps({"profile": profile["name"], "terminal": handle, "worktree": selector,
+                      "writes": profile["writes"], "receipt": receipt}, indent=2))
+
+
+if __name__ == "__main__":
+    main()
