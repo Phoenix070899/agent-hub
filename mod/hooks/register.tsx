@@ -12,9 +12,9 @@ const turnTools = atom({ plugin: 'hub', key: 'turnTools' } as const, 0)
 
 const POLL_MS = 5000
 
-/** Reply backgrounds, for a dark terminal theme: navy, or amber when the human must act. */
-const REPLY_BG = '#1f2d3d'
-const REPLY_NEEDS_YOU_BG = '#3d3200'
+/** Reply cards for a dark terminal theme: navy, or amber when the human must act. */
+const REPLY = { background: '#1f2d3d', border: '#4a6d91' }
+const REPLY_NEEDS_YOU = { background: '#3d3200', border: '#9a7d00' }
 
 /** Each state's badge color: yellow needs you, blue running, green done, red failed. */
 const STATE_BADGE: Record<WorkerState, { icon: string; color: string }> = {
@@ -139,19 +139,34 @@ export const register: Register = on => {
     if (!e.props.text.trim()) return next(e)
     const { Box, Markdown } = $.ui.resolve(e)
     if (e.props.isSummary) return <Markdown text={e.props.text} dimColor />
+    const card = needsHuman(e.props.text) ? REPLY_NEEDS_YOU : REPLY
     return (
-      <Box backgroundColor={needsHuman(e.props.text) ? REPLY_NEEDS_YOU_BG : REPLY_BG} paddingX={2} paddingY={1}>
+      <Box
+        borderStyle="round"
+        borderColor={card.border}
+        backgroundColor={card.background}
+        paddingX={2}
+      >
         <Markdown text={e.props.text} />
       </Box>
     )
   })
 
-  // Everything that is not the human's own message or a reply is background: one dim line.
+  // The human's own message is a rounded card; everything else that is not a reply is
+  // background: one dim line.
   on('ui.render', { component: 'UserMessage' }, async ($, e, next) => {
     const kind = e.props.origin.kind
     const isOrcaNudge = /^You have \d+ orchestration messages?\b/.test(e.props.text.trim())
-    if (e.props.isExpanded || ((kind === 'composer' || kind === 'bridge') && !isOrcaNudge)) return next(e)
-    const { Text } = $.ui.resolve(e)
+    const isHuman = (kind === 'composer' || kind === 'bridge') && !isOrcaNudge
+    if (e.props.isExpanded) return next(e)
+    const { Box, Text } = $.ui.resolve(e)
+    if (isHuman) {
+      return (
+        <Box borderStyle="round" borderColor="gray" paddingX={1}>
+          <Text bold>❯ {e.props.text}</Text>
+        </Box>
+      )
+    }
     const line = e.props.text.trim().split('\n')[0] ?? ''
     return <Text dimColor wrap="truncate-end">⏺ {line}</Text>
   })

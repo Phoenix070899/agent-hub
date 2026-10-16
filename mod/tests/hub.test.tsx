@@ -203,12 +203,13 @@ for (const surface of ['terminal', 'desktop'] as const) {
       $.ui.mount({ plugin: 'hub', surface, component: 'AssistantMessage', props: { text, isFirstOfReply: true } })
     const calm = await reply('Needs you\n- Nothing.\nDone\n- ok')
     expect((await calm.find({ type: 'Box' }))?.props.backgroundColor).toBe('#1f2d3d')
+    expect((await calm.find({ type: 'Box' }))?.props.borderStyle).toBe('round')
     const urgent = await reply('Needs you\n- Approve the merge of feat/x')
     expect((await urgent.find({ type: 'Box' }))?.props.backgroundColor).toBe('#3d3200')
   })
 }
 
-test('background rows are one dim line; the human prompt is untouched', async ($, on) => {
+test('background rows are one dim line; the human prompt is a rounded card', async ($, on) => {
   world(on)
   on('ui.render', { component: 'UserMessage' }, ($, e) => {
     const { Text } = $.ui.resolve(e)
@@ -218,8 +219,8 @@ test('background rows are one dim line; the human prompt is untouched', async ($
     $.ui.mount({ plugin: 'hub', surface: 'terminal', component: 'UserMessage', props: { text, origin: { kind }, isExpanded: false } as never })
   const mine = await row('run the tests', 'composer')
   const plain = await mine.find({ type: 'Text', text: /run the tests/ })
-  expect(plain).toBeDefined()
   expect(plain?.props.dimColor).toBeUndefined()
+  expect((await mine.find({ type: 'Box' }))?.props.borderStyle).toBe('round')
   const task = await row('Background command "Listen" completed\nmore', 'task-notification')
   const dim = await task.find({ type: 'Text', text: /Background command "Listen" completed/ })
   expect(dim?.props.dimColor).toBe(true)
