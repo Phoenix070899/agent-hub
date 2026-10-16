@@ -152,6 +152,12 @@ def resolve_worktree(choice, repo_arg):
         created = orca("worktree", "create", "--name", choice[4:], "--repo", f"path:{repo}",
                        "--setup", "run")
         worktree = created.get("worktree", created)
+        # Orca names the branch <git user>/<name>; Hub branches are <project>/<task>.
+        branch = f"{Path(repo).name}/{choice[4:]}"
+        rename = subprocess.run(["git", "-C", worktree["path"], "branch", "-m", branch],
+                                capture_output=True, text=True)
+        if rename.returncode != 0:
+            sys.exit(f"could not name the worktree branch {branch}: {rename.stderr.strip()}")
         return f"path:{worktree['path']}"
     return choice  # any other Orca worktree selector, e.g. path:/abs/path
 
