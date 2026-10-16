@@ -104,14 +104,18 @@ def ensure_registered(repo, checkout):
     print(f"hub-worker: registered {repo} with Orca", file=sys.stderr)
 
 
-def hub_repo():
-    """The Hub Session's repo from the bound Run's `hub: <path>` objective, or None."""
+def current_run():
+    """The Run bound to the caller (the Orchestrator), or None."""
     result = subprocess.run(["orca", "orchestration", "run-current", "--json"], capture_output=True, text=True)
     try:
-        run = json.loads(result.stdout)["result"]["run"]
+        return json.loads(result.stdout)["result"]["run"]
     except (json.JSONDecodeError, KeyError, TypeError):
         return None
-    objective = (run or {}).get("objective", "")
+
+
+def hub_repo():
+    """The Hub Session's repo from the bound Run's `hub: <path>` objective, or None."""
+    objective = (current_run() or {}).get("objective", "")
     return objective[4:].strip() if objective.startswith("hub:") else None
 
 
@@ -174,13 +178,16 @@ def main():
     prompt_file.write_text(system_prompt(profile))
     argv = ["claude", "--model", profile["model"], "--permission-mode", "auto",
             "--settings", str(HUB / "settings" / "worker.json"),
+            "--disallowedTools", "AskUserQuestion",
             "--add-dir", str(HUB), "-n", f"{profile['name']}: {title}"]
     if profile.get("effort"):
         argv += ["--effort", profile["effort"]]
     if profile["tools"]:
         argv += ["--tools", ",".join(profile["tools"])]
     script = LAUNCH_DIR / f"{stamp}.sh"
-    script.write_text(f'#!/bin/sh\nexec {shlex.join(argv)} --append-system-prompt "$(cat {shlex.quote(str(prompt_file))})"\n')
+    run_id = (current_run() or {}).get("id", "")
+    env = f"AGENT_HUB={shlex.quote(str(HUB))} HUB_RUN_ID={shlex.quote(run_id)}"
+    script.write_text(f'#!/bin/sh\nexport {env}\nexec {shlex.join(argv)} --append-system-prompt "$(cat {shlex.quote(str(prompt_file))})"\n')
     script.chmod(0o755)
 
     terminal = orca("terminal", "create", "--worktree", selector,

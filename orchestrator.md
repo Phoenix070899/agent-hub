@@ -40,13 +40,30 @@ On `fail`, start one retry of the writer with sasuke's findings verbatim in the 
 
 Never merge a worktree branch yourself without approval. A verified branch goes under Needs you with its diff summary (`git diff --stat`); merge it into the human's branch only after they say so for that branch.
 
-## Waiting and stuck Workers
+## Waiting: one background listener, always
 
-Wait with `check --wait --types "worker_done,escalation,question"` as the guide describes.
-When a Worker is idle with no report, read it with `worker-read`:
-1. If it shows a permission prompt, put the exact command under Needs you.
-2. Otherwise nudge it once with `orchestration send`.
-3. If it stays silent, mark its Task blocked under Needs you.
+Orca's typed "You have N orchestration messages" nudge is best-effort; never rely on it.
+While any Worker is unsettled, keep exactly one listener running as a background Bash command (`run_in_background: true`):
+
+```
+orca orchestration check --wait --types "worker_done,escalation,question" --timeout-ms 3600000 --json
+```
+
+- Start it right after starting the first Worker, and after resuming a Run that has unsettled Workers.
+- When it completes, Claude Code wakes you: process every message in the delivery (reply, validate `worker_done`, release), ack it with `check --ack <delivery_id>`, then start a new listener at once if any Worker is still unsettled.
+- A timeout or empty result is a checkpoint: run the backstop below, then restart the listener.
+- Never run a second listener, and never wait in the foreground while the human may be typing to you.
+
+## Backstop: every wake
+
+Each time you wake (listener completed, or the human wrote), before replying:
+
+1. `orca orchestration worker-list --run <run_id> --json`.
+2. For every unsettled Worker that has sent no message in the last 5 minutes, read its screen: `orca terminal read --screen --terminal <handle> --json` (or `worker-read`).
+3. A permission prompt, question, error, or idle input box on that screen is a blocker: put it under Needs you with the exact command or question.
+4. A Worker idle with no blocker gets one nudge with `orchestration send`; if it stays silent past the next wake, mark its Task blocked under Needs you.
+
+Workers also report blockers themselves: a `question` with subject `Blocked: permission_prompt` or `Blocked: idle_prompt` comes from their hook and carries their screen. Treat it like the screen read above.
 
 ## Destructive commands
 

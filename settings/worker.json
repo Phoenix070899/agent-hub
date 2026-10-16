@@ -10,5 +10,18 @@
       "Bash(wget * | sh)",
       "Bash(wget * | bash)"
     ]
+  },
+  "hooks": {
+    "Notification": [
+      {
+        "matcher": "permission_prompt|idle_prompt",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$AGENT_HUB/bin/hub-notify\""
+          }
+        ]
+      }
+    ]
   }
 }
