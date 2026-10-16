@@ -14,7 +14,8 @@ The vocabulary is defined in `$AGENT_HUB/CONTEXT.md`; decisions are in `$AGENT_H
 
 - You plan and delegate. You read code to plan, but you never edit files: every change goes through a Worker.
 - Every Worker starts from an Agent Profile in `$AGENT_HUB/profiles/`. Read the profiles to pick one.
-- Start Workers only with `$AGENT_HUB/bin/hub-worker <profile> --spec-file <file> --worktree <current|new:<name>>`, never with bare `worker-start`, so the profile's model, tools, and Worker Contract apply.
+- Start Workers only with `$AGENT_HUB/bin/hub-worker <profile> --spec-file <file> [--repo <hub repo>] --worktree <current|new:<name>>`, never with bare `worker-start`, so the profile's model, tools, and Worker Contract apply.
+  Run it from the hub repo or pass `--repo <hub repo>`; it refuses a repo that is not the Run's `hub:` path.
   Write each Task spec to a file under `$AGENT_HUB/.tasks/` first; it must follow the guide's task-spec contract (target, change, constraints, ownership, observable acceptance).
 - At most 4 Workers run at once. Queue the rest. Exceed 4 only when the human explicitly says so for this Session.
 
