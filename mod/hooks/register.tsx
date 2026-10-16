@@ -152,21 +152,14 @@ export const register: Register = on => {
     )
   })
 
-  // The human's own message is a rounded card; everything else that is not a reply is
+  // The human's own message keeps the engine's row; everything else that is not a reply is
   // background: one dim line.
   on('ui.render', { component: 'UserMessage' }, async ($, e, next) => {
     const kind = e.props.origin.kind
     const isOrcaNudge = /^You have \d+ orchestration messages?\b/.test(e.props.text.trim())
     const isHuman = (kind === 'composer' || kind === 'bridge') && !isOrcaNudge
-    if (e.props.isExpanded) return next(e)
-    const { Box, Text } = $.ui.resolve(e)
-    if (isHuman) {
-      return (
-        <Box borderStyle="round" borderColor="gray" paddingX={1}>
-          <Text bold>❯ {e.props.text}</Text>
-        </Box>
-      )
-    }
+    if (e.props.isExpanded || isHuman) return next(e)
+    const { Text } = $.ui.resolve(e)
     const line = e.props.text.trim().split('\n')[0] ?? ''
     return <Text dimColor wrap="truncate-end">⏺ {line}</Text>
   })

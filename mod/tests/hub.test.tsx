@@ -209,7 +209,7 @@ for (const surface of ['terminal', 'desktop'] as const) {
   })
 }
 
-test('background rows are one dim line; the human prompt is a rounded card', async ($, on) => {
+test('background rows are one dim line; the human prompt is untouched', async ($, on) => {
   world(on)
   on('ui.render', { component: 'UserMessage' }, ($, e) => {
     const { Text } = $.ui.resolve(e)
@@ -220,7 +220,6 @@ test('background rows are one dim line; the human prompt is a rounded card', asy
   const mine = await row('run the tests', 'composer')
   const plain = await mine.find({ type: 'Text', text: /run the tests/ })
   expect(plain?.props.dimColor).toBeUndefined()
-  expect((await mine.find({ type: 'Box' }))?.props.borderStyle).toBe('round')
   const task = await row('Background command "Listen" completed\nmore', 'task-notification')
   const dim = await task.find({ type: 'Text', text: /Background command "Listen" completed/ })
   expect(dim?.props.dimColor).toBe(true)
