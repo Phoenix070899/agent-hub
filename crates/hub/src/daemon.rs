@@ -14,6 +14,7 @@ use rusqlite::Connection;
 use serde_json::{json, Value};
 
 use crate::db::{self, kind, state, Worker};
+use crate::launch;
 use crate::paths;
 use crate::profile::{self, Launch};
 use crate::proto;
@@ -32,6 +33,8 @@ const SCREEN_LINES: usize = 25;
 pub struct Hub {
     db: Mutex<Connection>,
     live: Mutex<HashMap<i64, Arc<Live>>>,
+    /// Each repo's live Orchestrator terminal.
+    orchestrators: Mutex<HashMap<String, Arc<Live>>>,
     tick: Mutex<u64>,
     changed: Condvar,
     hub_dir: PathBuf,
@@ -53,6 +56,7 @@ pub fn run() -> Result<()> {
     let hub = Arc::new(Hub {
         db: Mutex::new(conn),
         live: Mutex::new(HashMap::new()),
+        orchestrators: Mutex::new(HashMap::new()),
         tick: Mutex::new(0),
         changed: Condvar::new(),
         hub_dir: paths::hub_dir(),
@@ -169,6 +173,68 @@ impl Hub {
         }
     }
 
+    /// The terminal a request names: `{"id": n}` for a Worker, `{"orchestrator": repo}` for the Orchestrator.
+    fn terminal(&self, p: &Value) -> Result<Arc<Live>> {
+        match p.get("orchestrator").and_then(Value::as_str) {
+            Some(repo) => match self.orchestrators.lock().unwrap().get(repo) {
+                Some(live) => Ok(Arc::clone(live)),
+                None => bail!("no live Orchestrator for {repo}"),
+            },
+            None => self.live(id_param(p, "id")?),
+        }
+    }
+
+    /// Starts the repo's Orchestrator, resuming its saved Claude session, unless it is already live.
+    fn open_session(self: &Arc<Self>, p: &Value) -> Result<Value> {
+        let repo = repo::root(Path::new(str_param(p, "repo")?))?;
+        let key = repo.display().to_string();
+        if self.orchestrators.lock().unwrap().contains_key(&key) {
+            return Ok(json!({ "repo": key, "started": false }));
+        }
+        let session = db::session(&self.db(), &key)?;
+        let extra: Vec<String> = p
+            .get("args")
+            .and_then(Value::as_array)
+            .map(|args| args.iter().filter_map(|a| a.as_str().map(String::from)).collect())
+            .unwrap_or_default();
+        let resume = paths::transcript_exists(&session.session_id);
+        let (program, args) = match &self.test_agent {
+            Some(agent) => (agent.clone(), vec!["orchestrator".to_string()]),
+            None => (
+                "claude".to_string(),
+                launch::orchestrator_args(&self.hub_dir, &repo, &session.session_id, resume, &extra)?,
+            ),
+        };
+        let spawn = Spawn {
+            program,
+            args,
+            cwd: repo.clone(),
+            env: self.agent_env(None)?,
+            env_remove: inherited_agent_vars(),
+        };
+        let hub: Weak<Hub> = Arc::downgrade(self);
+        let exited = key.clone();
+        let live = Live::spawn(session.id, spawn, move |_| {
+            if let Some(hub) = hub.upgrade() {
+                hub.orchestrators.lock().unwrap().remove(&exited);
+                hub.notify();
+            }
+        })?;
+        self.orchestrators.lock().unwrap().insert(key.clone(), live);
+        self.notify();
+        Ok(json!({ "repo": key, "started": true, "resumed": resume }))
+    }
+
+    fn list_sessions(&self) -> Result<Value> {
+        let sessions = db::sessions(&self.db())?;
+        let live = self.orchestrators.lock().unwrap();
+        let out: Vec<Value> = sessions
+            .iter()
+            .map(|s| json!({ "repo": s.repo, "session_id": s.session_id, "live": live.contains_key(&s.repo) }))
+            .collect();
+        Ok(json!({ "sessions": out }))
+    }
+
     fn recover(&self) -> Result<()> {
         let db = self.db();
         for worker in db::mark_lost(&db)? {
@@ -190,6 +256,9 @@ impl Hub {
         let request: proto::Request = serde_json::from_str(&line).context("bad request line")?;
         if request.method == "attach" {
             return self.attach(&request.params, reader, stream);
+        }
+        if request.method == "events" {
+            return self.events(&request.params, stream);
         }
         let response = match self.dispatch(&request.method, &request.params, &stream) {
             Ok(result) => proto::ok(result),
@@ -229,11 +298,21 @@ impl Hub {
                 }
                 Ok(json!({}))
             }
-            "worker.resize" => {
-                let live = self.live(id_param(p, "id")?)?;
+            "terminal.resize" => {
+                let live = self.terminal(p)?;
                 live.resize(id_param(p, "rows")? as u16, id_param(p, "cols")? as u16)?;
                 Ok(json!({}))
             }
+            "session.open" => self.open_session(p),
+            "session.close" => {
+                let repo = repo::root(Path::new(str_param(p, "repo")?))?.display().to_string();
+                if let Some(live) = self.orchestrators.lock().unwrap().get(&repo) {
+                    live.kill();
+                }
+                Ok(json!({}))
+            }
+            "sessions.list" => self.list_sessions(),
+            "decide" => self.decide(p),
             "worker.close" => self.close_worker(id_param(p, "id")?),
             "worker.resume" => self.resume_worker(id_param(p, "id")?),
             "send" => {
@@ -276,7 +355,20 @@ impl Hub {
                 stream,
             ),
             "reply" => {
-                db::answer(&self.db(), id_param(p, "id")?, str_param(p, "body")?)?;
+                let id = id_param(p, "id")?;
+                let body = str_param(p, "body")?;
+                let db = self.db();
+                db::answer(&db, id, body)?;
+                if p.get("by_human").and_then(Value::as_bool).unwrap_or(false) {
+                    let question = db::message(&db, id)?;
+                    let worker = db::worker(&db, question.worker_id)?;
+                    let note = format!(
+                        "The human answered question #{id} from w{} in the Hub App:\n{body}",
+                        worker.id
+                    );
+                    db::insert_message(&db, &worker, kind::HUMAN, &note)?;
+                }
+                drop(db);
                 self.notify();
                 Ok(json!({}))
             }
@@ -290,9 +382,9 @@ impl Hub {
                 Ok(json!({ "open_questions": open }))
             }
             "shutdown" => {
-                let live = self.live.lock().unwrap().len();
+                let live = self.live.lock().unwrap().len() + self.orchestrators.lock().unwrap().len();
                 if live > 0 && !p.get("force").and_then(Value::as_bool).unwrap_or(false) {
-                    bail!("{live} Worker(s) still live; close them first or pass --force");
+                    bail!("{live} terminal(s) still live (Workers or Orchestrators); close them first or pass --force");
                 }
                 let killed: Vec<Arc<Live>> = self.live.lock().unwrap().values().cloned().collect();
                 for live in &killed {
@@ -309,6 +401,9 @@ impl Hub {
                     db::mark_closed(&db, live.id)?;
                 }
                 drop(db);
+                for live in self.orchestrators.lock().unwrap().values() {
+                    live.kill();
+                }
                 let _ = std::fs::remove_file(paths::socket());
                 std::thread::spawn(|| {
                     std::thread::sleep(Duration::from_millis(200));
@@ -335,26 +430,34 @@ impl Hub {
                 ("claude".to_string(), args)
             }
         };
-        // This `hub` first on PATH, so the Worker's `hub ask` and its Notification hook reach this daemon.
+        Ok(Spawn {
+            program,
+            args,
+            cwd: PathBuf::from(&worker.cwd),
+            env: self.agent_env(Some(worker.id))?,
+            env_remove: inherited_agent_vars(),
+        })
+    }
+
+    /// Environment for an agent terminal. This `hub` comes first on PATH, so the agent's `hub`
+    /// commands and its Notification hook reach this daemon.
+    fn agent_env(&self, worker: Option<i64>) -> Result<Vec<(String, String)>> {
         let exe_dir = std::env::current_exe()?
             .parent()
             .map(Path::to_path_buf)
             .unwrap_or_default();
         let path = format!("{}:{}", exe_dir.display(), std::env::var("PATH").unwrap_or_default());
-        Ok(Spawn {
-            program,
-            args,
-            cwd: PathBuf::from(&worker.cwd),
-            env: vec![
-                ("PATH".into(), path),
-                ("HUB_WORKER".into(), worker.id.to_string()),
-                ("AGENT_HUB".into(), self.hub_dir.display().to_string()),
-                ("HUB_STATE".into(), paths::state_dir().display().to_string()),
-                ("TERM".into(), "xterm-256color".into()),
-                ("COLORTERM".into(), "truecolor".into()),
-            ],
-            env_remove: inherited_agent_vars(),
-        })
+        let mut env = vec![
+            ("PATH".to_string(), path),
+            ("AGENT_HUB".into(), self.hub_dir.display().to_string()),
+            ("HUB_STATE".into(), paths::state_dir().display().to_string()),
+            ("TERM".into(), "xterm-256color".into()),
+            ("COLORTERM".into(), "truecolor".into()),
+        ];
+        if let Some(id) = worker {
+            env.push(("HUB_WORKER".into(), id.to_string()));
+        }
+        Ok(env)
     }
 
     fn launch(self: &Arc<Self>, worker: &Worker, launch: Launch) -> Result<()> {
@@ -544,7 +647,9 @@ impl Hub {
                         self.report_blocker(&live, "permission_prompt", "A permission prompt is waiting on screen.")?
                     }
                     Look::Working => {
-                        live.blocker.lock().unwrap().take();
+                        if live.blocker.lock().unwrap().take().is_some() {
+                            self.notify();
+                        }
                     }
                     Look::Idle => {
                         // An answered or cancelled prompt ends that blocker; idling after it is a new one.
@@ -552,10 +657,14 @@ impl Hub {
                         if blocker.as_deref() == Some("permission_prompt") {
                             blocker.take();
                             changed_at = Instant::now();
+                            drop(blocker);
+                            self.notify();
                         }
                     }
                 }
-                let started = look == Look::Working || paths::transcript_exists(&worker.session_id);
+                // A permission prompt also means a turn is under way.
+                let started = matches!(look, Look::Working | Look::PermissionPrompt)
+                    || paths::transcript_exists(&worker.session_id);
                 if worker.state == state::STARTING && started {
                     db::set_state(&self.db(), live.id, state::RUNNING)?;
                     self.notify();
@@ -662,6 +771,12 @@ impl Hub {
 
     /// The Dashboard rows: live Workers, and settled ones for a while after.
     fn status(&self, repo: &str) -> Result<Value> {
+        Ok(json!({ "workers": self.rows(repo)? }))
+    }
+
+    /// One row per recent Worker, ordered needs you, running, failed, done. `state` is the
+    /// Dashboard state; `phase` is the Worker's lifecycle state.
+    fn rows(&self, repo: &str) -> Result<Vec<Value>> {
         let db = self.db();
         let now = db::now();
         let mut rows = Vec::new();
@@ -670,15 +785,14 @@ impl Hub {
             if !recent {
                 continue;
             }
-            let needs_you = !db::open_questions(&db, worker.id)?.is_empty()
-                || self
-                    .live(worker.id)
-                    .is_ok_and(|live| live.blocker.lock().unwrap().is_some());
+            let live = self.live(worker.id).ok();
+            let blocker = live.as_ref().and_then(|live| live.blocker.lock().unwrap().clone());
+            let open: Vec<i64> = db::open_questions(&db, worker.id)?.iter().map(|m| m.id).collect();
             let row_state = match worker.state.as_str() {
                 state::DONE => "done",
                 state::BLOCKED | state::LOST => "needs you",
                 state::EXITED => "failed",
-                _ if needs_you => "needs you",
+                _ if blocker.is_some() || !open.is_empty() => "needs you",
                 _ => "running",
             };
             rows.push(json!({
@@ -686,8 +800,14 @@ impl Hub {
                 "profile": worker.profile,
                 "title": worker.title,
                 "state": row_state,
+                "phase": worker.state,
                 "quietSeconds": (now - worker.last_message_at.unwrap_or(worker.created_at)).max(0),
                 "place": place(Path::new(repo), Path::new(&worker.cwd)),
+                "branch": worker.branch,
+                "live": live.is_some(),
+                "blocker": blocker,
+                "openQuestions": open,
+                "finalReport": worker.final_report,
             }));
         }
         let order = |row: &Value| match row["state"].as_str() {
@@ -697,11 +817,121 @@ impl Hub {
             _ => 3,
         };
         rows.sort_by_key(|row| (order(row), row["quietSeconds"].as_i64().unwrap_or(0)));
-        Ok(json!({ "workers": rows }))
+        Ok(rows)
+    }
+
+    /// What needs the human now: open questions and waiting permission prompts, oldest first.
+    fn needs(&self, repo: &str) -> Result<Vec<Value>> {
+        let db = self.db();
+        let mut needs = Vec::new();
+        for worker in db::workers(&db, repo)? {
+            for question in db::open_questions(&db, worker.id)? {
+                needs.push(json!({
+                    "kind": "question",
+                    "message": question.id,
+                    "worker": format!("w{}", worker.id),
+                    "profile": worker.profile,
+                    "title": worker.title,
+                    "body": question.body,
+                    "at": question.created_at,
+                }));
+            }
+            let blocker = self
+                .live(worker.id)
+                .ok()
+                .and_then(|live| live.blocker.lock().unwrap().clone());
+            if let (Some(blocker), Some(message)) = (blocker, db::last_message(&db, worker.id, kind::BLOCKER)?) {
+                needs.push(json!({
+                    "kind": blocker,
+                    "message": message.id,
+                    "worker": format!("w{}", worker.id),
+                    "profile": worker.profile,
+                    "title": worker.title,
+                    "body": message.body,
+                    "at": message.created_at,
+                }));
+            }
+        }
+        needs.sort_by_key(|need| need["at"].as_i64().unwrap_or(0));
+        Ok(needs)
+    }
+
+    /// Everything the Hub App draws for one Hub Session.
+    fn snapshot(&self, repo: &str) -> Result<Value> {
+        Ok(json!({
+            "repo": repo,
+            "orchestrator": { "live": self.orchestrators.lock().unwrap().contains_key(repo) },
+            "workers": self.rows(repo)?,
+            "needs": self.needs(repo)?,
+        }))
+    }
+
+    /// Streams a snapshot line now, after every change, and every 5 seconds, until the client leaves.
+    fn events(&self, p: &Value, mut stream: UnixStream) -> Result<()> {
+        let repo = match str_param(p, "repo").and_then(|repo| repo::root(Path::new(repo))) {
+            Ok(repo) => repo.display().to_string(),
+            Err(error) => return proto::write_line(&mut stream, &proto::err(&error)),
+        };
+        proto::write_line(&mut stream, &proto::ok(json!({ "repo": repo })))?;
+        loop {
+            let seen = *self.tick.lock().unwrap();
+            if proto::write_line(&mut stream, &self.snapshot(&repo)?).is_err() {
+                return Ok(());
+            }
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                let guard = self.tick.lock().unwrap();
+                let now = Instant::now();
+                if *guard != seen || now >= deadline {
+                    break;
+                }
+                let _ = self.changed.wait_timeout(guard, deadline - now);
+            }
+            if peer_gone(&stream) {
+                return Ok(());
+            }
+        }
+    }
+
+    /// The human's answer to a waiting permission prompt, from the Hub App: press the key on the
+    /// Worker, then tell the Orchestrator, so it never has to be typed to.
+    fn decide(&self, p: &Value) -> Result<Value> {
+        let id = id_param(p, "worker")?;
+        let approve = param(p, "approve")?
+            .as_bool()
+            .context("approve must be true or false")?;
+        let live = self.live(id)?;
+        let screen = live.screen();
+        if screen::look(&screen) != Look::PermissionPrompt {
+            bail!("no permission prompt is waiting on w{id}");
+        }
+        let prompt = screen::prompt_lines(&screen);
+        if approve {
+            live.write(b"\r")?;
+        } else {
+            live.write(b"\x1b")?;
+            std::thread::sleep(Duration::from_millis(500));
+            let note = p
+                .get("note")
+                .and_then(Value::as_str)
+                .filter(|note| !note.trim().is_empty())
+                .unwrap_or("Do not run it. Continue another way within your Task, or finish blocked with hub done.");
+            live.write(format!("The human denied that command. {note}").as_bytes())?;
+            std::thread::sleep(Duration::from_millis(150));
+            live.write(b"\r")?;
+        }
+        let db = self.db();
+        let worker = db::worker(&db, id)?;
+        let verb = if approve { "approved" } else { "denied" };
+        let body = format!("The human {verb} this permission prompt on w{id} in the Hub App:\n{prompt}");
+        db::insert_message(&db, &worker, kind::HUMAN, &body)?;
+        drop(db);
+        self.notify();
+        Ok(json!({}))
     }
 
     fn attach(&self, p: &Value, mut reader: BufReader<UnixStream>, mut stream: UnixStream) -> Result<()> {
-        let live = match id_param(p, "id").and_then(|id| self.live(id)) {
+        let live = match self.terminal(p) {
             Ok(live) => live,
             Err(error) => return proto::write_line(&mut stream, &proto::err(&error)),
         };

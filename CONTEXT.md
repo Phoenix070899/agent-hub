@@ -51,3 +51,7 @@ _Avoid_: status panel, monitor
 **Hub Daemon**:
 The long-running process that owns every Worker's terminal, worktree, and messages, so Workers outlive the Orchestrator and the app.
 _Avoid_: server, backend, runtime
+
+**Hub App**:
+The native macOS window onto a Hub Session: its Orchestrator, Workers, and Needs you items; it only views and drives the Hub Daemon.
+_Avoid_: client, GUI, frontend

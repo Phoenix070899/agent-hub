@@ -326,7 +326,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             println!("Final Report sent. Stop here and stay idle.");
         }
         Command::Notify => notify(),
-        Command::Attach { worker } => attach::run(parse_id(&worker)?)?,
+        Command::Attach { worker } => attach::run(json!({ "id": parse_id(&worker)? }), &worker)?,
         Command::Open { worker } => open(parse_id(&worker)?)?,
     }
     Ok(ExitCode::SUCCESS)
@@ -343,6 +343,7 @@ fn print_message(m: &Value) {
         ),
         "exited" => format!("No Final Report. Check: hub worker read {worker}; then start the Task again or report it"),
         "lost" => format!("Resume: hub worker resume {worker}"),
+        "human" => "The human acted in the Hub App. Reflect it; do not redo it".to_string(),
         _ => String::new(),
     };
     let kind = match m["kind"].as_str().unwrap_or("") {

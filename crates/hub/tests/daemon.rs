@@ -71,6 +71,20 @@ impl Hub {
         String::from_utf8_lossy(&out.stderr).into_owned()
     }
 
+    /// One request on the daemon socket, as the Hub App sends it.
+    fn call(&self, method: &str, params: serde_json::Value) -> serde_json::Value {
+        let mut stream = UnixStream::connect(self.state.join("hubd.sock")).unwrap();
+        let request = serde_json::json!({ "method": method, "params": params });
+        stream.write_all(format!("{request}\n").as_bytes()).unwrap();
+        let mut line = String::new();
+        BufReader::new(stream).read_line(&mut line).unwrap();
+        serde_json::from_str(&line).unwrap()
+    }
+
+    fn repo_key(&self) -> String {
+        self.repo.canonicalize().unwrap().display().to_string()
+    }
+
     fn wait(&self) -> String {
         self.ok(&["wait", "--timeout", "15"])
     }
@@ -238,4 +252,114 @@ fn a_forced_shutdown_closes_workers_instead_of_losing_them() {
     assert!(hub.ok(&["worker", "list"]).contains("No open Workers."));
     assert!(hub.ok(&["wait", "--timeout", "1"]).contains("No messages"));
     assert_eq!(hub.status()[0]["state"], "failed");
+}
+
+#[test]
+fn the_daemon_owns_one_orchestrator_per_repo() {
+    let hub = Hub::new("orch");
+    hub.ok(&["status"]); // starts the daemon
+    let repo = hub.repo_key();
+    let first = hub.call("session.open", serde_json::json!({ "repo": repo }));
+    assert_eq!(first["result"]["started"], true, "{first}");
+    let again = hub.call("session.open", serde_json::json!({ "repo": repo }));
+    assert_eq!(again["result"]["started"], false, "{again}");
+    let sessions = hub.call("sessions.list", serde_json::json!({}));
+    assert_eq!(sessions["result"]["sessions"][0]["repo"], repo);
+    assert_eq!(sessions["result"]["sessions"][0]["live"], true);
+
+    let mut stream = UnixStream::connect(hub.state.join("hubd.sock")).unwrap();
+    let request =
+        serde_json::json!({ "method": "attach", "params": { "orchestrator": repo, "rows": 30, "cols": 100 } });
+    stream.write_all(format!("{request}\n").as_bytes()).unwrap();
+    stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    let mut seen = Vec::new();
+    let mut buf = [0u8; 4096];
+    while !String::from_utf8_lossy(&seen).contains("Working") {
+        let n = stream.read(&mut buf).expect("orchestrator output");
+        assert!(n > 0);
+        seen.extend_from_slice(&buf[..n]);
+    }
+
+    hub.call("session.close", serde_json::json!({ "repo": repo }));
+    hub.eventually("the Orchestrator to stop", || {
+        hub.call("sessions.list", serde_json::json!({}))["result"]["sessions"][0]["live"] == false
+    });
+}
+
+#[test]
+fn events_stream_a_snapshot_on_every_change() {
+    let hub = Hub::new("events");
+    hub.ok(&["status"]);
+    let mut stream = UnixStream::connect(hub.state.join("hubd.sock")).unwrap();
+    let request = serde_json::json!({ "method": "events", "params": { "repo": hub.repo_key() } });
+    stream.write_all(format!("{request}\n").as_bytes()).unwrap();
+    stream.set_read_timeout(Some(Duration::from_secs(15))).unwrap();
+    let mut lines = BufReader::new(stream).lines();
+    assert!(lines.next().unwrap().unwrap().contains("\"ok\":true"));
+    let first: serde_json::Value = serde_json::from_str(&lines.next().unwrap().unwrap()).unwrap();
+    assert_eq!(first["workers"].as_array().unwrap().len(), 0);
+
+    hub.ok(&["worker", "start", "bash", "--spec", "ask about color"]);
+    loop {
+        let snapshot: serde_json::Value = serde_json::from_str(&lines.next().unwrap().unwrap()).unwrap();
+        if snapshot["needs"].as_array().is_some_and(|needs| !needs.is_empty()) {
+            assert_eq!(snapshot["needs"][0]["kind"], "question");
+            assert_eq!(snapshot["needs"][0]["body"], "Which color?");
+            assert_eq!(snapshot["workers"][0]["state"], "needs you");
+            break;
+        }
+    }
+}
+
+#[test]
+fn approving_a_prompt_presses_it_and_tells_the_orchestrator() {
+    let hub = Hub::new("approve");
+    hub.ok(&["worker", "start", "bash", "--spec", "prompt me"]);
+    let blocker = hub.wait();
+    assert!(blocker.contains("blocker from w1"), "{blocker}");
+    let decided = hub.call("decide", serde_json::json!({ "worker": 1, "approve": true }));
+    assert_eq!(decided["ok"], true, "{decided}");
+    hub.eventually("the prompt to be approved", || {
+        hub.ok(&["worker", "read", "w1"]).contains("approved")
+    });
+    let told = hub.wait();
+    assert!(told.contains("human from w1"), "{told}");
+    assert!(told.contains("The human approved this permission prompt"));
+    assert!(told.contains("rm -rf junk"));
+    let again = hub.call("decide", serde_json::json!({ "worker": 1, "approve": true }));
+    assert_eq!(again["ok"], false, "a cleared prompt cannot be approved twice");
+}
+
+#[test]
+fn denying_a_prompt_tells_the_worker_why() {
+    let hub = Hub::new("deny");
+    hub.ok(&["worker", "start", "bash", "--spec", "prompt me"]);
+    hub.wait();
+    hub.call(
+        "decide",
+        serde_json::json!({ "worker": 1, "approve": false, "note": "Use trash instead." }),
+    );
+    hub.eventually("the worker to hear the denial", || {
+        let screen = hub.ok(&["worker", "read", "w1"]);
+        screen.contains("denied:") && screen.contains("Use trash instead.")
+    });
+    assert!(hub.wait().contains("The human denied this permission prompt"));
+}
+
+#[test]
+fn a_human_reply_in_the_app_is_reported() {
+    let hub = Hub::new("hreply");
+    hub.ok(&["worker", "start", "bash", "--spec", "ask about color"]);
+    hub.wait();
+    let replied = hub.call(
+        "reply",
+        serde_json::json!({ "id": 1, "body": "green", "by_human": true }),
+    );
+    assert_eq!(replied["ok"], true, "{replied}");
+    let messages = hub.wait();
+    assert!(
+        messages.contains("The human answered question #1 from w1 in the Hub App:\ngreen"),
+        "{messages}"
+    );
+    assert!(messages.contains("answer was green"));
 }

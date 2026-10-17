@@ -5,7 +5,7 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use anyhow::Result;
-use serde_json::json;
+use serde_json::{json, Value};
 
 use crate::proto;
 
@@ -43,17 +43,19 @@ fn restore_and_exit(note: &str) -> ! {
     std::process::exit(0)
 }
 
-pub fn run(id: i64) -> Result<()> {
+/// Attaches to one terminal: `{"id": n}` for a Worker, `{"orchestrator": repo}` for the Orchestrator.
+pub fn run(target: Value, label: &str) -> Result<()> {
     let (rows, cols) = size();
+    let mut params = target.clone();
+    params["rows"] = json!(rows);
+    params["cols"] = json!(cols);
     let mut stream = proto::connect()?;
-    proto::write_line(
-        &mut stream,
-        &json!({ "method": "attach", "params": { "id": id, "rows": rows, "cols": cols } }),
-    )?;
+    proto::write_line(&mut stream, &json!({ "method": "attach", "params": params }))?;
     let mut reader = BufReader::new(stream.try_clone()?);
     proto::into_result(proto::read_line(&mut reader)?)?;
     raw_mode();
 
+    let ended = format!("{label} ended");
     std::thread::spawn(move || {
         let mut stdout = std::io::stdout();
         let mut buf = [0u8; 16 * 1024];
@@ -66,7 +68,7 @@ pub fn run(id: i64) -> Result<()> {
                 }
             }
         }
-        restore_and_exit(&format!("w{id} ended"));
+        restore_and_exit(&ended);
     });
 
     std::thread::spawn(move || {
@@ -76,7 +78,10 @@ pub fn run(id: i64) -> Result<()> {
             let now = size();
             if now != last {
                 last = now;
-                let _ = proto::call("worker.resize", json!({ "id": id, "rows": now.0, "cols": now.1 }));
+                let mut params = target.clone();
+                params["rows"] = json!(now.0);
+                params["cols"] = json!(now.1);
+                let _ = proto::call("terminal.resize", params);
             }
         }
     });
@@ -91,10 +96,10 @@ pub fn run(id: i64) -> Result<()> {
         let input = &buf[..n];
         if let Some(at) = input.iter().position(|&b| b == DETACH) {
             let _ = stream.write_all(&input[..at]);
-            restore_and_exit(&format!("detached; w{id} keeps running"));
+            restore_and_exit(&format!("detached; {label} keeps running"));
         }
         if stream.write_all(input).is_err() {
-            restore_and_exit(&format!("w{id} ended"));
+            restore_and_exit(&format!("{label} ended"));
         }
     }
 }

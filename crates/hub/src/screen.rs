@@ -39,6 +39,24 @@ fn is_spinner(line: &str) -> bool {
     glyph_word && after.chars().next().is_some_and(|c| c.is_ascii_digit())
 }
 
+/// The permission prompt's own lines: what is asked about, up to "Do you want to ...".
+pub fn prompt_lines(screen: &str) -> String {
+    let lines: Vec<&str> = screen.lines().map(str::trim).collect();
+    let Some(ask) = lines.iter().rposition(|line| line.starts_with("Do you want to")) else {
+        return String::new();
+    };
+    let start = lines[..ask]
+        .iter()
+        .rposition(|line| line.starts_with('─'))
+        .map_or(0, |at| at + 1);
+    lines[start..=ask]
+        .iter()
+        .filter(|line| !line.is_empty() && !line.starts_with('╌'))
+        .copied()
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// The last `count` non-blank lines, right-trimmed.
 pub fn tail(screen: &str, count: usize) -> String {
     let lines: Vec<&str> = screen
@@ -80,6 +98,15 @@ mod tests {
     #[test]
     fn typed_ellipsis_in_the_prompt_is_not_a_spinner() {
         assert_eq!(look("❯ wait… (1 more thing)"), Look::Idle);
+    }
+
+    #[test]
+    fn prompt_lines_are_the_box_above_the_question() {
+        let screen = "⏺ Running…\n────────\n Bash command\n Remove junk\n╌╌╌╌\n rm -rf junk\n╌╌╌╌\n Do you want to proceed?\n ❯ 1. Yes";
+        assert_eq!(
+            prompt_lines(screen),
+            "Bash command\nRemove junk\nrm -rf junk\nDo you want to proceed?"
+        );
     }
 
     #[test]

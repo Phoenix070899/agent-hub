@@ -33,6 +33,8 @@ pub mod kind {
     pub const BLOCKER: &str = "blocker";
     pub const EXITED: &str = "exited";
     pub const LOST: &str = "lost";
+    /// The human acted directly in the Hub App; the daemon tells the Orchestrator.
+    pub const HUMAN: &str = "human";
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -103,7 +105,13 @@ pub fn open(path: &Path) -> Result<Connection> {
            answer text,
            answered_at integer
          );
-         create index if not exists messages_undelivered on messages(repo, delivered_at);",
+         create index if not exists messages_undelivered on messages(repo, delivered_at);
+         create table if not exists sessions (
+           id integer primary key,
+           repo text not null unique,
+           session_id text not null,
+           created_at integer not null
+         );",
     )?;
     Ok(conn)
 }
@@ -313,6 +321,60 @@ pub fn answer(conn: &Connection, question_id: i64, text: &str) -> Result<()> {
     Ok(())
 }
 
+/// A Hub Session's Orchestrator: one per repo, on one Claude session for its whole life.
+#[derive(Debug, Clone, Serialize)]
+pub struct Session {
+    pub id: i64,
+    pub repo: String,
+    pub session_id: String,
+}
+
+/// The repo's session, created on first use.
+pub fn session(conn: &Connection, repo: &str) -> Result<Session> {
+    conn.execute(
+        "insert or ignore into sessions (repo, session_id, created_at) values (?1, ?2, ?3)",
+        params![repo, uuid::Uuid::new_v4().to_string(), now()],
+    )?;
+    Ok(conn.query_row(
+        "select id, repo, session_id from sessions where repo = ?1",
+        [repo],
+        |row| {
+            Ok(Session {
+                id: row.get(0)?,
+                repo: row.get(1)?,
+                session_id: row.get(2)?,
+            })
+        },
+    )?)
+}
+
+pub fn sessions(conn: &Connection) -> Result<Vec<Session>> {
+    let mut stmt = conn.prepare("select id, repo, session_id from sessions order by repo")?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(Session {
+                id: row.get(0)?,
+                repo: row.get(1)?,
+                session_id: row.get(2)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+/// The Worker's newest message of a kind, if any.
+pub fn last_message(conn: &Connection, worker_id: i64, message_kind: &str) -> Result<Option<Message>> {
+    Ok(conn
+        .query_row(
+            &format!(
+                "select {MESSAGE_COLUMNS} from messages where worker_id = ?1 and kind = ?2 order by id desc limit 1"
+            ),
+            params![worker_id, message_kind],
+            message_row,
+        )
+        .optional()?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -366,6 +428,15 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("hub worker key"));
+    }
+
+    #[test]
+    fn one_session_per_repo() {
+        let (conn, _) = fixture();
+        let first = session(&conn, "/r").unwrap();
+        assert_eq!(session(&conn, "/r").unwrap().session_id, first.session_id);
+        assert_ne!(session(&conn, "/other").unwrap().session_id, first.session_id);
+        assert_eq!(sessions(&conn).unwrap().len(), 2);
     }
 
     #[test]
