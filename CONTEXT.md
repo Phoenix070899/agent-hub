@@ -47,3 +47,7 @@ _Avoid_: memory, settings
 **Dashboard**:
 The always-visible band above the Orchestrator's prompt listing every Worker of the Hub Session with its state.
 _Avoid_: status panel, monitor
+
+**Hub Daemon**:
+The long-running process that owns every Worker's terminal, worktree, and messages, so Workers outlive the Orchestrator and the app.
+_Avoid_: server, backend, runtime
