@@ -44,6 +44,13 @@ pub struct Hub {
 
 pub fn run() -> Result<()> {
     std::fs::create_dir_all(paths::state_dir())?;
+    // One daemon per state folder: two `hub` commands at once may both start one, and the second
+    // must not take the socket from the first. The lock lives as long as this process.
+    let lock = std::fs::File::create(paths::state_dir().join("hubd.lock"))?;
+    if unsafe { libc::flock(std::os::fd::AsRawFd::as_raw_fd(&lock), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        bail!("a Hub Daemon is already running for {}", paths::state_dir().display());
+    }
+    std::mem::forget(lock);
     let socket = paths::socket();
     if UnixStream::connect(&socket).is_ok() {
         bail!("a Hub Daemon is already running on {}", socket.display());
@@ -836,11 +843,14 @@ impl Hub {
                     "at": question.created_at,
                 }));
             }
-            let blocker = self
-                .live(worker.id)
-                .ok()
-                .and_then(|live| live.blocker.lock().unwrap().clone());
+            let Ok(live) = self.live(worker.id) else { continue };
+            let blocker = live.blocker.lock().unwrap().clone();
             if let (Some(blocker), Some(message)) = (blocker, db::last_message(&db, worker.id, kind::BLOCKER)?) {
+                // The prompt's own lines, so the Hub App can show the exact command, not the whole screen.
+                let prompt = match blocker.as_str() {
+                    "permission_prompt" => screen::prompt_lines(&live.screen()),
+                    _ => String::new(),
+                };
                 needs.push(json!({
                     "kind": blocker,
                     "message": message.id,
@@ -848,6 +858,7 @@ impl Hub {
                     "profile": worker.profile,
                     "title": worker.title,
                     "body": message.body,
+                    "prompt": prompt,
                     "at": message.created_at,
                 }));
             }

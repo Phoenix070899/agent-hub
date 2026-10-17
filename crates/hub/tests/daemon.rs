@@ -317,6 +317,17 @@ fn approving_a_prompt_presses_it_and_tells_the_orchestrator() {
     hub.ok(&["worker", "start", "bash", "--spec", "prompt me"]);
     let blocker = hub.wait();
     assert!(blocker.contains("blocker from w1"), "{blocker}");
+    let mut events = UnixStream::connect(hub.state.join("hubd.sock")).unwrap();
+    let request = serde_json::json!({ "method": "events", "params": { "repo": hub.repo_key() } });
+    events.write_all(format!("{request}\n").as_bytes()).unwrap();
+    let mut lines = BufReader::new(events).lines();
+    lines.next();
+    let snapshot: serde_json::Value = serde_json::from_str(&lines.next().unwrap().unwrap()).unwrap();
+    assert_eq!(snapshot["needs"][0]["kind"], "permission_prompt");
+    assert_eq!(
+        snapshot["needs"][0]["prompt"],
+        "Bash command\nrm -rf junk\nDo you want to proceed?"
+    );
     let decided = hub.call("decide", serde_json::json!({ "worker": 1, "approve": true }));
     assert_eq!(decided["ok"], true, "{decided}");
     hub.eventually("the prompt to be approved", || {
@@ -362,4 +373,32 @@ fn a_human_reply_in_the_app_is_reported() {
         "{messages}"
     );
     assert!(messages.contains("answer was green"));
+}
+
+#[test]
+fn simultaneous_starts_leave_one_daemon() {
+    let hub = Hub::new("race");
+    let starts: Vec<_> = (0..10)
+        .map(|_| {
+            Command::new(env!("CARGO_BIN_EXE_hub"))
+                .arg("daemon")
+                .env("HUB_STATE", &hub.state)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap()
+        })
+        .collect();
+    std::thread::sleep(Duration::from_millis(1500));
+    let holders = Command::new("lsof")
+        .arg("-t")
+        .arg(hub.state.join("hub.db"))
+        .output()
+        .unwrap();
+    let alive = String::from_utf8_lossy(&holders.stdout).split_whitespace().count();
+    for mut start in starts {
+        let _ = start.kill();
+        let _ = start.wait();
+    }
+    assert_eq!(alive, 1, "exactly one daemon holds this state folder");
 }

@@ -42,6 +42,8 @@ enum Command {
         #[arg(long)]
         force: bool,
     },
+    /// Hub Sessions the daemon knows, and whether each Orchestrator is live.
+    Sessions,
     /// Dashboard rows for this repo's Workers.
     Status {
         #[arg(long)]
@@ -231,6 +233,17 @@ fn print_json(value: &Value) -> Result<()> {
 fn run(cli: Cli) -> Result<ExitCode> {
     match cli.command {
         Command::Daemon => daemon::run()?,
+        Command::Sessions => {
+            let result = proto::call("sessions.list", json!({}))?;
+            for session in result["sessions"].as_array().into_iter().flatten() {
+                let live = if session["live"].as_bool() == Some(true) {
+                    "live"
+                } else {
+                    "stopped"
+                };
+                println!("{live:<8} {}", session["repo"].as_str().unwrap_or(""));
+            }
+        }
         Command::Shutdown { force } => {
             proto::call("shutdown", json!({ "force": force }))?;
         }
