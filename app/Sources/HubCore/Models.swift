@@ -12,13 +12,19 @@ public struct Snapshot: Decodable, Equatable, Sendable {
     public let needs: [Need]
     /// Account-wide; every session's snapshot carries the same.
     public let usage: Usage?
+    /// The session's open shells, for the split panes.
+    public let shells: [Int]?
 
-    public init(repo: String, orchestrator: Orchestrator, workers: [WorkerRow], needs: [Need], usage: Usage? = nil) {
+    public init(
+        repo: String, orchestrator: Orchestrator, workers: [WorkerRow], needs: [Need],
+        usage: Usage? = nil, shells: [Int]? = nil
+    ) {
         self.repo = repo
         self.orchestrator = orchestrator
         self.workers = workers
         self.needs = needs
         self.usage = usage
+        self.shells = shells
     }
 
     public static func empty(repo: String) -> Snapshot {
@@ -112,12 +118,14 @@ public struct SessionInfo: Decodable, Equatable, Identifiable, Sendable {
 public enum TerminalTarget: Hashable, Sendable {
     case orchestrator(repo: String)
     case worker(id: Int)
+    case shell(id: Int)
 
     /// The daemon's way of naming it in `attach` and `terminal.resize`.
     public var params: [String: Any] {
         switch self {
         case .orchestrator(let repo): return ["orchestrator": repo]
         case .worker(let id): return ["id": id]
+        case .shell(let id): return ["shell": id]
         }
     }
 }

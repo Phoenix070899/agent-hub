@@ -3,7 +3,7 @@ import PackageDescription
 
 let package = Package(
     name: "HubApp",
-    platforms: [.macOS(.v14)],
+    platforms: [.macOS("26.0")],
     dependencies: [
         .package(url: "https://github.com/migueldeicaza/SwiftTerm", from: "1.2.0"),
     ],

@@ -20,6 +20,29 @@ struct HubApp: App {
                 Button("New Session…") { model.chooseSession() }
                     .keyboardShortcut("n")
             }
+            CommandMenu("Pane") {
+              Group {
+                Button("New Shell Tab") { model.newShellTab() }
+                    .keyboardShortcut("t")
+                Button("Split Right") { model.split(.horizontal) }
+                    .keyboardShortcut("d")
+                Button("Split Down") { model.split(.vertical) }
+                    .keyboardShortcut("d", modifiers: [.command, .shift])
+                Divider()
+                Button("Next Pane") { model.moveFocus(forward: true) }
+                    .keyboardShortcut(.rightArrow, modifiers: [.command, .option])
+                Button("Previous Pane") { model.moveFocus(forward: false) }
+                    .keyboardShortcut(.leftArrow, modifiers: [.command, .option])
+                Divider()
+                Button("Close Tab") { model.closeActiveTab() }
+                    .keyboardShortcut("w")
+              }
+              .disabled(model.selectedRepo == nil)
+            }
+        }
+
+        Settings {
+            SettingsView().environmentObject(model)
         }
 
         MenuBarExtra {

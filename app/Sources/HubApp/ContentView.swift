@@ -69,7 +69,7 @@ struct Sidebar: View {
         .safeAreaInset(edge: .bottom) {
             HStack {
                 Button { model.chooseSession() } label: { Label("New Session", systemImage: "plus") }
-                    .buttonStyle(.borderless)
+                    .buttonStyle(.glass)
                 Spacer()
                 if !model.connected {
                     Label("Reconnecting", systemImage: "bolt.horizontal.circle")
@@ -77,9 +77,8 @@ struct Sidebar: View {
                 }
             }
             .font(.callout)
-            .padding(.horizontal, 14)
-            .padding(.vertical, 9)
-            .background(.bar)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
         }
     }
 }
@@ -117,13 +116,9 @@ struct SessionCard: View {
                 .padding(6)
             }
         }
-        .background(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(Color.primary.opacity(cardSelected ? 0.08 : 0.04))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .strokeBorder(cardSelected ? Color.accentColor.opacity(0.7) : Color.primary.opacity(0.08), lineWidth: 1)
+        .glassEffect(
+            cardSelected ? .regular.tint(Color.accentColor.opacity(0.22)).interactive() : .regular.interactive(),
+            in: RoundedRectangle(cornerRadius: 14, style: .continuous)
         )
         .opacity(live || !workers.isEmpty ? 1 : 0.6)
         .contextMenu {
@@ -244,44 +239,21 @@ struct Detail: View {
                 NeedsInbox(needs: needs)
                 Divider()
             }
-            terminal
-            UsageFooter(usage: model.usage)
-        }
-    }
-
-    @ViewBuilder private var terminal: some View {
-        switch model.selection {
-        case .worker(let repo, let id)?:
-            if let worker = model.snapshots[repo]?.workers.first(where: { $0.id == id }) {
-                if worker.live, let number = worker.number {
-                    TerminalPane(target: .worker(id: number), client: model.client)
-                } else {
-                    FinishedWorker(worker: worker)
-                }
-            }
-        case .orchestrator(let repo)?:
-            if model.snapshots[repo]?.orchestrator.live == true {
-                TerminalPane(target: .orchestrator(repo: repo), client: model.client)
+            if let repo = model.selectedRepo {
+                PaneTree(layout: model.layout(for: repo), repo: repo)
             } else {
                 ContentUnavailableView {
-                    Label("Orchestrator stopped", systemImage: "sparkles")
+                    Label("No Hub Session", systemImage: "folder.badge.plus")
                 } description: {
-                    Text("Its Workers keep running. Starting it resumes its conversation.")
+                    Text("Open a git repo to start its Orchestrator.")
                 } actions: {
-                    Button("Start Orchestrator") { model.open(repo: repo) }
-                        .buttonStyle(.borderedProminent)
+                    Button("New Session…") { model.chooseSession() }
+                        .buttonStyle(.glassProminent)
                 }
             }
-        case nil:
-            ContentUnavailableView {
-                Label("No Hub Session", systemImage: "folder.badge.plus")
-            } description: {
-                Text("Open a git repo to start its Orchestrator.")
-            } actions: {
-                Button("New Session…") { model.chooseSession() }
-                    .buttonStyle(.borderedProminent)
-            }
+            UsageFooter(usage: model.usage)
         }
+        .background(TerminalTheme.color(model.appearance.theme.background))
     }
 }
 
@@ -372,11 +344,12 @@ struct UsageFooter: View {
         }
         .font(.callout)
         .labelStyle(.titleAndIcon)
-        .padding(.horizontal, 14)
-        .frame(height: 36)
+        .padding(.horizontal, 16)
+        .frame(height: 32)
         .frame(maxWidth: .infinity)
-        .background(.bar)
-        .overlay(alignment: .top) { Divider() }
+        .glassEffect(.regular, in: Capsule())
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
     }
 
     private var updatedHelp: String {
@@ -423,5 +396,251 @@ struct LimitGauge: View {
             }
         }
         .help(limit.resets.map { "\(limit.name): \(limit.percent)% used, resets \($0)" } ?? "\(limit.name): \(limit.percent)% used")
+    }
+}
+
+extension TerminalTheme {
+    static func color(_ hex: String) -> Color {
+        guard let c = rgb(hex) else { return .clear }
+        return Color(.sRGB, red: c.red, green: c.green, blue: c.blue)
+    }
+}
+
+/// Where a split's divider sits, as a fraction of its length.
+final class SplitRatio: ObservableObject {
+    @Published var value: CGFloat = 0.5
+    var dragStart: CGFloat?
+}
+
+/// Two panes split evenly, with a divider to drag.
+struct SplitBox<First: View, Second: View>: View {
+    let axis: SplitAxis
+    @ViewBuilder let first: () -> First
+    @ViewBuilder let second: () -> Second
+    @StateObject private var ratio = SplitRatio()
+    private let divider: CGFloat = 1
+    private let minimum: CGFloat = 120
+
+    var body: some View {
+        GeometryReader { geometry in
+            let length = axis == .horizontal ? geometry.size.width : geometry.size.height
+            let usable = max(length - divider, 0)
+            let firstLength = min(max(usable * ratio.value, min(minimum, usable / 2)), usable - min(minimum, usable / 2))
+            let layout = axis == .horizontal
+                ? AnyLayout(HStackLayout(spacing: 0))
+                : AnyLayout(VStackLayout(spacing: 0))
+            layout {
+                first()
+                    .frame(
+                        width: axis == .horizontal ? firstLength : nil,
+                        height: axis == .vertical ? firstLength : nil
+                    )
+                Rectangle()
+                    .fill(Color(nsColor: .separatorColor))
+                    .frame(width: axis == .horizontal ? divider : nil, height: axis == .vertical ? divider : nil)
+                    .overlay {
+                        // A wider grab area than the 1-point line.
+                        Color.clear
+                            .frame(width: axis == .horizontal ? 8 : nil, height: axis == .vertical ? 8 : nil)
+                            .contentShape(Rectangle())
+                            .onHover { inside in
+                                let cursor: NSCursor = axis == .horizontal ? .resizeLeftRight : .resizeUpDown
+                                if inside { cursor.push() } else { NSCursor.pop() }
+                            }
+                            .gesture(
+                                DragGesture(minimumDistance: 1)
+                                    .onChanged { drag in
+                                        let start = ratio.dragStart ?? ratio.value
+                                        ratio.dragStart = start
+                                        let moved = axis == .horizontal ? drag.translation.width : drag.translation.height
+                                        ratio.value = min(max(start + moved / max(usable, 1), 0.1), 0.9)
+                                    }
+                                    .onEnded { _ in ratio.dragStart = nil }
+                            )
+                    }
+                second()
+            }
+        }
+    }
+}
+
+/// A session's panes: split right or down, each pane with its own tabs.
+struct PaneTree: View {
+    let layout: PaneLayout
+    let repo: String
+
+    var body: some View {
+        switch layout {
+        case .group(let group):
+            PaneView(group: group, repo: repo)
+        case .split(let axis, let first, let second):
+            SplitBox(axis: axis) {
+                PaneTree(layout: first, repo: repo)
+            } second: {
+                PaneTree(layout: second, repo: repo)
+            }
+        }
+    }
+}
+
+/// One pane: its tab bar, then the terminal of the tab showing.
+struct PaneView: View {
+    @EnvironmentObject private var model: AppModel
+    let group: TabGroup
+    let repo: String
+
+    private var isFocused: Bool { model.focusedGroup(in: repo) == group.id }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            PaneTabBar(group: group, repo: repo, isFocused: isFocused)
+            content
+                .frame(minWidth: 120, minHeight: 60)
+        }
+        .overlay {
+            let split = model.layout(for: repo).groups.count > 1
+            Rectangle()
+                .strokeBorder(Color.accentColor.opacity(split && isFocused ? 0.7 : 0), lineWidth: 1)
+                .allowsHitTesting(false)
+        }
+    }
+
+    @ViewBuilder private var content: some View {
+        let snapshot = model.snapshots[repo]
+        let focus = { model.focus(group: group.id, in: repo) }
+        switch group.activeTab {
+        case .orchestrator?:
+            if snapshot?.orchestrator.live == true {
+                TerminalPane(target: .orchestrator(repo: repo), client: model.client, appearance: model.appearance,
+                             isFocused: isFocused, onFocus: focus)
+            } else {
+                ContentUnavailableView {
+                    Label("Orchestrator stopped", systemImage: "sparkles")
+                } description: {
+                    Text("Its Workers keep running. Starting it resumes its conversation.")
+                } actions: {
+                    Button("Start Orchestrator") { model.open(repo: repo) }
+                        .buttonStyle(.glassProminent)
+                }
+            }
+        case .worker(let id)?:
+            if let worker = snapshot?.workers.first(where: { $0.id == id }) {
+                if worker.live, let number = worker.number {
+                    TerminalPane(target: .worker(id: number), client: model.client, appearance: model.appearance,
+                                 isFocused: isFocused, onFocus: focus)
+                } else {
+                    FinishedWorker(worker: worker)
+                }
+            } else {
+                ContentUnavailableView("\(id) is gone", systemImage: "questionmark.square.dashed")
+            }
+        case .shell(let id)?:
+            TerminalPane(target: .shell(id: id), client: model.client, appearance: model.appearance,
+                         isFocused: isFocused, onFocus: focus)
+        case nil:
+            Color.clear
+        }
+    }
+}
+
+/// The tabs of one pane, and only that pane.
+struct PaneTabBar: View {
+    @EnvironmentObject private var model: AppModel
+    let group: TabGroup
+    let repo: String
+    let isFocused: Bool
+
+    var body: some View {
+        HStack(spacing: 0) {
+            ScrollView(.horizontal, showsIndicators: false) {
+                GlassEffectContainer(spacing: 6) {
+                HStack(spacing: 4) {
+                    ForEach(Array(group.tabs.enumerated()), id: \.element) { index, tab in
+                        let look = self.look(of: tab)
+                        TabButton(
+                            title: look.title,
+                            symbol: look.symbol,
+                            tint: look.tint,
+                            selected: index == group.active,
+                            emphasized: isFocused,
+                            onClose: { model.close(tab, in: repo) }
+                        ) {
+                            model.activate(index, in: group.id, repo: repo)
+                        }
+                        .help(look.help)
+                    }
+                }
+                .padding(.horizontal, 6)
+                }
+            }
+            Button {
+                model.focus(group: group.id, in: repo)
+                model.newShellTab()
+            } label: {
+                Image(systemName: "plus")
+            }
+            .buttonStyle(.glass)
+            .buttonBorderShape(.circle)
+            .padding(.trailing, 6)
+            .help("New shell tab (⌘T)")
+        }
+        .frame(height: 36)
+    }
+
+    private func look(of tab: TabRef) -> (title: String, symbol: String, tint: Color, help: String) {
+        let snapshot = model.snapshots[repo]
+        switch tab {
+        case .orchestrator:
+            let live = snapshot?.orchestrator.live == true
+            return ("Orchestrator", "sparkles", live ? .accentColor : .secondary, "The Orchestrator")
+        case .worker(let id):
+            let worker = snapshot?.workers.first { $0.id == id }
+            return ("\(id) \(worker?.profile ?? "")", worker?.state.symbol ?? "circle", worker?.state.color ?? .secondary,
+                    worker?.title ?? id)
+        case .shell(let id):
+            let number = (snapshot?.shells?.firstIndex(of: id)).map { $0 + 1 } ?? id
+            return ("Shell \(number)", "terminal", .secondary, "A shell in \(URL(fileURLWithPath: repo).lastPathComponent)")
+        }
+    }
+}
+
+struct TabButton: View {
+    let title: String
+    let symbol: String
+    let tint: Color
+    let selected: Bool
+    var emphasized = true
+    var onClose: (() -> Void)?
+    let action: () -> Void
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: symbol)
+                .imageScale(.small)
+                .foregroundStyle(tint)
+            Text(title)
+                .lineLimit(1)
+                .foregroundStyle(selected ? .primary : .secondary)
+            if let onClose {
+                Button(action: onClose) {
+                    Image(systemName: "xmark")
+                        .imageScale(.small)
+                        .foregroundStyle(.tertiary)
+                }
+                .buttonStyle(.plain)
+                .help("Close tab (⌘W)")
+            }
+        }
+        .font(.callout)
+        .padding(.horizontal, 12)
+        .frame(height: 26)
+        .glassEffect(
+            selected
+                ? .regular.tint(emphasized ? Color.accentColor.opacity(0.35) : Color.white.opacity(0.08)).interactive()
+                : .clear.interactive(),
+            in: Capsule()
+        )
+        .contentShape(Capsule())
+        .onTapGesture(perform: action)
     }
 }

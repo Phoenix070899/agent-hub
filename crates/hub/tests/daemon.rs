@@ -98,7 +98,7 @@ impl Hub {
         serde_json::from_str(&self.ok(&["status", "--json"])).unwrap()
     }
 
-    fn eventually(&self, what: &str, check: impl Fn() -> bool) {
+    fn eventually(&self, what: &str, mut check: impl FnMut() -> bool) {
         let deadline = Instant::now() + Duration::from_secs(15);
         while !check() {
             assert!(Instant::now() < deadline, "timed out waiting for {what}");
@@ -439,4 +439,50 @@ fn a_usage_read_that_prints_no_limits_is_retried() {
     });
     assert!(marker.exists(), "the first read failed");
     assert!(hub.call("usage", serde_json::json!({}))["result"]["error"].is_null());
+}
+
+#[test]
+fn shells_open_in_the_repo_and_close() {
+    let hub = Hub::new("shell");
+    let out = hub.run_with(&["status"], &[("HUB_SHELL", "/bin/sh")]);
+    assert!(out.status.success());
+    let repo = hub.repo_key();
+    let opened = hub.call("shell.open", serde_json::json!({ "repo": repo }));
+    let id = opened["result"]["shell"].as_i64().expect("a shell id");
+
+    let mut stream = UnixStream::connect(hub.state.join("hubd.sock")).unwrap();
+    let request = serde_json::json!({ "method": "attach", "params": { "shell": id, "rows": 30, "cols": 100 } });
+    stream.write_all(format!("{request}\n").as_bytes()).unwrap();
+    stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    let mut reader = BufReader::new(stream.try_clone().unwrap());
+    let mut line = String::new();
+    reader.read_line(&mut line).unwrap();
+    assert!(line.contains("\"ok\":true"), "{line}");
+    stream.write_all(b"echo in:$(pwd)\n").unwrap();
+    let mut seen = Vec::new();
+    let mut buf = [0u8; 4096];
+    while !String::from_utf8_lossy(&seen).contains(&format!("in:{repo}")) {
+        let n = reader.read(&mut buf).expect("shell output");
+        assert!(n > 0, "{}", String::from_utf8_lossy(&seen));
+        seen.extend_from_slice(&buf[..n]);
+    }
+
+    let mut events = UnixStream::connect(hub.state.join("hubd.sock")).unwrap();
+    let request = serde_json::json!({ "method": "events", "params": { "repo": repo } });
+    events.write_all(format!("{request}\n").as_bytes()).unwrap();
+    let mut lines = BufReader::new(events).lines();
+    lines.next();
+    let snapshot: serde_json::Value = serde_json::from_str(&lines.next().unwrap().unwrap()).unwrap();
+    assert_eq!(snapshot["shells"], serde_json::json!([id]));
+
+    hub.call("shell.close", serde_json::json!({ "shell": id }));
+    hub.eventually("the shell to close", || {
+        let snapshot: serde_json::Value = serde_json::from_str(&lines.next().unwrap().unwrap()).unwrap();
+        snapshot["shells"] == serde_json::json!([])
+    });
+    let next = hub.call("shell.open", serde_json::json!({ "repo": repo }));
+    assert!(
+        next["result"]["shell"].as_i64().unwrap() > id,
+        "shell ids are never reused"
+    );
 }

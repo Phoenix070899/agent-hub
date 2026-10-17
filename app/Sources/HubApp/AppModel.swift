@@ -32,7 +32,29 @@ final class AppModel: ObservableObject {
     /// Set by the window, so a notification or the menu bar can bring it back after it closed.
     var openMainWindow: (() -> Void)?
 
+    /// Each session's split panes, remembered across launches.
+    @Published private(set) var layouts: [String: PaneLayout] = AppModel.loadLayouts()
+    /// The pane with keyboard focus in each session.
+    @Published private(set) var focusedGroups: [String: Int] = [:]
+
+    /// How every terminal looks; Settings edits it.
+    @Published var appearance: TerminalAppearance = AppModel.loadAppearance() {
+        didSet {
+            if let data = try? JSONEncoder().encode(appearance) {
+                UserDefaults.standard.set(data, forKey: Self.appearanceKey)
+            }
+        }
+    }
+
     private var trackers: [String: NeedTracker] = [:]
+    private static let layoutsKey = "layouts"
+    private static let appearanceKey = "appearance"
+
+    private static func loadAppearance() -> TerminalAppearance {
+        guard let data = UserDefaults.standard.data(forKey: appearanceKey),
+              let saved = try? JSONDecoder().decode(TerminalAppearance.self, from: data) else { return .orca }
+        return saved
+    }
     /// Each followed session's events connection generation; bumping it stops the old follower.
     private var following: [String: Int] = [:]
     private var sockets: [String: HubSocket] = [:]
@@ -108,9 +130,18 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Shows the Orchestrator or a Worker: where its tab is open, else as a new tab in the focused pane.
     func select(_ selection: Selection) {
         self.selection = selection
         UserDefaults.standard.set(selection.repo, forKey: Self.lastRepoKey)
+        let tab: TabRef
+        switch selection {
+        case .orchestrator: tab = .orchestrator
+        case .worker(_, let id): tab = .worker(id)
+        }
+        let (layout, group) = layout(for: selection.repo).opening(tab, in: focusedGroup(in: selection.repo))
+        setLayout(layout, for: selection.repo)
+        focusedGroups[selection.repo] = group
     }
 
     func toggleCollapsed(_ repo: String) {
@@ -155,6 +186,14 @@ final class AppModel: ObservableObject {
     private func apply(_ snapshot: Snapshot, repo: String, generation: Int) {
         guard following[repo] == generation else { return }
         snapshots[repo] = snapshot
+        // Tabs of shells that exited (or a daemon restart) and of Workers no longer listed close.
+        if let shells = snapshot.shells, let layout = layouts[repo] {
+            let kept = layout.keeping(shells: Set(shells), workers: Set(snapshot.workers.map(\.id)))
+            if kept != layout {
+                setLayout(kept, for: repo)
+                syncSelection(repo)
+            }
+        }
         var tracker = trackers[repo] ?? NeedTracker()
         for need in tracker.fresh(in: snapshot.needs) {
             Notifier.post(need, repo: repo)
@@ -187,6 +226,103 @@ final class AppModel: ObservableObject {
 
     func refreshUsage() {
         background { client in try client.call("usage.refresh") } then: { _ in }
+    }
+
+    // MARK: Panes and tabs
+
+    func layout(for repo: String) -> PaneLayout { layouts[repo] ?? .single }
+
+    /// The focused pane, or the first one.
+    func focusedGroup(in repo: String) -> Int {
+        let layout = layout(for: repo)
+        if let id = focusedGroups[repo], layout.group(id) != nil { return id }
+        return layout.groups[0].id
+    }
+
+    func focus(group id: Int, in repo: String) {
+        guard focusedGroups[repo] != id else { return }
+        focusedGroups[repo] = id
+        syncSelection(repo)
+    }
+
+    /// Shows tab `index` of pane `id`.
+    func activate(_ index: Int, in id: Int, repo: String) {
+        setLayout(layout(for: repo).updating(id) { $0.active = index }, for: repo)
+        focusedGroups[repo] = id
+        syncSelection(repo)
+    }
+
+    /// The sidebar follows the focused pane's tab when it shows the Orchestrator or a Worker.
+    private func syncSelection(_ repo: String) {
+        switch layout(for: repo).group(focusedGroup(in: repo))?.activeTab {
+        case .orchestrator?: selection = .orchestrator(repo: repo)
+        case .worker(let id)?: selection = .worker(repo: repo, id: id)
+        default: break
+        }
+    }
+
+    /// A new shell as a tab in the focused pane.
+    func newShellTab() {
+        guard let repo = selectedRepo else { return }
+        let group = focusedGroup(in: repo)
+        openShell(in: repo) { id in
+            let (layout, at) = self.layout(for: repo).opening(.shell(id), in: group)
+            self.setLayout(layout, for: repo)
+            self.focusedGroups[repo] = at
+        }
+    }
+
+    /// A new pane right of (or below) the focused one, holding a new shell.
+    func split(_ axis: SplitAxis) {
+        guard let repo = selectedRepo else { return }
+        let group = focusedGroup(in: repo)
+        openShell(in: repo) { id in
+            let (layout, at) = self.layout(for: repo).splitting(group, axis, with: .shell(id))
+            self.setLayout(layout, for: repo)
+            self.focusedGroups[repo] = at
+        }
+    }
+
+    private func openShell(in repo: String, then place: @escaping @MainActor (Int) -> Void) {
+        background { client in
+            let result = try client.call("shell.open", ["repo": repo]) as? [String: Any]
+            guard let id = result?["shell"] as? Int else { throw HubError.badResponse }
+            return id
+        } then: { id in
+            place(id)
+        }
+    }
+
+    /// Closes a tab. A shell tab ends its shell; the Orchestrator's or a Worker's tab only hides it.
+    func close(_ tab: TabRef, in repo: String) {
+        setLayout(layout(for: repo).closing(tab), for: repo)
+        syncSelection(repo)
+        if case .shell(let id) = tab {
+            background { client in try client.call("shell.close", ["shell": id]) } then: { _ in }
+        }
+    }
+
+    func closeActiveTab() {
+        guard let repo = selectedRepo,
+              let tab = layout(for: repo).group(focusedGroup(in: repo))?.activeTab else { return }
+        close(tab, in: repo)
+    }
+
+    func moveFocus(forward: Bool) {
+        guard let repo = selectedRepo else { return }
+        focus(group: layout(for: repo).neighbor(of: focusedGroup(in: repo), forward: forward), in: repo)
+    }
+
+    private func setLayout(_ layout: PaneLayout, for repo: String) {
+        layouts[repo] = layout
+        if let data = try? JSONEncoder().encode(layouts) {
+            UserDefaults.standard.set(data, forKey: Self.layoutsKey)
+        }
+    }
+
+    private static func loadLayouts() -> [String: PaneLayout] {
+        guard let data = UserDefaults.standard.data(forKey: layoutsKey) else { return [:] }
+        return (try? JSONDecoder().decode([String: PaneLayout].self, from: data)) ?? [:]
     }
 
     func stopOrchestrator(repo: String) {

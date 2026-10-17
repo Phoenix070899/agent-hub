@@ -16,7 +16,6 @@ struct NeedsInbox: View {
         }
         .frame(maxHeight: 300)
         .fixedSize(horizontal: false, vertical: true)
-        .background(Color.yellow.opacity(0.06))
     }
 }
 
@@ -43,18 +42,14 @@ struct NeedCard: View {
                     Button("Open") {
                         if let repo = model.selectedRepo { model.select(.worker(repo: repo, id: need.worker)) }
                     }
-                        .buttonStyle(.link)
-                        .font(.callout)
+                    .buttonStyle(.glass)
+                    .controlSize(.small)
                 }
                 content
             }
         }
-        .padding(12)
-        .background(.background, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .strokeBorder(Color.yellow.opacity(0.45), lineWidth: 1)
-        )
+        .padding(14)
+        .glassEffect(.regular.tint(Color.yellow.opacity(0.12)), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
         .disabled(draft.sent)
         .opacity(draft.sent ? 0.55 : 1)
     }
@@ -93,11 +88,12 @@ struct NeedCard: View {
                     draft.sent = true
                     model.decide(need, approve: false, note: draft.text)
                 }
+                .buttonStyle(.glass)
                 Button("Approve") {
                     draft.sent = true
                     model.decide(need, approve: true, note: "")
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.glassProminent)
                 .tint(.green)
             }
         case .question:
@@ -107,7 +103,7 @@ struct NeedCard: View {
                     .textFieldStyle(.roundedBorder)
                     .onSubmit(send)
                 Button("Send", action: send)
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(.glassProminent)
                     .disabled(draft.text.trimmingCharacters(in: .whitespaces).isEmpty)
             }
         case .idlePrompt:

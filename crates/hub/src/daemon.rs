@@ -35,6 +35,9 @@ pub struct Hub {
     live: Mutex<HashMap<i64, Arc<Live>>>,
     /// Each repo's live Orchestrator terminal.
     orchestrators: Mutex<HashMap<String, Arc<Live>>>,
+    /// The human's own shells in the Hub App's split panes: id to (repo, terminal). No watching,
+    /// no messages; they live until they exit or are closed.
+    shells: Mutex<HashMap<i64, (String, Arc<Live>)>>,
     tick: Mutex<u64>,
     changed: Condvar,
     usage: Mutex<Usage>,
@@ -142,6 +145,7 @@ pub fn run() -> Result<()> {
         db: Mutex::new(conn),
         live: Mutex::new(HashMap::new()),
         orchestrators: Mutex::new(HashMap::new()),
+        shells: Mutex::new(HashMap::new()),
         tick: Mutex::new(0),
         changed: Condvar::new(),
         usage: Mutex::new(Usage::default()),
@@ -259,8 +263,15 @@ impl Hub {
         }
     }
 
-    /// The terminal a request names: `{"id": n}` for a Worker, `{"orchestrator": repo}` for the Orchestrator.
+    /// The terminal a request names: `{"id": n}` for a Worker, `{"orchestrator": repo}` for the
+    /// Orchestrator, `{"shell": n}` for a shell.
     fn terminal(&self, p: &Value) -> Result<Arc<Live>> {
+        if let Some(id) = p.get("shell").and_then(Value::as_i64) {
+            return match self.shells.lock().unwrap().get(&id) {
+                Some((_, live)) => Ok(Arc::clone(live)),
+                None => bail!("shell {id} is not open"),
+            };
+        }
         match p.get("orchestrator").and_then(Value::as_str) {
             Some(repo) => match self.orchestrators.lock().unwrap().get(repo) {
                 Some(live) => Ok(Arc::clone(live)),
@@ -319,6 +330,37 @@ impl Hub {
             .map(|s| json!({ "repo": s.repo, "session_id": s.session_id, "live": live.contains_key(&s.repo) }))
             .collect();
         Ok(json!({ "sessions": out }))
+    }
+
+    /// A login shell in the repo, the human's own: their `$SHELL` (`HUB_SHELL` overrides it).
+    fn open_shell(self: &Arc<Self>, p: &Value) -> Result<Value> {
+        let repo = repo::root(Path::new(str_param(p, "repo")?))?;
+        let key = repo.display().to_string();
+        let id = db::new_shell(&self.db(), &key)?;
+        let program = std::env::var("HUB_SHELL")
+            .or_else(|_| std::env::var("SHELL"))
+            .unwrap_or_else(|_| "/bin/zsh".into());
+        let env = vec![
+            ("TERM".to_string(), "xterm-256color".to_string()),
+            ("COLORTERM".into(), "truecolor".into()),
+        ];
+        let spawn = Spawn {
+            program,
+            args: vec!["-l".into()],
+            cwd: repo,
+            env,
+            env_remove: inherited_agent_vars(),
+        };
+        let hub: Weak<Hub> = Arc::downgrade(self);
+        let live = Live::spawn(id, spawn, move |id| {
+            if let Some(hub) = hub.upgrade() {
+                hub.shells.lock().unwrap().remove(&id);
+                hub.notify();
+            }
+        })?;
+        self.shells.lock().unwrap().insert(id, (key, live));
+        self.notify();
+        Ok(json!({ "shell": id }))
     }
 
     fn recover(&self) -> Result<()> {
@@ -398,6 +440,13 @@ impl Hub {
                 Ok(json!({}))
             }
             "sessions.list" => self.list_sessions(),
+            "shell.open" => self.open_shell(p),
+            "shell.close" => {
+                if let Some((_, live)) = self.shells.lock().unwrap().get(&id_param(p, "shell")?) {
+                    live.kill();
+                }
+                Ok(json!({}))
+            }
             "usage.refresh" => {
                 self.refresh_usage();
                 Ok(json!({}))
@@ -493,6 +542,9 @@ impl Hub {
                 }
                 drop(db);
                 for live in self.orchestrators.lock().unwrap().values() {
+                    live.kill();
+                }
+                for (_, live) in self.shells.lock().unwrap().values() {
                     live.kill();
                 }
                 let _ = std::fs::remove_file(paths::socket());
@@ -951,11 +1003,26 @@ impl Hub {
         Ok(needs)
     }
 
+    /// The repo's open shells, oldest first.
+    fn shells_of(&self, repo: &str) -> Vec<i64> {
+        let mut ids: Vec<i64> = self
+            .shells
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, (of, _))| of == repo)
+            .map(|(id, _)| *id)
+            .collect();
+        ids.sort();
+        ids
+    }
+
     /// Everything the Hub App draws for one Hub Session.
     fn snapshot(&self, repo: &str) -> Result<Value> {
         Ok(json!({
             "repo": repo,
             "orchestrator": { "live": self.orchestrators.lock().unwrap().contains_key(repo) },
+            "shells": self.shells_of(repo),
             "workers": self.rows(repo)?,
             "needs": self.needs(repo)?,
             "usage": self.usage.lock().unwrap().view(),

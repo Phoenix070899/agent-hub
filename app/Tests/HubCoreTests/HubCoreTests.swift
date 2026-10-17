@@ -112,3 +112,54 @@ struct LiveDaemon {
     #expect(screen.contains("approved"))
     #expect(try hub.client.sessions().isEmpty)
 }
+
+@Test func eachPaneKeepsItsOwnTabs() {
+    var (layout, right) = PaneLayout.single.splitting(0, .horizontal, with: .shell(1))
+    #expect(right == 1)
+    (layout, _) = layout.opening(.shell(2), in: right)
+    #expect(layout.group(0)?.tabs == [.orchestrator])
+    #expect(layout.group(1)?.tabs == [.shell(1), .shell(2)])
+    #expect(layout.group(1)?.activeTab == .shell(2))
+
+    let (again, holder) = layout.opening(.orchestrator, in: 1)
+    #expect(holder == 0, "an open terminal is shown where it is, not opened twice")
+    #expect(again.groups.flatMap(\.tabs).filter { $0 == .orchestrator }.count == 1)
+
+    let (withWorker, at) = layout.opening(.worker("w3"), in: 0)
+    #expect(at == 0)
+    #expect(withWorker.group(0)?.tabs == [.orchestrator, .worker("w3")])
+    #expect(withWorker.group(0)?.activeTab == .worker("w3"))
+}
+
+@Test func closingTheLastTabRemovesThePane() {
+    var (layout, _) = PaneLayout.single.splitting(0, .vertical, with: .shell(5))
+    layout = layout.closing(.shell(5))
+    #expect(layout == .single)
+    #expect(PaneLayout.single.closing(.orchestrator) == .single, "the last pane falls back to the Orchestrator")
+    #expect(layout.neighbor(of: 0, forward: true) == 0)
+}
+
+@Test func tabsOfGoneTerminalsLeave() {
+    var (layout, _) = PaneLayout.single.splitting(0, .horizontal, with: .shell(1))
+    (layout, _) = layout.opening(.worker("w2"), in: 0)
+    let kept = layout.keeping(shells: [], workers: [])
+    #expect(kept == .single)
+}
+
+@Test func layoutsSurviveARoundTrip() throws {
+    let (layout, _) = PaneLayout.single.splitting(0, .vertical, with: .shell(7))
+    let data = try JSONEncoder().encode(layout)
+    #expect(try JSONDecoder().decode(PaneLayout.self, from: data) == layout)
+}
+
+@Test func themeColoursRoundTripThroughHex() throws {
+    let rgb = try #require(TerminalTheme.rgb("#0a0e14"))
+    #expect(TerminalTheme.hex(red: rgb.red, green: rgb.green, blue: rgb.blue) == "#0a0e14")
+    #expect(TerminalTheme.rgb("0a0e14") != nil)
+    #expect(TerminalTheme.rgb("#zzz") == nil)
+    for theme in TerminalTheme.presets {
+        #expect(theme.ansi.count == 16, "\(theme.name) has 16 ANSI colours")
+        #expect(([theme.background, theme.foreground, theme.cursor, theme.selection] + theme.ansi).allSatisfy { TerminalTheme.rgb($0) != nil })
+    }
+    #expect(TerminalAppearance.orca.theme == .ayuDark)
+}
