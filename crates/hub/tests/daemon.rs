@@ -39,6 +39,10 @@ impl Hub {
     }
 
     fn run(&self, args: &[&str]) -> Output {
+        self.run_with(args, &[])
+    }
+
+    fn run_with(&self, args: &[&str], env: &[(&str, &str)]) -> Output {
         let bin = Path::new(env!("CARGO_BIN_EXE_hub"));
         let fake = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fake-agent.sh");
         Command::new(bin)
@@ -51,6 +55,7 @@ impl Hub {
                 format!("{}:{}", bin.parent().unwrap().display(), std::env::var("PATH").unwrap()),
             )
             .env_remove("HUB_WORKER")
+            .envs(env.iter().copied())
             .output()
             .unwrap()
     }
@@ -418,4 +423,20 @@ fn account_usage_comes_from_claude_usage() {
     assert_eq!(usage["result"]["limits"][0]["percent"], 48);
     assert_eq!(usage["result"]["limits"][0]["resets"], "Oct 17 at 4:50pm");
     assert_eq!(usage["result"]["limits"][2]["name"], "Week (Fable)");
+}
+
+#[test]
+fn a_usage_read_that_prints_no_limits_is_retried() {
+    let hub = Hub::new("flaky");
+    let marker = hub.state.join("usage-failed-once");
+    let out = hub.run_with(&["status"], &[("HUB_FAKE_USAGE_FLAKY", marker.to_str().unwrap())]);
+    assert!(out.status.success());
+    hub.call("usage.refresh", serde_json::json!({}));
+    hub.eventually("usage to load after a retry", || {
+        hub.call("usage", serde_json::json!({}))["result"]["limits"]
+            .as_array()
+            .is_some_and(|limits| limits.len() == 3)
+    });
+    assert!(marker.exists(), "the first read failed");
+    assert!(hub.call("usage", serde_json::json!({}))["result"]["error"].is_null());
 }

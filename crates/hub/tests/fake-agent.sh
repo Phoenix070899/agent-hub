@@ -1,5 +1,11 @@
 #!/bin/sh
 # A stand-in for `claude` in daemon tests: $1 is the Task spec, and its first word picks a script.
+if [ "$1" = "-p" ] && [ "$2" = "/usage" ] && [ -n "$HUB_FAKE_USAGE_FLAKY" ] && [ ! -e "$HUB_FAKE_USAGE_FLAKY" ]; then
+  # The first call fails the way the real one sometimes does: a cost summary, no limits.
+  touch "$HUB_FAKE_USAGE_FLAKY"
+  printf 'Total cost:            $0.0000\nTotal duration (API):  0s\n'
+  exit 0
+fi
 if [ "$1" = "-p" ] && [ "$2" = "/usage" ]; then
   # What `claude -p /usage` prints on a subscription.
   printf 'You are currently using your subscription to power your Claude Code usage\n\n'

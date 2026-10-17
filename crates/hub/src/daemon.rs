@@ -45,6 +45,11 @@ pub struct Hub {
 
 /// How often account usage is re-read while someone watches the events stream.
 const USAGE_EVERY: Duration = Duration::from_secs(5 * 60);
+/// After a failed read, the next try comes this much sooner than USAGE_EVERY.
+const USAGE_RETRY: Duration = Duration::from_secs(60);
+/// `claude -p /usage` now and then prints a cost summary instead of the plan limits; it is tried
+/// this many times per refresh.
+const USAGE_ATTEMPTS: usize = 3;
 
 /// The Claude account's plan limits, as `claude -p /usage` prints them.
 #[derive(Default)]
@@ -971,7 +976,16 @@ impl Hub {
         let program = self.test_agent.clone().unwrap_or_else(|| "claude".into());
         let hub = Arc::clone(self);
         std::thread::spawn(move || {
-            let result = run_usage(&program);
+            let mut result = Ok(Vec::new());
+            for attempt in 0..USAGE_ATTEMPTS {
+                if attempt > 0 {
+                    std::thread::sleep(Duration::from_secs(3));
+                }
+                result = run_usage(&program);
+                if result.as_ref().is_ok_and(|limits| !limits.is_empty()) {
+                    break;
+                }
+            }
             let mut usage = hub.usage.lock().unwrap();
             usage.refreshing = false;
             match result {
@@ -980,8 +994,14 @@ impl Hub {
                     usage.updated_at = Some(db::now());
                     usage.error = None;
                 }
-                Ok(_) => usage.error = Some("`claude -p /usage` printed no plan limits".into()),
-                Err(error) => usage.error = Some(format!("{error:#}")),
+                // Keep the last good limits on screen; try again sooner than usual.
+                failed => {
+                    usage.error = Some(match failed {
+                        Err(error) => format!("{error:#}"),
+                        Ok(_) => "`claude -p /usage` printed no plan limits".into(),
+                    });
+                    usage.refreshed = Instant::now().checked_sub(USAGE_EVERY - USAGE_RETRY);
+                }
             }
             drop(usage);
             hub.notify();
