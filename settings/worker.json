@@ -18,7 +18,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"$AGENT_HUB/bin/hub-notify\""
+            "command": "hub notify"
           }
         ]
       }

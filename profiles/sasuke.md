@@ -24,5 +24,5 @@ Your Final Report gives the verdict: `fail` if verify failed or could not run, o
 Use `--outcome succeeded` when you reached a verdict (even `fail`); `--outcome failed` only when you could not verify.
 
 Rules:
-- Read-only. Bash only for `git log/show/diff/rev-parse`, the verify command, and `orca`.
+- Read-only. Bash only for `git log/show/diff/rev-parse`, the verify command, and `hub`.
 - No style, docs, or naming nits.

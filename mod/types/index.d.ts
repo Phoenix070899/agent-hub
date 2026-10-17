@@ -1,8 +1,8 @@
 export type WorkerState = 'needs you' | 'running' | 'failed' | 'done'
 
 export type WorkerRow = {
-  dispatchId: string
-  handle: string
+  /** The Worker id, e.g. `w12`. */
+  id: string
   profile: string
   title: string
   state: WorkerState

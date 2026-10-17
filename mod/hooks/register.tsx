@@ -2,8 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { WorkerRow, WorkerState } from '../types'
-import { dispatchQuery, formatAge, toRows } from './dashboard'
-import type { DispatchRecord } from './dashboard'
+import { formatAge, parseStatus } from './dashboard'
 import { needsHuman } from './report'
 
 const workers = atom({ plugin: 'hub', key: 'workers' } as const, [])
@@ -35,14 +34,10 @@ const formatDuration = (ms: number) => {
 const fit = (text: string, width: number) =>
   text.length <= width ? text.padEnd(width) : `${text.slice(0, Math.max(0, width - 1))}…`
 
-async function poll($: EngineInterface, repo: string, database: string) {
-  const { exitCode, stdout } = await $.process.run(
-    ['sqlite3', '-readonly', '-json', `file:${database}?mode=ro`, dispatchQuery(repo)],
-    { timeoutMs: 4000 },
-  )
+async function poll($: EngineInterface) {
+  const { exitCode, stdout } = await $.process.run(['hub', 'status', '--json'], { timeoutMs: 4000 })
   if (exitCode !== 0) return
-  const records: DispatchRecord[] = stdout.trim() ? JSON.parse(stdout) : []
-  const rows = toRows(records, repo, await $.clock.now())
+  const rows = parseStatus(stdout)
   await update($, workers, () => rows)
 }
 
@@ -56,12 +51,7 @@ export const register: Register = on => {
       description: 'Show or fold the Orchestrator tool calls in the transcript',
     })
 
-    const top = await $.process.run(['git', 'rev-parse', '--show-toplevel'])
-    const repo = top.exitCode === 0 ? top.stdout.trim() : (await $.process.run(['pwd'])).stdout.trim()
-    const home = (await $.process.run(['printenv', 'HOME'])).stdout.trim()
-    const database = `${home}/Library/Application Support/orca/orchestration.db`
-
-    const refresh = () => poll($, repo, database).catch(() => undefined)
+    const refresh = () => poll($).catch(() => undefined)
     await refresh()
     $.clock.every(POLL_MS, () => void refresh())
 
@@ -156,8 +146,7 @@ export const register: Register = on => {
   // background: one dim line.
   on('ui.render', { component: 'UserMessage' }, async ($, e, next) => {
     const kind = e.props.origin.kind
-    const isOrcaNudge = /^You have \d+ orchestration messages?\b/.test(e.props.text.trim())
-    const isHuman = (kind === 'composer' || kind === 'bridge') && !isOrcaNudge
+    const isHuman = kind === 'composer' || kind === 'bridge'
     if (e.props.isExpanded || isHuman) return next(e)
     const { Text } = $.ui.resolve(e)
     const line = e.props.text.trim().split('\n')[0] ?? ''
@@ -209,13 +198,13 @@ export const register: Register = on => {
           const color = ROW_COLORS[index % ROW_COLORS.length]
           const badge = STATE_BADGE[row.state]
           return (
-            <Box key={row.dispatchId} flexDirection="row">
+            <Box key={row.id} flexDirection="row">
               <Button
-                key={`go-${row.dispatchId}`}
+                key={`go-${row.id}`}
                 hotkey={String(index + 1)}
                 plain
                 label="↗"
-                onPress={() => void $.process.run(['orca', 'terminal', 'switch', '--terminal', row.handle])}
+                onPress={() => void $.process.run(['hub', 'open', row.id])}
               />
               <Text wrap="truncate-end">
                 {' '}

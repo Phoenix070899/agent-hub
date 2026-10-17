@@ -115,7 +115,7 @@ fn question_reply_and_final_report() {
 
     hub.ok(&["reply", "1", "blue"]);
     let done = hub.wait();
-    assert!(done.contains("done from w1"), "{done}");
+    assert!(done.contains("done (done) from w1"), "{done}");
     assert!(done.contains("answer was blue"));
     assert!(done.contains("hub worker close w1"));
     assert_eq!(hub.status()[0]["state"], "done");
@@ -227,4 +227,15 @@ fn worker_commands_need_a_worker() {
     let hub = Hub::new("env");
     assert!(hub.fails(&["done", "--state", "done", "x"]).contains("HUB_WORKER"));
     assert!(hub.fails(&["worker", "key", "w1", "hyper"]).contains("unknown key"));
+}
+
+#[test]
+fn a_forced_shutdown_closes_workers_instead_of_losing_them() {
+    let hub = Hub::new("shut");
+    hub.ok(&["worker", "start", "bash", "--spec", "sleep"]);
+    hub.ok(&["shutdown", "--force"]);
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(hub.ok(&["worker", "list"]).contains("No open Workers."));
+    assert!(hub.ok(&["wait", "--timeout", "1"]).contains("No messages"));
+    assert_eq!(hub.status()[0]["state"], "failed");
 }

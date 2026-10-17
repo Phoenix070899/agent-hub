@@ -92,6 +92,10 @@ pub fn system_prompt(hub: &Path, profile: &Profile) -> Result<String> {
     Ok(parts.join("\n\n"))
 }
 
+/// The first message of a resumed Worker session.
+const RESUMED: &str = "Your terminal was restarted. Continue your Task from where you left off: \
+                       check what is already done before repeating anything, then finish with hub done.";
+
 /// How a Worker's Claude session begins: a new session on its Task, or a resumed one.
 pub enum Launch<'a> {
     New { spec: &'a str },
@@ -129,7 +133,7 @@ pub fn claude_args(
     args.extend(["--append-system-prompt".into(), system_prompt(hub, profile)?]);
     match launch {
         Launch::New { spec } => args.extend(["--session-id".into(), session_id.into(), "--".into(), spec.into()]),
-        Launch::Resume => args.extend(["--resume".into(), session_id.into()]),
+        Launch::Resume => args.extend(["--resume".into(), session_id.into(), "--".into(), RESUMED.into()]),
     }
     Ok(args)
 }

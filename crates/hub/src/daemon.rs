@@ -260,7 +260,7 @@ impl Hub {
                     bail!("w{id} already settled as {}", worker.state);
                 }
                 db::settle(&db, id, final_state, body)?;
-                db::insert_message(&db, &worker, kind::DONE, &format!("State: {final_state}\n\n{body}"))?;
+                db::insert_message(&db, &worker, kind::DONE, body)?;
                 drop(db);
                 self.notify();
                 Ok(json!({}))
@@ -294,10 +294,21 @@ impl Hub {
                 if live > 0 && !p.get("force").and_then(Value::as_bool).unwrap_or(false) {
                     bail!("{live} Worker(s) still live; close them first or pass --force");
                 }
-                for live in self.live.lock().unwrap().values() {
+                let killed: Vec<Arc<Live>> = self.live.lock().unwrap().values().cloned().collect();
+                for live in &killed {
                     live.closing.store(true, std::sync::atomic::Ordering::SeqCst);
                     live.kill();
                 }
+                // Record the closes now: the process exits before every exit callback runs.
+                let db = self.db();
+                for live in &killed {
+                    let worker = db::worker(&db, live.id)?;
+                    if state::is_live(&worker.state) {
+                        db::settle(&db, live.id, state::EXITED, "stopped by hub shutdown --force")?;
+                    }
+                    db::mark_closed(&db, live.id)?;
+                }
+                drop(db);
                 let _ = std::fs::remove_file(paths::socket());
                 std::thread::spawn(|| {
                     std::thread::sleep(Duration::from_millis(200));
@@ -324,17 +335,25 @@ impl Hub {
                 ("claude".to_string(), args)
             }
         };
+        // This `hub` first on PATH, so the Worker's `hub ask` and its Notification hook reach this daemon.
+        let exe_dir = std::env::current_exe()?
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_default();
+        let path = format!("{}:{}", exe_dir.display(), std::env::var("PATH").unwrap_or_default());
         Ok(Spawn {
             program,
             args,
             cwd: PathBuf::from(&worker.cwd),
             env: vec![
+                ("PATH".into(), path),
                 ("HUB_WORKER".into(), worker.id.to_string()),
                 ("AGENT_HUB".into(), self.hub_dir.display().to_string()),
                 ("HUB_STATE".into(), paths::state_dir().display().to_string()),
                 ("TERM".into(), "xterm-256color".into()),
                 ("COLORTERM".into(), "truecolor".into()),
             ],
+            env_remove: inherited_agent_vars(),
         })
     }
 
@@ -527,7 +546,14 @@ impl Hub {
                     Look::Working => {
                         live.blocker.lock().unwrap().take();
                     }
-                    Look::Idle => {}
+                    Look::Idle => {
+                        // An answered or cancelled prompt ends that blocker; idling after it is a new one.
+                        let mut blocker = live.blocker.lock().unwrap();
+                        if blocker.as_deref() == Some("permission_prompt") {
+                            blocker.take();
+                            changed_at = Instant::now();
+                        }
+                    }
                 }
                 let started = look == Look::Working || paths::transcript_exists(&worker.session_id);
                 if worker.state == state::STARTING && started {
@@ -711,6 +737,24 @@ impl Hub {
     }
 }
 
+/// Session markers a Worker must not inherit from whatever agent started the daemon: Claude Code
+/// reads `CLAUDE_CODE_CHILD_SESSION`, for one, as "do not save transcripts", which breaks resume.
+fn inherited_agent_vars() -> Vec<String> {
+    std::env::vars()
+        .map(|(key, _)| key)
+        .filter(|key| is_agent_var(key))
+        .collect()
+}
+
+fn is_agent_var(key: &str) -> bool {
+    key == "CLAUDECODE"
+        || key == "AI_AGENT"
+        || key.starts_with("CLAUDE_CODE_")
+        || key.starts_with("ORCA_")
+        || key == "CLAUDE_PID"
+        || key == "CLAUDE_EFFORT"
+}
+
 /// "in place" for the repo's own checkout, else the worktree's folder name.
 fn place(repo: &Path, cwd: &Path) -> String {
     if cwd == repo {
@@ -760,6 +804,15 @@ mod tests {
         assert_eq!(key_bytes("down").unwrap(), b"\x1b[B");
         assert_eq!(key_bytes("2").unwrap(), b"2");
         assert!(key_bytes("hyper").is_err());
+    }
+
+    #[test]
+    fn agent_session_markers_are_not_inherited() {
+        assert!(is_agent_var("CLAUDE_CODE_CHILD_SESSION"));
+        assert!(is_agent_var("CLAUDECODE"));
+        assert!(is_agent_var("ORCA_TERMINAL_HANDLE"));
+        assert!(!is_agent_var("CLAUDE_CONFIG_DIR"));
+        assert!(!is_agent_var("PATH"));
     }
 
     #[test]

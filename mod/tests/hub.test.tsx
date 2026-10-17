@@ -2,71 +2,44 @@ import { describe, expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
 import { needsHuman } from '../hooks/report'
-import { header, toRows } from '../hooks/dashboard'
-import type { DispatchRecord } from '../hooks/dashboard'
+import { parseStatus } from '../hooks/dashboard'
+import type { WorkerRow } from '../types'
 
 const REPO = '/repo'
 const NOW = Date.parse('2026-10-16T10:00:00Z')
 
-const record = (over: Partial<DispatchRecord>): DispatchRecord => ({
-  id: 'ctx_1',
-  status: 'dispatched',
-  handle: 'term_1',
-  title: 'naruto: add subtract',
-  worktree: `r::${REPO}`,
-  dispatched_at: '2026-10-16 09:58:00',
-  completed_at: null,
-  last_message_at: null,
-  last_type: null,
-  last_subject: null,
-  open_questions: 0,
+const row = (over: Partial<WorkerRow>): WorkerRow => ({
+  id: 'w1',
+  profile: 'naruto',
+  title: 'add subtract',
+  state: 'running',
+  quietSeconds: 30,
+  place: 'in place',
   ...over,
 })
 
-describe('toRows', () => {
-  test('puts blocked Workers first and names the worktree', () => {
-    const rows = toRows(
-      [
-        record({ id: 'a', last_message_at: '2026-10-16T09:59:30Z' }),
-        record({
-          id: 'b',
-          title: 'hinata: map auth',
-          worktree: 'r::/w/e2e-auth',
-          last_type: 'question',
-          last_subject: 'Blocked: permission_prompt',
-        }),
-      ],
-      REPO,
-      NOW,
-    )
-    expect(rows.map(row => [row.dispatchId, row.state, row.profile, row.place])).toEqual([
-      ['b', 'needs you', 'hinata', 'e2e-auth'],
-      ['a', 'running', 'naruto', 'in place'],
+/** A `process.run` answer: `hub status --json` prints `rows`; anything else prints nothing. */
+const hubStatus = (rows: WorkerRow[], ran: string[][] = []) => ($: unknown, e: { argv: readonly string[] }) => {
+  ran.push([...e.argv])
+  const stdout = e.argv[0] === 'hub' && e.argv[1] === 'status' ? JSON.stringify(rows) : ''
+  return { value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+}
+
+describe('parseStatus', () => {
+  test('keeps well-formed rows in the daemon order', () => {
+    const rows = parseStatus(JSON.stringify([row({ id: 'w2', state: 'needs you' }), row({})]))
+    expect(rows.map(r => [r.id, r.state])).toEqual([
+      ['w2', 'needs you'],
+      ['w1', 'running'],
     ])
-    expect(rows[1]?.quietSeconds).toBe(30)
   })
 
-  test('an open ask is needs you; settled Workers leave after 10 minutes', () => {
-    const rows = toRows(
-      [
-        record({ id: 'q', open_questions: 1 }),
-        record({ id: 'recent', status: 'completed', completed_at: '2026-10-16 09:55:00' }),
-        record({ id: 'old', status: 'failed', completed_at: '2026-10-16 09:40:00' }),
-      ],
-      REPO,
-      NOW,
-    )
-    expect(rows.map(row => [row.dispatchId, row.state])).toEqual([
-      ['q', 'needs you'],
-      ['recent', 'done'],
-    ])
-    expect(header(rows)).toBe('Needs you 1 · Running 0 · Done 1')
+  test('drops malformed rows and output', () => {
+    expect(parseStatus('not json')).toEqual([])
+    expect(parseStatus('{}')).toEqual([])
+    expect(parseStatus(JSON.stringify([{ id: 'w1', title: 't', state: 'sleeping' }, row({ id: 'w3' })])).map(r => r.id)).toEqual(['w3'])
   })
 })
-
-const SQLITE_ROWS = JSON.stringify([
-  record({ id: 'ctx_9', handle: 'term_9', title: 'hinata: map auth flow', last_type: 'question', last_subject: 'Blocked: permission_prompt' }),
-])
 
 /** What the engine beneath the plugin answers in these tests: session start, commands, the clock. */
 const world = (on: On) => {
@@ -90,15 +63,10 @@ const band = (columns: number) => ({
 })
 
 for (const surface of ['terminal', 'desktop'] as const) {
-  test(`the band lists Workers from Orca on ${surface}`, async ($, on) => {
+  test(`the band lists Workers from the Hub Daemon on ${surface}`, async ($, on) => {
     world(on)
     const ran: string[][] = []
-    on('process.run', ($, e) => {
-      ran.push([...e.argv])
-      const stdout =
-        e.argv[0] === 'git' ? `${REPO}\n` : e.argv[0] === 'printenv' ? '/home/me\n' : e.argv[0] === 'sqlite3' ? SQLITE_ROWS : ''
-      return { value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
-    })
+    on('process.run', hubStatus([row({ id: 'w9', profile: 'hinata', title: 'map auth flow', state: 'needs you' })], ran))
     await $.session.start({ cwd: REPO, surface, isInteractive: true })
 
     const ui = await $.ui.mount({ plugin: 'hub', surface, component: 'AbovePrompt', props: band(100) })
@@ -106,30 +74,19 @@ for (const surface of ['terminal', 'desktop'] as const) {
     expect(await ui.find({ type: 'Text', text: /● Running 0/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /◆ needs you/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /map auth flow/ })).toBeDefined()
+    expect(ran[0]).toEqual(['hub', 'status', '--json'])
 
-    const query = ran.find(argv => argv[0] === 'sqlite3')
-    expect(query?.[1]).toBe('-readonly')
-    expect(query?.[3]).toBe('file:/home/me/Library/Application Support/orca/orchestration.db?mode=ro')
-
-    await ui.press({ key: 'go-ctx_9' })
-    expect(ran.at(-1)).toEqual(['orca', 'terminal', 'switch', '--terminal', 'term_9'])
+    await ui.press({ key: 'go-w9' })
+    expect(ran.at(-1)).toEqual(['hub', 'open', 'w9'])
   })
 }
 
 test('no Workers draws no band', async ($, on) => {
   world(on)
-  on('process.run', ($, e) => ({
-    value: {
-      exitCode: 0,
-      stdout: e.argv[0] === 'sqlite3' ? '' : `${REPO}\n`,
-      stderr: '',
-      isStdoutTruncated: false,
-      isStderrTruncated: false,
-    },
-  }))
+  on('process.run', hubStatus([]))
   await $.session.start({ cwd: REPO, surface: 'terminal', isInteractive: true })
   const ui = await $.ui.mount({ plugin: 'hub', surface: 'terminal', component: 'AbovePrompt', props: band(100) })
-  expect(await ui.find({ type: 'Text', text: /Workers ·/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /Workers/ })).toBeUndefined()
 })
 
 for (const surface of ['terminal', 'desktop'] as const) {
@@ -163,20 +120,14 @@ for (const surface of ['terminal', 'desktop'] as const) {
 
 test('worker badges are yellow needs you, blue running, green done', async ($, on) => {
   world(on)
-  const rows = JSON.stringify([
-    record({ id: 'n', handle: 'term_n', title: 'hinata: blocked one', open_questions: 1 }),
-    record({ id: 'r', handle: 'term_r', title: 'naruto: running one' }),
-    record({ id: 'd', handle: 'term_d', title: 'sasuke: done one', status: 'completed', completed_at: '2026-10-16 09:58:00' }),
-  ])
-  on('process.run', ($, e) => ({
-    value: {
-      exitCode: 0,
-      stdout: e.argv[0] === 'sqlite3' ? rows : e.argv[0] === 'printenv' ? '/home/me\n' : `${REPO}\n`,
-      stderr: '',
-      isStdoutTruncated: false,
-      isStderrTruncated: false,
-    },
-  }))
+  on(
+    'process.run',
+    hubStatus([
+      row({ id: 'w1', profile: 'hinata', title: 'blocked one', state: 'needs you' }),
+      row({ id: 'w2', title: 'running one' }),
+      row({ id: 'w3', profile: 'sasuke', title: 'done one', state: 'done' }),
+    ]),
+  )
   await $.session.start({ cwd: REPO, surface: 'terminal', isInteractive: true })
   const ui = await $.ui.mount({ plugin: 'hub', surface: 'terminal', component: 'AbovePrompt', props: band(120) })
   expect((await ui.find({ type: 'Text', text: /^◆ needs you/ }))?.props.color).toBe('yellow')
@@ -215,14 +166,12 @@ test('background rows are one dim line; the human prompt is untouched', async ($
     const { Text } = $.ui.resolve(e)
     return <Text>{e.props.text}</Text>
   })
-  const row = (text: string, kind: 'composer' | 'task-notification') =>
+  const message = (text: string, kind: 'composer' | 'task-notification') =>
     $.ui.mount({ plugin: 'hub', surface: 'terminal', component: 'UserMessage', props: { text, origin: { kind }, isExpanded: false } as never })
-  const mine = await row('run the tests', 'composer')
+  const mine = await message('run the tests', 'composer')
   const plain = await mine.find({ type: 'Text', text: /run the tests/ })
   expect(plain?.props.dimColor).toBeUndefined()
-  const task = await row('Background command "Listen" completed\nmore', 'task-notification')
+  const task = await message('Background command "Listen" completed\nmore', 'task-notification')
   const dim = await task.find({ type: 'Text', text: /Background command "Listen" completed/ })
   expect(dim?.props.dimColor).toBe(true)
-  const nudge = await row('You have 1 orchestration message. Run `orca orchestration check`.', 'composer')
-  expect((await nudge.find({ type: 'Text', text: /You have 1 orchestration message/ }))?.props.dimColor).toBe(true)
 })

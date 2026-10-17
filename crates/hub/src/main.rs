@@ -339,15 +339,18 @@ fn print_message(m: &Value) {
         "question" => format!("Answer: hub reply {id} \"<answer>\""),
         "done" => format!("Settled. Validate the report, then: hub worker close {worker}"),
         "blocker" => format!(
-            "Show the human the exact prompt. On their yes: hub worker key {worker} enter. On no: hub worker key {worker} esc"
+            "Show the human the exact prompt. On their yes: hub worker key {worker} enter. On no: hub worker key {worker} esc, then hub worker send {worker} \"<what to do instead>\""
         ),
         "exited" => format!("No Final Report. Check: hub worker read {worker}; then start the Task again or report it"),
         "lost" => format!("Resume: hub worker resume {worker}"),
         _ => String::new(),
     };
+    let kind = match m["kind"].as_str().unwrap_or("") {
+        "done" => format!("done ({})", m["state"].as_str().unwrap_or("")),
+        other => other.to_string(),
+    };
     println!(
-        "#{id} {} from {worker} ({}: {})\n{}",
-        m["kind"].as_str().unwrap_or(""),
+        "#{id} {kind} from {worker} ({}: {})\n{}",
         m["profile"].as_str().unwrap_or(""),
         m["title"].as_str().unwrap_or(""),
         m["body"].as_str().unwrap_or("").trim_end()

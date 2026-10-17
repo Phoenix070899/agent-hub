@@ -20,6 +20,8 @@ pub struct Spawn {
     pub args: Vec<String>,
     pub cwd: PathBuf,
     pub env: Vec<(String, String)>,
+    /// Inherited variables to drop, e.g. another agent's session markers.
+    pub env_remove: Vec<String>,
 }
 
 pub struct Live {
@@ -50,6 +52,9 @@ impl Live {
         let mut command = CommandBuilder::new(&spawn.program);
         command.args(&spawn.args);
         command.cwd(&spawn.cwd);
+        for key in &spawn.env_remove {
+            command.env_remove(key);
+        }
         for (key, value) in &spawn.env {
             command.env(key, value);
         }
