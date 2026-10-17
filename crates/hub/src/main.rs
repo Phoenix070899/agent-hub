@@ -103,6 +103,9 @@ enum Command {
     },
     /// Claude Code Notification hook for Workers (reads the hook JSON on stdin).
     Notify,
+    /// Claude Code status line for Hub agents: reports usage to the daemon, then runs the human's
+    /// own status line command, if any, on the same input.
+    Statusline,
     /// Make this terminal the Worker's terminal; Ctrl-] detaches.
     Attach { worker: String },
     /// Open the Worker's terminal in a new Ghostty window.
@@ -339,6 +342,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             println!("Final Report sent. Stop here and stay idle.");
         }
         Command::Notify => notify(),
+        Command::Statusline => statusline(),
         Command::Attach { worker } => attach::run(json!({ "id": parse_id(&worker)? }), &worker)?,
         Command::Open { worker } => open(parse_id(&worker)?)?,
     }
@@ -473,6 +477,39 @@ fn worker(command: WorkerCommand) -> Result<ExitCode> {
         }
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// Must never break the agent's status line: reporting is best effort, and the human's own
+/// status line command still gets the input and prints the line.
+fn statusline() {
+    let mut input = Vec::new();
+    if std::io::stdin().read_to_end(&mut input).is_err() {
+        return;
+    }
+    if let Ok(data) = serde_json::from_slice::<Value>(&input) {
+        let _ = proto::call("usage.report", json!({ "data": data }));
+    }
+    let settings = paths::home().join(".claude").join("settings.json");
+    let own = std::fs::read_to_string(settings)
+        .ok()
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        .and_then(|settings| settings["statusLine"]["command"].as_str().map(String::from))
+        .filter(|command| !command.contains("hub statusline"));
+    if let Some(command) = own {
+        use std::io::Write;
+        let child = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(&command)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::inherit())
+            .spawn();
+        if let Ok(mut child) = child {
+            if let Some(mut stdin) = child.stdin.take() {
+                let _ = stdin.write_all(&input);
+            }
+            let _ = child.wait();
+        }
+    }
 }
 
 /// The Notification hook must never break the Worker: it reports what it can and exits 0.

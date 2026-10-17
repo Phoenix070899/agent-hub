@@ -1,0 +1,12 @@
+{
+  "lastQuery": null,
+  "perAgentQuery": {},
+  "graftReads": 0,
+  "sourceReads": 0,
+  "savedTokens": 0,
+  "injectedPointers": [],
+  "nudges": 0,
+  "inputCostMicros": 140725,
+  "inputTokensBilled": 32492,
+  "lastBillingUuid": "059fe5f2-caa4-43c9-a9ef-035574e4e519"
+}

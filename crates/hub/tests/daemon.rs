@@ -402,3 +402,41 @@ fn simultaneous_starts_leave_one_daemon() {
     }
     assert_eq!(alive, 1, "exactly one daemon holds this state folder");
 }
+
+#[test]
+fn the_status_line_reports_usage_and_keeps_the_humans_own_line() {
+    let hub = Hub::new("usage");
+    let home = hub.state.join("home");
+    std::fs::create_dir_all(home.join(".claude")).unwrap();
+    std::fs::write(
+        home.join(".claude/settings.json"),
+        r#"{ "statusLine": { "type": "command", "command": "read -r line; echo \"own line: ${#line} chars\"" } }"#,
+    )
+    .unwrap();
+    hub.ok(&["status"]);
+    let input = r#"{"session_id":"s1","cost":{"total_cost_usd":2.5},"rate_limits":{"five_hour":{"used_percentage":43,"resets_at":1792200000},"seven_day":{"used_percentage":12,"resets_at":1792700000}}}"#;
+    let mut child = Command::new(env!("CARGO_BIN_EXE_hub"))
+        .arg("statusline")
+        .env("HUB_STATE", &hub.state)
+        .env("HOME", &home)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(format!("{input}\n").as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        format!("own line: {} chars", input.len())
+    );
+
+    let usage = hub.call("usage", serde_json::json!({}));
+    assert_eq!(usage["result"]["fiveHour"]["used_percentage"], 43);
+    assert_eq!(usage["result"]["sevenDay"]["used_percentage"], 12);
+    assert_eq!(usage["result"]["costUsd"], 2.5);
+}

@@ -25,7 +25,7 @@ struct HubApp: App {
         MenuBarExtra {
             MenuBarView().environmentObject(model)
         } label: {
-            MenuBarLabel(count: model.snapshot?.needsYouCount ?? 0)
+            MenuBarLabel(count: model.needsYouCount)
         }
     }
 }
@@ -63,7 +63,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     }
 
     func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse) async {
-        let worker = response.notification.request.content.userInfo["worker"] as? String
-        await MainActor.run { AppModel.shared.reveal(worker: worker) }
+        let info = response.notification.request.content.userInfo
+        let worker = info["worker"] as? String
+        let repo = info["repo"] as? String
+        await MainActor.run { AppModel.shared.reveal(repo: repo, worker: worker) }
     }
 }

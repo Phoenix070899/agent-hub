@@ -37,6 +37,8 @@ pub fn orchestrator_args(
         hub.join("mod").display().to_string(),
         "--add-dir".into(),
         hub.display().to_string(),
+        "--settings".into(),
+        hub.join("settings").join("orchestrator.json").display().to_string(),
         "--append-system-prompt".into(),
         prompt,
     ];

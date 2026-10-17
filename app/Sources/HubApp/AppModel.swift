@@ -2,22 +2,29 @@ import AppKit
 import HubCore
 import SwiftUI
 
-/// What the sidebar has selected.
+/// What the sidebar has selected: a session's Orchestrator, or one of its Workers.
 enum Selection: Hashable {
-    case orchestrator
-    case worker(String)
+    case orchestrator(repo: String)
+    case worker(repo: String, id: String)
+
+    var repo: String {
+        switch self {
+        case .orchestrator(let repo), .worker(let repo, _): return repo
+        }
+    }
 }
 
-/// The app's state: which Hub Session it shows, that session's live snapshot, and the selection.
-/// Every daemon call runs off the main thread; results come back here.
+/// The app's state: every Hub Session the daemon knows, each one's live snapshot, and the
+/// selection. Every daemon call runs off the main thread; results come back here.
 @MainActor
 final class AppModel: ObservableObject {
     static let shared = AppModel()
 
     @Published private(set) var sessions: [SessionInfo] = []
-    @Published private(set) var repo: String?
-    @Published private(set) var snapshot: Snapshot?
-    @Published var selection: Selection? = .orchestrator
+    @Published private(set) var snapshots: [String: Snapshot] = [:]
+    @Published var selection: Selection?
+    /// Sessions whose Worker list is folded in the sidebar.
+    @Published var collapsed: Set<String> = []
     @Published private(set) var connected = false
     @Published var error: String?
 
@@ -25,24 +32,28 @@ final class AppModel: ObservableObject {
     /// Set by the window, so a notification or the menu bar can bring it back after it closed.
     var openMainWindow: (() -> Void)?
 
-    private var tracker = NeedTracker()
-    private var events: HubSocket?
-    private var generation = 0
+    private var trackers: [String: NeedTracker] = [:]
+    /// Each followed session's events connection generation; bumping it stops the old follower.
+    private var following: [String: Int] = [:]
+    private var sockets: [String: HubSocket] = [:]
+    private var nextGeneration = 0
     private static let lastRepoKey = "lastRepo"
 
-    var repoName: String { repo.map { URL(fileURLWithPath: $0).lastPathComponent } ?? "No session" }
+    var selectedRepo: String? { selection?.repo }
+    var selectedSnapshot: Snapshot? { selectedRepo.flatMap { snapshots[$0] } }
+    var needsYouCount: Int { snapshots.values.reduce(0) { $0 + $1.needsYouCount } }
+    /// Account-wide: the freshest any session's snapshot carries.
+    var usage: Usage? { snapshots.values.compactMap(\.usage).max { ($0.updatedAt ?? 0) < ($1.updatedAt ?? 0) } }
 
     func start() {
         Notifier.requestPermission()
-        background { client in
-            try Self.ensureDaemon(client)
-            return try client.sessions()
-        } then: { sessions in
-            self.sessions = sessions
+        refreshSessions { sessions in
             let last = UserDefaults.standard.string(forKey: Self.lastRepoKey)
-            if let repo = last ?? sessions.first(where: \.live)?.repo ?? sessions.first?.repo {
-                self.open(repo: repo)
-            }
+            let pick = sessions.first { $0.repo == last } ?? sessions.first(where: \.live) ?? sessions.first
+            if self.selection == nil, let pick { self.selection = .orchestrator(repo: pick.repo) }
+        }
+        Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { _ in
+            Task { @MainActor in AppModel.shared.refreshSessions() }
         }
     }
 
@@ -60,6 +71,20 @@ final class AppModel: ObservableObject {
         _ = try HubSocket(path: client.socketPath)
     }
 
+    /// Reloads the session list and follows every session not yet followed.
+    func refreshSessions(then done: (([SessionInfo]) -> Void)? = nil) {
+        background { client in
+            try Self.ensureDaemon(client)
+            return try client.sessions()
+        } then: { sessions in
+            self.sessions = sessions
+            for session in sessions where self.following[session.repo] == nil {
+                self.follow(repo: session.repo)
+            }
+            done?(sessions)
+        }
+    }
+
     func chooseSession() {
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
@@ -70,27 +95,32 @@ final class AppModel: ObservableObject {
         open(repo: url.path)
     }
 
-    /// Starts (or finds) the repo's Orchestrator and follows its session.
+    /// Starts (or finds) the repo's Orchestrator and selects it.
     func open(repo path: String) {
         background { client in
             try Self.ensureDaemon(client)
             let result = try client.call("session.open", ["repo": path]) as? [String: Any]
-            return (result?["repo"] as? String ?? path, try client.sessions())
-        } then: { (repo: String, sessions: [SessionInfo]) in
-            self.sessions = sessions
-            self.repo = repo
-            self.snapshot = nil
-            self.selection = .orchestrator
-            self.tracker = NeedTracker()
-            UserDefaults.standard.set(repo, forKey: Self.lastRepoKey)
-            self.follow(repo: repo)
+            return result?["repo"] as? String ?? path
+        } then: { repo in
+            self.select(.orchestrator(repo: repo))
+            self.collapsed.remove(repo)
+            self.refreshSessions()
         }
     }
 
+    func select(_ selection: Selection) {
+        self.selection = selection
+        UserDefaults.standard.set(selection.repo, forKey: Self.lastRepoKey)
+    }
+
+    func toggleCollapsed(_ repo: String) {
+        if collapsed.contains(repo) { collapsed.remove(repo) } else { collapsed.insert(repo) }
+    }
+
     private func follow(repo: String) {
-        events?.shutdown()
-        generation += 1
-        let generation = generation
+        nextGeneration += 1
+        let generation = nextGeneration
+        following[repo] = generation
         let client = client
         Thread.detachNewThread { [weak self] in
             while true {
@@ -98,20 +128,20 @@ final class AppModel: ObservableObject {
                     try Self.ensureDaemon(client)
                     let socket = try client.open("events", ["repo": repo])
                     _ = try DaemonClient.result(of: socket.readLine())
-                    let stillCurrent = DispatchQueue.main.sync { () -> Bool in
-                        guard let self, self.generation == generation else { return false }
-                        self.events = socket
+                    let current = DispatchQueue.main.sync { () -> Bool in
+                        guard let self, self.following[repo] == generation else { return false }
+                        self.sockets[repo] = socket
                         self.connected = true
                         return true
                     }
-                    guard stillCurrent else { return socket.shutdown() }
+                    guard current else { return socket.shutdown() }
                     while true {
                         let snapshot = try JSONDecoder().decode(Snapshot.self, from: socket.readLine())
-                        DispatchQueue.main.async { self?.apply(snapshot, generation: generation) }
+                        DispatchQueue.main.async { self?.apply(snapshot, repo: repo, generation: generation) }
                     }
                 } catch {
                     let stop = DispatchQueue.main.sync { () -> Bool in
-                        guard let self, self.generation == generation else { return true }
+                        guard let self, self.following[repo] == generation else { return true }
                         self.connected = false
                         return false
                     }
@@ -122,20 +152,26 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func apply(_ snapshot: Snapshot, generation: Int) {
-        guard generation == self.generation else { return }
-        self.snapshot = snapshot
+    private func apply(_ snapshot: Snapshot, repo: String, generation: Int) {
+        guard following[repo] == generation else { return }
+        snapshots[repo] = snapshot
+        var tracker = trackers[repo] ?? NeedTracker()
         for need in tracker.fresh(in: snapshot.needs) {
-            Notifier.post(need)
+            Notifier.post(need, repo: repo)
         }
-        if case .worker(let id)? = selection, !snapshot.workers.contains(where: { $0.id == id }) {
-            selection = .orchestrator
+        trackers[repo] = tracker
+        if case .worker(let selected, let id)? = selection, selected == repo,
+           !snapshot.workers.contains(where: { $0.id == id }) {
+            selection = .orchestrator(repo: repo)
         }
     }
 
-    /// Brings the window forward on a Worker (or the Orchestrator).
-    func reveal(worker: String?) {
-        if let worker { selection = .worker(worker) }
+    /// Brings the window forward on a session's Worker, or its Orchestrator.
+    func reveal(repo: String?, worker: String?) {
+        if let repo {
+            collapsed.remove(repo)
+            select(worker.map { .worker(repo: repo, id: $0) } ?? .orchestrator(repo: repo))
+        }
         openMainWindow?()
         NSApp.activate(ignoringOtherApps: true)
     }
@@ -149,14 +185,8 @@ final class AppModel: ObservableObject {
         background { client in try client.reply(message: need.message, text: text) } then: { _ in }
     }
 
-    func stopOrchestrator() {
-        guard let repo else { return }
+    func stopOrchestrator(repo: String) {
         background { client in try client.call("session.close", ["repo": repo]) } then: { _ in }
-    }
-
-    func restartOrchestrator() {
-        guard let repo else { return }
-        open(repo: repo)
     }
 
     /// Runs `work` off the main thread; shows its error, or hands its result to `then`.

@@ -10,12 +10,15 @@ public struct Snapshot: Decodable, Equatable, Sendable {
     public let orchestrator: Orchestrator
     public let workers: [WorkerRow]
     public let needs: [Need]
+    /// Account-wide; every session's snapshot carries the same.
+    public let usage: Usage?
 
-    public init(repo: String, orchestrator: Orchestrator, workers: [WorkerRow], needs: [Need]) {
+    public init(repo: String, orchestrator: Orchestrator, workers: [WorkerRow], needs: [Need], usage: Usage? = nil) {
         self.repo = repo
         self.orchestrator = orchestrator
         self.workers = workers
         self.needs = needs
+        self.usage = usage
     }
 
     public static func empty(repo: String) -> Snapshot {
@@ -23,6 +26,30 @@ public struct Snapshot: Decodable, Equatable, Sendable {
     }
 
     public var needsYouCount: Int { needs.count }
+}
+
+/// Claude usage as the Hub agents' status lines report it.
+public struct Usage: Decodable, Equatable, Sendable {
+    /// One plan limit window, e.g. the rolling 5 hours or 7 days.
+    public struct Window: Decodable, Equatable, Sendable {
+        public let usedPercentage: Double?
+        public let resetsAt: Double?
+
+        enum CodingKeys: String, CodingKey {
+            case usedPercentage = "used_percentage"
+            case resetsAt = "resets_at"
+        }
+
+        public var resetDate: Date? { resetsAt.map { Date(timeIntervalSince1970: $0) } }
+    }
+
+    public let fiveHour: Window?
+    public let sevenDay: Window?
+    /// Estimated cost of every Hub agent session since the daemon started.
+    public let costUsd: Double
+    public let updatedAt: Int?
+
+    public var hasLimits: Bool { fiveHour?.usedPercentage != nil || sevenDay?.usedPercentage != nil }
 }
 
 /// A Worker's Dashboard state.

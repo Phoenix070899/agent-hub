@@ -11,14 +11,14 @@ enum Notifier {
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
     }
 
-    static func post(_ need: Need) {
+    static func post(_ need: Need, repo: String) {
         guard isAvailable else { return }
         let content = UNMutableNotificationContent()
-        content.title = "\(need.worker) needs you"
+        content.title = "\(need.worker) needs you · \(URL(fileURLWithPath: repo).lastPathComponent)"
         content.subtitle = "\(need.profile): \(need.title)"
         content.body = summary(of: need)
         content.sound = .default
-        content.userInfo = ["worker": need.worker]
+        content.userInfo = ["worker": need.worker, "repo": repo]
         let request = UNNotificationRequest(identifier: need.id, content: content, trigger: nil)
         UNUserNotificationCenter.current().add(request)
     }

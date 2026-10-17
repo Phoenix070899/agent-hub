@@ -40,7 +40,9 @@ struct NeedCard: View {
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                     Spacer()
-                    Button("Open") { model.selection = .worker(need.worker) }
+                    Button("Open") {
+                        if let repo = model.selectedRepo { model.select(.worker(repo: repo, id: need.worker)) }
+                    }
                         .buttonStyle(.link)
                         .font(.callout)
                 }

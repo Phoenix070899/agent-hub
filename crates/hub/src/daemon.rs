@@ -37,9 +37,52 @@ pub struct Hub {
     orchestrators: Mutex<HashMap<String, Arc<Live>>>,
     tick: Mutex<u64>,
     changed: Condvar,
+    usage: Mutex<Usage>,
     hub_dir: PathBuf,
     /// Tests only: run this program with the spec instead of `claude`.
     test_agent: Option<String>,
+}
+
+/// Claude usage as the agents' status lines report it: the account's plan limits, and each
+/// Claude session's estimated cost since this daemon started.
+#[derive(Default)]
+struct Usage {
+    five_hour: Option<Value>,
+    seven_day: Option<Value>,
+    costs: HashMap<String, f64>,
+    updated_at: Option<i64>,
+}
+
+impl Usage {
+    /// Records one status line update; true when something the Hub App shows changed.
+    fn report(&mut self, data: &Value) -> bool {
+        let before = self.view();
+        let limits = &data["rate_limits"];
+        if limits["five_hour"].is_object() {
+            self.five_hour = Some(limits["five_hour"].clone());
+        }
+        if limits["seven_day"].is_object() {
+            self.seven_day = Some(limits["seven_day"].clone());
+        }
+        if let (Some(session), Some(cost)) = (data["session_id"].as_str(), data["cost"]["total_cost_usd"].as_f64()) {
+            self.costs.insert(session.to_string(), cost);
+        }
+        self.updated_at = Some(db::now());
+        // Cents, not every fraction of one, so busy sessions do not flood the events stream.
+        let rounded = |v: &Value| (v["costUsd"].as_f64().unwrap_or(0.0) * 100.0).round() as i64;
+        before["fiveHour"] != self.view()["fiveHour"]
+            || before["sevenDay"] != self.view()["sevenDay"]
+            || rounded(&before) != rounded(&self.view())
+    }
+
+    fn view(&self) -> Value {
+        json!({
+            "fiveHour": self.five_hour,
+            "sevenDay": self.seven_day,
+            "costUsd": self.costs.values().sum::<f64>(),
+            "updatedAt": self.updated_at,
+        })
+    }
 }
 
 pub fn run() -> Result<()> {
@@ -66,6 +109,7 @@ pub fn run() -> Result<()> {
         orchestrators: Mutex::new(HashMap::new()),
         tick: Mutex::new(0),
         changed: Condvar::new(),
+        usage: Mutex::new(Usage::default()),
         hub_dir: paths::hub_dir(),
         test_agent: std::env::var("HUB_TEST_AGENT").ok(),
     });
@@ -319,6 +363,13 @@ impl Hub {
                 Ok(json!({}))
             }
             "sessions.list" => self.list_sessions(),
+            "usage.report" => {
+                if self.usage.lock().unwrap().report(param(p, "data")?) {
+                    self.notify();
+                }
+                Ok(json!({}))
+            }
+            "usage" => Ok(self.usage.lock().unwrap().view()),
             "decide" => self.decide(p),
             "worker.close" => self.close_worker(id_param(p, "id")?),
             "worker.resume" => self.resume_worker(id_param(p, "id")?),
@@ -874,6 +925,7 @@ impl Hub {
             "orchestrator": { "live": self.orchestrators.lock().unwrap().contains_key(repo) },
             "workers": self.rows(repo)?,
             "needs": self.needs(repo)?,
+            "usage": self.usage.lock().unwrap().view(),
         }))
     }
 
@@ -1031,6 +1083,22 @@ pub fn key_bytes(key: &str) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn usage_keeps_the_latest_limits_and_sums_session_costs() {
+        let mut usage = Usage::default();
+        let limits = json!({ "five_hour": { "used_percentage": 43.0, "resets_at": 1792200000 } });
+        assert!(usage.report(&json!({ "session_id": "a", "cost": { "total_cost_usd": 1.25 }, "rate_limits": limits })));
+        assert!(usage.report(&json!({ "session_id": "b", "cost": { "total_cost_usd": 0.5 } })));
+        assert!(
+            !usage.report(&json!({ "session_id": "b", "cost": { "total_cost_usd": 0.501 } })),
+            "under a cent is quiet"
+        );
+        let view = usage.view();
+        assert_eq!(view["fiveHour"]["used_percentage"], 43.0);
+        assert!(view["sevenDay"].is_null());
+        assert_eq!(view["costUsd"], 1.751);
+    }
 
     #[test]
     fn titles_come_from_the_first_spec_line() {
