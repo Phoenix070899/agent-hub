@@ -185,6 +185,10 @@ final class AppModel: ObservableObject {
         background { client in try client.reply(message: need.message, text: text) } then: { _ in }
     }
 
+    func refreshUsage() {
+        background { client in try client.call("usage.refresh") } then: { _ in }
+    }
+
     func stopOrchestrator(repo: String) {
         background { client in try client.call("session.close", ["repo": repo]) } then: { _ in }
     }

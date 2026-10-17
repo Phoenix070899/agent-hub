@@ -23,10 +23,5 @@
         ]
       }
     ]
-  },
-  "statusLine": {
-    "type": "command",
-    "command": "hub statusline",
-    "padding": 2
   }
 }

@@ -28,28 +28,21 @@ public struct Snapshot: Decodable, Equatable, Sendable {
     public var needsYouCount: Int { needs.count }
 }
 
-/// Claude usage as the Hub agents' status lines report it.
+/// The Claude account's plan limits, as `claude -p /usage` prints them.
 public struct Usage: Decodable, Equatable, Sendable {
-    /// One plan limit window, e.g. the rolling 5 hours or 7 days.
-    public struct Window: Decodable, Equatable, Sendable {
-        public let usedPercentage: Double?
-        public let resetsAt: Double?
+    /// One limit, e.g. "Session" 48% resetting "Oct 17 at 4:50pm".
+    public struct Limit: Decodable, Equatable, Sendable, Identifiable {
+        public let name: String
+        public let percent: Int
+        public let resets: String?
 
-        enum CodingKeys: String, CodingKey {
-            case usedPercentage = "used_percentage"
-            case resetsAt = "resets_at"
-        }
-
-        public var resetDate: Date? { resetsAt.map { Date(timeIntervalSince1970: $0) } }
+        public var id: String { name }
     }
 
-    public let fiveHour: Window?
-    public let sevenDay: Window?
-    /// Estimated cost of every Hub agent session since the daemon started.
-    public let costUsd: Double
+    public let limits: [Limit]
     public let updatedAt: Int?
-
-    public var hasLimits: Bool { fiveHour?.usedPercentage != nil || sevenDay?.usedPercentage != nil }
+    public let error: String?
+    public let refreshing: Bool
 }
 
 /// A Worker's Dashboard state.

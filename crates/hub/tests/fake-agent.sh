@@ -1,5 +1,13 @@
 #!/bin/sh
 # A stand-in for `claude` in daemon tests: $1 is the Task spec, and its first word picks a script.
+if [ "$1" = "-p" ] && [ "$2" = "/usage" ]; then
+  # What `claude -p /usage` prints on a subscription.
+  printf 'You are currently using your subscription to power your Claude Code usage\n\n'
+  printf 'Current session: 48%% used · resets Oct 17 at 4:50pm (Asia/Saigon)\n'
+  printf 'Current week (all models): 9%% used · resets Oct 23 at 11pm (Asia/Saigon)\n'
+  printf 'Current week (Fable): 0%% used · resets Oct 23 at 11pm (Asia/Saigon)\n'
+  exit 0
+fi
 echo "· Working… (1s · fake agent)"
 case "$1" in
   ask*) answer=$(hub ask "Which color?") && hub done --state done "answer was $answer" ;;

@@ -341,26 +341,34 @@ struct SessionToolbar: ToolbarContent {
     }
 }
 
-/// Claude usage at the foot of the window: the plan limits, and what the Hub agents cost.
+/// The Claude account's plan limits at the foot of the window. Click to re-read them.
 struct UsageFooter: View {
+    @EnvironmentObject private var model: AppModel
     let usage: Usage?
 
     var body: some View {
-        HStack(spacing: 18) {
-            if let usage, usage.hasLimits {
-                if let window = usage.fiveHour { LimitGauge(name: "5-hour", window: window, resetStyle: .time) }
-                if let window = usage.sevenDay { LimitGauge(name: "Weekly", window: window, resetStyle: .day) }
+        HStack(spacing: 20) {
+            if let usage, !usage.limits.isEmpty {
+                ForEach(usage.limits) { limit in
+                    LimitGauge(limit: limit)
+                }
+            } else if let error = usage?.error {
+                Label(error, systemImage: "exclamationmark.triangle")
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
             } else {
-                Label("Plan limits appear once an agent gets a reply", systemImage: "gauge.with.dots.needle.0percent")
+                Label("Reading Claude usage…", systemImage: "gauge.with.dots.needle.0percent")
                     .foregroundStyle(.secondary)
             }
-            Spacer()
-            if let usage {
-                Label(usage.costUsd.formatted(.currency(code: "USD")), systemImage: "dollarsign.circle")
-                    .foregroundStyle(.secondary)
-                    .monospacedDigit()
-                    .help("Estimated API cost of every Hub agent session since the Hub Daemon started")
+            Spacer(minLength: 8)
+            Button { model.refreshUsage() } label: {
+                Image(systemName: "arrow.clockwise")
+                    .rotationEffect(.degrees(usage?.refreshing == true ? 180 : 0))
+                    .animation(.easeInOut(duration: 0.4), value: usage?.refreshing)
             }
+            .buttonStyle(.borderless)
+            .foregroundStyle(.secondary)
+            .help(updatedHelp)
         }
         .font(.callout)
         .labelStyle(.titleAndIcon)
@@ -370,33 +378,50 @@ struct UsageFooter: View {
         .background(.bar)
         .overlay(alignment: .top) { Divider() }
     }
+
+    private var updatedHelp: String {
+        guard let at = usage?.updatedAt else { return "Refresh Claude usage" }
+        let date = Date(timeIntervalSince1970: TimeInterval(at))
+        return "Claude account usage, updated \(date.formatted(.relative(presentation: .named))). Click to refresh."
+    }
 }
 
 struct LimitGauge: View {
-    enum ResetStyle { case time, day }
+    let limit: Usage.Limit
 
-    let name: String
-    let window: Usage.Window
-    let resetStyle: ResetStyle
+    private var fraction: Double { min(max(Double(limit.percent) / 100, 0), 1) }
 
-    private var fraction: Double { min(max((window.usedPercentage ?? 0) / 100, 0), 1) }
+    /// "Oct 17 at 4:50pm" reads "4:50pm" today, else "Oct 23".
+    private var shortReset: String? {
+        guard let resets = limit.resets else { return nil }
+        let parts = resets.components(separatedBy: " at ")
+        guard parts.count == 2 else { return resets }
+        return parts[0] == Self.today() ? parts[1] : parts[0]
+    }
+
+    /// Today as `/usage` writes dates, "Oct 17", whatever the Mac's locale.
+    private static func today() -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "MMM d"
+        return formatter.string(from: Date())
+    }
     private var tint: Color { fraction >= 0.9 ? .red : fraction >= 0.7 ? .orange : .accentColor }
 
     var body: some View {
         HStack(spacing: 7) {
-            Text(name).foregroundStyle(.secondary)
+            Text(limit.name).foregroundStyle(.secondary)
             ProgressView(value: fraction)
                 .progressViewStyle(.linear)
                 .tint(tint)
-                .frame(width: 70)
-            Text("\(Int((window.usedPercentage ?? 0).rounded()))%")
+                .frame(width: 64)
+            Text("\(limit.percent)%")
                 .monospacedDigit()
                 .foregroundStyle(fraction >= 0.7 ? tint : .primary)
-            if let reset = window.resetDate {
-                Text("resets \(reset.formatted(resetStyle == .time ? .dateTime.hour().minute() : .dateTime.weekday(.abbreviated).hour().minute()))")
-                    .foregroundStyle(.secondary)
+            if let reset = shortReset {
+                Text(reset).foregroundStyle(.tertiary)
             }
         }
-        .help("\(name) plan limit")
+        .help(limit.resets.map { "\(limit.name): \(limit.percent)% used, resets \($0)" } ?? "\(limit.name): \(limit.percent)% used")
     }
 }

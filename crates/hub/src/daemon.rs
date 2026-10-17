@@ -43,46 +43,76 @@ pub struct Hub {
     test_agent: Option<String>,
 }
 
-/// Claude usage as the agents' status lines report it: the account's plan limits, and each
-/// Claude session's estimated cost since this daemon started.
+/// How often account usage is re-read while someone watches the events stream.
+const USAGE_EVERY: Duration = Duration::from_secs(5 * 60);
+
+/// The Claude account's plan limits, as `claude -p /usage` prints them.
 #[derive(Default)]
 struct Usage {
-    five_hour: Option<Value>,
-    seven_day: Option<Value>,
-    costs: HashMap<String, f64>,
+    limits: Vec<Value>,
     updated_at: Option<i64>,
+    error: Option<String>,
+    refreshing: bool,
+    refreshed: Option<Instant>,
 }
 
 impl Usage {
-    /// Records one status line update; true when something the Hub App shows changed.
-    fn report(&mut self, data: &Value) -> bool {
-        let before = self.view();
-        let limits = &data["rate_limits"];
-        if limits["five_hour"].is_object() {
-            self.five_hour = Some(limits["five_hour"].clone());
-        }
-        if limits["seven_day"].is_object() {
-            self.seven_day = Some(limits["seven_day"].clone());
-        }
-        if let (Some(session), Some(cost)) = (data["session_id"].as_str(), data["cost"]["total_cost_usd"].as_f64()) {
-            self.costs.insert(session.to_string(), cost);
-        }
-        self.updated_at = Some(db::now());
-        // Cents, not every fraction of one, so busy sessions do not flood the events stream.
-        let rounded = |v: &Value| (v["costUsd"].as_f64().unwrap_or(0.0) * 100.0).round() as i64;
-        before["fiveHour"] != self.view()["fiveHour"]
-            || before["sevenDay"] != self.view()["sevenDay"]
-            || rounded(&before) != rounded(&self.view())
-    }
-
     fn view(&self) -> Value {
-        json!({
-            "fiveHour": self.five_hour,
-            "sevenDay": self.seven_day,
-            "costUsd": self.costs.values().sum::<f64>(),
-            "updatedAt": self.updated_at,
-        })
+        json!({ "limits": self.limits, "updatedAt": self.updated_at, "error": self.error, "refreshing": self.refreshing })
     }
+}
+
+/// Runs `<claude> -p /usage` outside any agent session and parses its limits; gives up after a minute.
+fn run_usage(program: &str) -> Result<Vec<Value>> {
+    let mut command = std::process::Command::new(program);
+    command
+        .args(["-p", "/usage"])
+        .current_dir(paths::state_dir())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+    for key in inherited_agent_vars() {
+        command.env_remove(key);
+    }
+    let mut child = command
+        .spawn()
+        .with_context(|| format!("running {program} -p /usage"))?;
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while child.try_wait()?.is_none() {
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            bail!("`claude -p /usage` took over a minute");
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    let mut text = String::new();
+    child.stdout.take().context("no output")?.read_to_string(&mut text)?;
+    Ok(parse_usage(&text))
+}
+
+/// The limit lines of `/usage`, e.g. "Current week (all models): 9% used · resets Oct 23 at 11pm (Asia/Saigon)".
+fn parse_usage(text: &str) -> Vec<Value> {
+    text.lines()
+        .filter_map(|line| {
+            let rest = line.trim().strip_prefix("Current ")?;
+            let (name, rest) = rest.split_once(": ")?;
+            let (percent, rest) = rest.split_once("% used")?;
+            let percent: i64 = percent.trim().parse().ok()?;
+            let resets = rest
+                .split_once("resets ")
+                .map(|(_, at)| at.split(" (").next().unwrap_or(at).trim().to_string());
+            let name = match name {
+                "session" => "Session".to_string(),
+                "week (all models)" => "Week".to_string(),
+                other => {
+                    let mut name = other.to_string();
+                    name[..1].make_ascii_uppercase();
+                    name
+                }
+            };
+            Some(json!({ "name": name, "percent": percent, "resets": resets }))
+        })
+        .collect()
 }
 
 pub fn run() -> Result<()> {
@@ -363,10 +393,8 @@ impl Hub {
                 Ok(json!({}))
             }
             "sessions.list" => self.list_sessions(),
-            "usage.report" => {
-                if self.usage.lock().unwrap().report(param(p, "data")?) {
-                    self.notify();
-                }
+            "usage.refresh" => {
+                self.refresh_usage();
                 Ok(json!({}))
             }
             "usage" => Ok(self.usage.lock().unwrap().view()),
@@ -929,14 +957,54 @@ impl Hub {
         }))
     }
 
+    /// Re-reads the account's plan limits with `claude -p /usage` on a thread of its own: it prints
+    /// the account's limits without a model call, and takes a few seconds.
+    fn refresh_usage(self: &Arc<Self>) {
+        {
+            let mut usage = self.usage.lock().unwrap();
+            if usage.refreshing {
+                return;
+            }
+            usage.refreshing = true;
+            usage.refreshed = Some(Instant::now());
+        }
+        let program = self.test_agent.clone().unwrap_or_else(|| "claude".into());
+        let hub = Arc::clone(self);
+        std::thread::spawn(move || {
+            let result = run_usage(&program);
+            let mut usage = hub.usage.lock().unwrap();
+            usage.refreshing = false;
+            match result {
+                Ok(limits) if !limits.is_empty() => {
+                    usage.limits = limits;
+                    usage.updated_at = Some(db::now());
+                    usage.error = None;
+                }
+                Ok(_) => usage.error = Some("`claude -p /usage` printed no plan limits".into()),
+                Err(error) => usage.error = Some(format!("{error:#}")),
+            }
+            drop(usage);
+            hub.notify();
+        });
+    }
+
     /// Streams a snapshot line now, after every change, and every 5 seconds, until the client leaves.
-    fn events(&self, p: &Value, mut stream: UnixStream) -> Result<()> {
+    fn events(self: &Arc<Self>, p: &Value, mut stream: UnixStream) -> Result<()> {
         let repo = match str_param(p, "repo").and_then(|repo| repo::root(Path::new(repo))) {
             Ok(repo) => repo.display().to_string(),
             Err(error) => return proto::write_line(&mut stream, &proto::err(&error)),
         };
         proto::write_line(&mut stream, &proto::ok(json!({ "repo": repo })))?;
         loop {
+            let stale = self
+                .usage
+                .lock()
+                .unwrap()
+                .refreshed
+                .is_none_or(|at| at.elapsed() >= USAGE_EVERY);
+            if stale {
+                self.refresh_usage();
+            }
             let seen = *self.tick.lock().unwrap();
             if proto::write_line(&mut stream, &self.snapshot(&repo)?).is_err() {
                 return Ok(());
@@ -1085,19 +1153,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn usage_keeps_the_latest_limits_and_sums_session_costs() {
-        let mut usage = Usage::default();
-        let limits = json!({ "five_hour": { "used_percentage": 43.0, "resets_at": 1792200000 } });
-        assert!(usage.report(&json!({ "session_id": "a", "cost": { "total_cost_usd": 1.25 }, "rate_limits": limits })));
-        assert!(usage.report(&json!({ "session_id": "b", "cost": { "total_cost_usd": 0.5 } })));
-        assert!(
-            !usage.report(&json!({ "session_id": "b", "cost": { "total_cost_usd": 0.501 } })),
-            "under a cent is quiet"
+    fn usage_lines_become_named_limits() {
+        let text = "You are currently using your subscription to power your Claude Code usage\n\n\
+                    Current session: 48% used · resets Oct 17 at 4:50pm (Asia/Saigon)\n\
+                    Current week (all models): 9% used · resets Oct 23 at 11pm (Asia/Saigon)\n\
+                    Current week (Fable): 0% used\n\
+                    Last 24h · 1962 requests · 64 sessions\n  74% of your usage was at >150k context";
+        let limits = parse_usage(text);
+        assert_eq!(limits.len(), 3);
+        assert_eq!(
+            limits[0],
+            json!({ "name": "Session", "percent": 48, "resets": "Oct 17 at 4:50pm" })
         );
-        let view = usage.view();
-        assert_eq!(view["fiveHour"]["used_percentage"], 43.0);
-        assert!(view["sevenDay"].is_null());
-        assert_eq!(view["costUsd"], 1.751);
+        assert_eq!(limits[1]["name"], "Week");
+        assert_eq!(
+            limits[2],
+            json!({ "name": "Week (Fable)", "percent": 0, "resets": null })
+        );
     }
 
     #[test]

@@ -9,8 +9,8 @@ let snapshotLine = """
 "blocker":"permission_prompt","openQuestions":[],"finalReport":null}],"needs":[{"kind":"permission_prompt",\
 "message":9,"worker":"w3","profile":"bash","title":"Remove junk","body":"Blocked: permission_prompt",\
 "prompt":"Bash command\\nrm -rf junk\\nDo you want to proceed?","at":1792200000},{"kind":"something_new",\
-"message":10,"worker":"w3","profile":"bash","title":"Remove junk","body":"?","prompt":"","at":1792200001}],"usage":{"fiveHour":{"used_percentage":43.5,"resets_at":1792200000},\
-"sevenDay":null,"costUsd":2.5,"updatedAt":1792199000}}
+"message":10,"worker":"w3","profile":"bash","title":"Remove junk","body":"?","prompt":"","at":1792200001}],"usage":{"limits":[{"name":"Session","percent":48,"resets":"Oct 17 at 4:50pm"},\
+{"name":"Week (Fable)","percent":0,"resets":null}],"updatedAt":1792199000,"error":null,"refreshing":false}}
 """
 
 @Test func decodesTheDaemonSnapshot() throws {
@@ -22,10 +22,9 @@ let snapshotLine = """
     #expect(snapshot.needs[0].prompt?.hasSuffix("Do you want to proceed?") == true)
     #expect(snapshot.needs[1].kind == .other, "unknown kinds still decode")
     #expect(snapshot.needsYouCount == 2)
-    #expect(snapshot.usage?.fiveHour?.usedPercentage == 43.5)
-    #expect(snapshot.usage?.sevenDay == nil)
-    #expect(snapshot.usage?.costUsd == 2.5)
-    #expect(snapshot.usage?.hasLimits == true)
+    #expect(snapshot.usage?.limits.map(\.name) == ["Session", "Week (Fable)"])
+    #expect(snapshot.usage?.limits.first?.percent == 48)
+    #expect(snapshot.usage?.limits.last?.resets == nil)
 }
 
 @Test func needsAnnounceOnceAndNotWhatWasWaitingAtLaunch() throws {
