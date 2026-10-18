@@ -63,6 +63,22 @@ let snapshotLine = """
     #expect(droppedPaths(["/tmp/it's"]) == "/tmp/it\\'s ")
 }
 
+@Test func issuesAreTypedAsANumberOrAURL() {
+    #expect(issueReference("12") == "12")
+    #expect(issueReference(" #12 ") == "12")
+    #expect(issueReference("https://github.com/o/r/issues/12") == "https://github.com/o/r/issues/12")
+    #expect(issueReference("https://github.com/o/r/pull/12") == nil)
+    #expect(issueReference("fix the bench") == nil)
+    #expect(issueReference("#") == nil)
+}
+
+@Test func anIssueBecomesTheFirstRequest() throws {
+    let json = #"{"number":12,"title":"Flaky bench","body":"It fails 1 in 5.\n","url":"https://github.com/o/r/issues/12"}"#
+    let issue = try JSONDecoder().decode(GitHubIssue.self, from: Data(json.utf8))
+    #expect(issue.name == "#12 Flaky bench")
+    #expect(issue.request == "Work on GitHub issue #12: Flaky bench\nhttps://github.com/o/r/issues/12\n\nIt fails 1 in 5.")
+}
+
 @Test func oneWorkerIsSingular() {
     #expect(workers(1, "running") == "1 Worker running")
     #expect(workers(3, "at work") == "3 Workers at work")

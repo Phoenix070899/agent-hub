@@ -13,11 +13,13 @@ const RESUMED: &str = "Your terminal was restarted. Run `hub worker list`, give 
                        and start the listener if Workers are open.";
 
 /// Arguments after `claude` for a repo's Orchestrator: a new session, or its saved one resumed.
+/// A new session given a `request` starts on it, as if the human had typed it first.
 pub fn orchestrator_args(
     hub: &Path,
     repo: &Path,
     session_id: &str,
     resume: bool,
+    request: Option<&str>,
     extra: &[String],
 ) -> Result<Vec<String>> {
     let orchestrator =
@@ -46,12 +48,13 @@ pub fn orchestrator_args(
         args.extend(["--resume".into(), session_id.into(), "--".into(), RESUMED.into()]);
     } else {
         args.extend(["--session-id".into(), session_id.into()]);
+        args.extend(first_request(request));
     }
     Ok(args)
 }
 
 /// Arguments after `claude` for a Normal session: plain Claude Code in the repo, new or resumed.
-pub fn claude_args(agent: &Agent, resume: bool, extra: &[String]) -> Vec<String> {
+pub fn claude_args(agent: &Agent, resume: bool, request: Option<&str>, extra: &[String]) -> Vec<String> {
     let name = agent.name.clone().unwrap_or_else(|| {
         let repo = Path::new(&agent.repo);
         repo.file_name()
@@ -64,8 +67,16 @@ pub fn claude_args(agent: &Agent, resume: bool, extra: &[String]) -> Vec<String>
         args.extend(["--resume".into(), agent.session_id.clone()]);
     } else {
         args.extend(["--session-id".into(), agent.session_id.clone()]);
+        args.extend(first_request(request));
     }
     args
+}
+
+/// A new session's first message, after `--` so a request starting with `-` is not an option.
+fn first_request(request: Option<&str>) -> Vec<String> {
+    request
+        .map(|r| vec!["--".to_string(), r.to_string()])
+        .unwrap_or_default()
 }
 
 /// Starts this repo's first Orchestrator in the Hub Daemon, or finds it running, then attaches to it.

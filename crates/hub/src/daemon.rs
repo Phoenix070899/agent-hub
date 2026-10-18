@@ -377,19 +377,33 @@ impl Hub {
         }
         let repo = PathBuf::from(&agent.repo);
         let resume = paths::transcript_exists(&agent.session_id);
+        // What the human asked for up front, like an issue to work on; a resumed session has its own.
+        let request = picked("request").filter(|_| !resume);
         let orchestrator = agent.kind == db::agent_kind::ORCHESTRATOR;
         let (program, args) = match &self.test_agent {
-            Some(test) if orchestrator => (test.clone(), vec!["orchestrator".to_string()]),
-            // Tests name a Normal session after the fake agent script it should run.
-            Some(test) => (
-                test.clone(),
-                vec![agent.name.clone().unwrap_or_else(|| "claude".into())],
-            ),
+            Some(test) => {
+                // Tests name a Normal session after the fake agent script it should run.
+                let script = match orchestrator {
+                    true => "orchestrator".to_string(),
+                    false => agent.name.clone().unwrap_or_else(|| "claude".into()),
+                };
+                (test.clone(), std::iter::once(script).chain(request).collect())
+            }
             None if orchestrator => (
                 "claude".to_string(),
-                launch::orchestrator_args(&self.hub_dir, &repo, &agent.session_id, resume, &extra)?,
+                launch::orchestrator_args(
+                    &self.hub_dir,
+                    &repo,
+                    &agent.session_id,
+                    resume,
+                    request.as_deref(),
+                    &extra,
+                )?,
             ),
-            None => ("claude".to_string(), launch::claude_args(&agent, resume, &extra)),
+            None => (
+                "claude".to_string(),
+                launch::claude_args(&agent, resume, request.as_deref(), &extra),
+            ),
         };
         let spawn = Spawn {
             program,
@@ -538,8 +552,15 @@ impl Hub {
             label.clone(),
         ];
         // The multiplexer's server may have been started elsewhere, so this daemon is named.
-        attach.splice(0..0, ["env".to_string(), format!("HUB_STATE={}", paths::state_dir().display())]);
-        let attach = attach.iter().map(|word| shell_quote(word)).collect::<Vec<_>>().join(" ");
+        attach.splice(
+            0..0,
+            ["env".to_string(), format!("HUB_STATE={}", paths::state_dir().display())],
+        );
+        let attach = attach
+            .iter()
+            .map(|word| shell_quote(word))
+            .collect::<Vec<_>>()
+            .join(" ");
         let command = template
             .replace("{session}", &shell_quote(&session))
             .replace("{dir}", &shell_quote(&dir))
@@ -1593,14 +1614,24 @@ fn user_shell() -> String {
 fn mux_session(repo_name: &str, label: &str) -> String {
     let clean: String = repo_name
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect();
     format!("echo-{}-{label}", clean.trim_matches('-'))
 }
 
 /// `word` as one POSIX shell word.
 fn shell_quote(word: &str) -> String {
-    if !word.is_empty() && word.chars().all(|c| c.is_ascii_alphanumeric() || "-_./=:@%+,".contains(c)) {
+    if !word.is_empty()
+        && word
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "-_./=:@%+,".contains(c))
+    {
         return word.to_string();
     }
     format!("'{}'", word.replace('\'', "'\\''"))

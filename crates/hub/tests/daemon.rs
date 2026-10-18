@@ -491,6 +491,27 @@ fn an_unnamed_agent_is_named_after_the_first_request() {
 }
 
 #[test]
+fn a_new_agent_starts_on_the_request_it_was_opened_with() {
+    let hub = Hub::new("request");
+    hub.ok(&["status"]);
+    let opened = hub.call(
+        "agent.open",
+        serde_json::json!({ "repo": hub.repo_key(), "kind": "claude", "name": "request",
+                            "request": "Fix issue #12: the bench is flaky" }),
+    );
+    let agent = opened["result"]["agent"].as_i64().unwrap();
+    let mut stream = UnixStream::connect(hub.state.join("hubd.sock")).unwrap();
+    let attach = serde_json::json!({ "method": "attach", "params": { "agent": agent, "rows": 30, "cols": 100 } });
+    stream.write_all(format!("{attach}\n").as_bytes()).unwrap();
+    stream.set_read_timeout(Some(Duration::from_secs(15))).unwrap();
+    read_until(
+        &mut stream,
+        &mut Vec::new(),
+        "first request: Fix issue #12: the bench is flaky",
+    );
+}
+
+#[test]
 fn events_stream_a_snapshot_on_every_change() {
     let hub = Hub::new("events");
     hub.ok(&["status"]);
@@ -779,7 +800,15 @@ fn tmux_runs_the_agent_in_its_first_pane() {
     stream.write_all(b"hello\r").unwrap();
     read_until(&mut reader, &mut seen, "got: hello");
     let panes = Command::new("tmux")
-        .args(["-L", &socket, "list-panes", "-t", &format!("echo-repo-a{agent}"), "-F", "#{pane_current_command}"])
+        .args([
+            "-L",
+            &socket,
+            "list-panes",
+            "-t",
+            &format!("echo-repo-a{agent}"),
+            "-F",
+            "#{pane_current_command}",
+        ])
         .output()
         .unwrap();
     let _ = Command::new("tmux").args(["-L", &socket, "kill-server"]).output();

@@ -366,3 +366,33 @@ public func droppedPaths(_ paths: [String]) -> String {
     }
     return escaped.joined(separator: " ") + " "
 }
+
+/// A GitHub issue as `gh issue view --json number,title,body,url` prints it, to start an agent on.
+public struct GitHubIssue: Decodable, Equatable, Sendable {
+    public let number: Int
+    public let title: String
+    public let body: String
+    public let url: String
+
+    /// The agent's name in the ledger: "#12 Flaky bench".
+    public var name: String { "#\(number) \(title)" }
+
+    /// The agent's first message: the whole issue, and what to do with it.
+    public var request: String {
+        let body = body.trimmingCharacters(in: .whitespacesAndNewlines)
+        return "Work on GitHub issue #\(number): \(title)\n\(url)\n\n\(body.isEmpty ? "(The issue has no description.)" : body)"
+    }
+}
+
+/// What `gh issue view` takes for an issue typed by hand: its URL, or its number with or without "#".
+/// Nil for anything else.
+public func issueReference(_ typed: String) -> String? {
+    let text = typed.trimmingCharacters(in: .whitespaces)
+    let number = text.hasPrefix("#") ? String(text.dropFirst()) : text
+    if !number.isEmpty, number.allSatisfy(\.isASCII), Int(number) != nil { return number }
+    if let url = URL(string: text), url.host == "github.com", url.pathComponents.count >= 5,
+       url.pathComponents[3] == "issues", Int(url.pathComponents[4]) != nil {
+        return text
+    }
+    return nil
+}

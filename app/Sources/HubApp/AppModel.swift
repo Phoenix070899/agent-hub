@@ -378,6 +378,40 @@ final class AppModel: ObservableObject {
         newSession = NewSessionRequest(repo: repo, kind: kind)
     }
 
+    /// Reads a GitHub issue with `gh` in `repo`, so a bare number means that repo's issue. Throws
+    /// what `gh` printed when it fails: not installed, not logged in, no such issue.
+    nonisolated static func fetchIssue(_ reference: String, in repo: String) async throws -> GitHubIssue {
+        try await Task.detached {
+            let shell = Process()
+            let out = Pipe()
+            let err = Pipe()
+            shell.executableURL = URL(fileURLWithPath: "/bin/zsh")
+            // A login shell for the human's PATH; the reference goes in as an argument, unquoted by nobody.
+            shell.arguments = ["-lc", "gh issue view \"$1\" --json number,title,body,url", "zsh", reference]
+            shell.currentDirectoryURL = URL(fileURLWithPath: repo)
+            shell.standardOutput = out
+            shell.standardError = err
+            try shell.run()
+            let data = out.fileHandleForReading.readDataToEndOfFile()
+            let problem = String(decoding: err.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+            shell.waitUntilExit()
+            guard shell.terminationStatus == 0 else {
+                let said = problem.trimmingCharacters(in: .whitespacesAndNewlines)
+                throw IssueError(message: shell.terminationStatus == 127
+                    ? "Echo reads issues with the GitHub CLI. Install it with brew install gh, then run gh auth login."
+                    : said.contains("no git remotes")
+                    ? "This repo has no GitHub remote, so a number alone names no issue. Paste the issue's link instead."
+                    : said.isEmpty ? "gh could not read that issue." : said)
+            }
+            return try JSONDecoder().decode(GitHubIssue.self, from: data)
+        }.value
+    }
+
+    struct IssueError: Error, CustomStringConvertible {
+        let message: String
+        var description: String { message }
+    }
+
     /// Asks for a folder outside the known repos; nil when cancelled.
     func chooseFolder() -> String? {
         let panel = NSOpenPanel()
@@ -389,11 +423,12 @@ final class AppModel: ObservableObject {
         return panel.url?.path
     }
 
-    /// Starts a new agent in a repo and selects it. An empty name is taken from the first request.
-    func open(repo path: String, kind: Agent.Kind, name: String, model: String) {
+    /// Starts a new agent in a repo and selects it. An empty name is taken from the first request;
+    /// a `request` is that first request, sent as the agent starts.
+    func open(repo path: String, kind: Agent.Kind, name: String, model: String, request: String? = nil) {
         background { client in
             try Self.ensureDaemon(client)
-            return try client.openAgent(repo: path, kind: kind, name: name, model: model)
+            return try client.openAgent(repo: path, kind: kind, name: name, model: model, request: request)
         } then: { opened in
             self.select(.agent(repo: opened.repo, id: opened.agent))
             self.refreshSessions()

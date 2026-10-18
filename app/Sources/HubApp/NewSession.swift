@@ -3,7 +3,8 @@ import HubCore
 import SwiftUI
 
 /// Start a session: a modal in the middle of the window over a dimmed backdrop. Pick how to
-/// work (an Orchestrator, or Claude Code on its own), an optional name, the model, and the repo.
+/// work (an Orchestrator, or Claude Code on its own), the repo, an optional name, an optional
+/// GitHub issue to start on, and the model.
 struct NewSessionModal: View {
     @EnvironmentObject private var model: AppModel
     /// Local state as an ObservableObject: the command-line tools lack the plugin `@State` needs.
@@ -79,11 +80,37 @@ struct NewSessionModal: View {
                         .frame(width: 44, alignment: .leading)
                     TextField("optional", text: $form.name)
                         .textFieldStyle(.plain)
-                    .ledgerField()
+                        .ledgerField()
                         .focused($nameFocused)
                 }
                 .padding(.horizontal, 24)
                 .padding(.top, 18)
+
+                HStack(alignment: .firstTextBaseline, spacing: 10) {
+                    Text("Issue")
+                        .font(.system(size: 12.5, weight: .semibold))
+                        .foregroundStyle(Ledger.ink2)
+                        .frame(width: 44, alignment: .leading)
+                    TextField("optional: a GitHub issue number or link to start on", text: $form.issue)
+                        .textFieldStyle(.plain)
+                        .autocorrectionDisabled()
+                        .ledgerField()
+                        .onSubmit(start)
+                }
+                .padding(.horizontal, 24)
+                .padding(.top, 12)
+                .onChange(of: form.issue) { form.problem = nil }
+
+                if let problem = form.problem {
+                    Text(problem)
+                        .font(.system(size: 12.5))
+                        .foregroundStyle(Ledger.failInk)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+                        .padding(.leading, 78)
+                        .padding(.trailing, 24)
+                        .padding(.top, 6)
+                }
 
                 HStack(spacing: 10) {
                     Text("Model")
@@ -115,10 +142,10 @@ struct NewSessionModal: View {
                     Button("Cancel", action: close)
                         .buttonStyle(.ledger)
                         .keyboardShortcut(.cancelAction)
-                    Button(form.kind == .orchestrator ? "Start Orchestrator" : "Start Claude Code", action: start)
+                    Button(startTitle, action: start)
                         .buttonStyle(.ledgerPrimary)
                         .keyboardShortcut(.defaultAction)
-                        .disabled(form.picked == nil || model.daemonDown)
+                        .disabled(form.picked == nil || model.daemonDown || form.reading)
                 }
                 .padding(.horizontal, 24)
                 .padding(.top, 20)
@@ -164,10 +191,35 @@ struct NewSessionModal: View {
         form.picked = folder
     }
 
+    private var startTitle: String {
+        if form.reading { return "Reading the issue…" }
+        return form.kind == .orchestrator ? "Start Orchestrator" : "Start Claude Code"
+    }
+
+    /// Starts the agent; with an issue, reads it first and starts the agent on it, named after it.
     private func start() {
-        guard let picked = form.picked else { return }
-        model.open(repo: picked, kind: form.kind, name: form.name, model: form.model)
-        close()
+        guard let picked = form.picked, !form.reading else { return }
+        let typed = form.issue.trimmingCharacters(in: .whitespaces)
+        guard !typed.isEmpty else {
+            model.open(repo: picked, kind: form.kind, name: form.name, model: form.model)
+            return close()
+        }
+        guard let reference = issueReference(typed) else {
+            form.problem = "Type an issue number, like 12, or its link, like https://github.com/owner/repo/issues/12."
+            return
+        }
+        form.reading = true
+        Task {
+            do {
+                let issue = try await AppModel.fetchIssue(reference, in: picked)
+                let name = form.name.trimmingCharacters(in: .whitespaces).isEmpty ? issue.name : form.name
+                model.open(repo: picked, kind: form.kind, name: name, model: form.model, request: issue.request)
+                close()
+            } catch {
+                form.reading = false
+                form.problem = "\(error)"
+            }
+        }
     }
 
     private func close() {
@@ -180,6 +232,12 @@ final class NewSessionForm: ObservableObject {
     @Published var name = ""
     @Published var model = ""
     @Published var picked: String?
+    /// A GitHub issue, by number or link, the agent starts on.
+    @Published var issue = ""
+    /// Why the issue could not be read.
+    @Published var problem: String?
+    /// True while `gh` reads the issue.
+    @Published var reading = false
     /// Folders chosen with the open panel this time, listed first.
     @Published var chosen: [String] = []
 }

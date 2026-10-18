@@ -75,12 +75,13 @@ public struct DaemonClient: Sendable {
 
     /// Starts a new agent in a repo: an Orchestrator or a Normal session, with an optional name and
     /// model. Returns the repo's key as the daemon names it, and the new agent's id.
-    public func openAgent(repo: String, kind: Agent.Kind, name: String? = nil, model: String? = nil) throws
-        -> (repo: String, agent: Int)
+    public func openAgent(repo: String, kind: Agent.Kind, name: String? = nil, model: String? = nil,
+                          request: String? = nil) throws -> (repo: String, agent: Int)
     {
         var params: [String: Any] = ["repo": repo, "kind": kind.rawValue]
         if let name, !name.isEmpty { params["name"] = name }
         if let model, !model.isEmpty { params["model"] = model }
+        if let request, !request.isEmpty { params["request"] = request }
         let result = try call("agent.open", params) as? [String: Any]
         guard let agent = result?["agent"] as? Int else { throw HubError.badResponse }
         return (result?["repo"] as? String ?? repo, agent)

@@ -223,7 +223,9 @@ pub fn follow(target: Target) -> Result<()> {
                 pump(attached, &params);
                 say(&format!("{label} stopped. This pane picks it up again when it starts."));
             }
-            Err(_) if first => say(&format!("{label} is not running. This pane picks it up when it starts.")),
+            Err(_) if first => say(&format!(
+                "{label} is not running. This pane picks it up when it starts."
+            )),
             Err(_) => {}
         }
         first = false;
