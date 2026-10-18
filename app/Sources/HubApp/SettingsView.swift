@@ -2,13 +2,28 @@ import AppKit
 import HubCore
 import SwiftUI
 
-/// Settings: the terminal theme (a preset, then any colour changed by hand) and the font.
+/// Settings: the window's look, the terminal theme (a preset, then any colour changed by hand),
+/// the font, and the multiplexer agents run inside.
 struct SettingsView: View {
     @EnvironmentObject private var model: AppModel
 
     var body: some View {
         Form {
-            Section("Theme") {
+            Section("Window") {
+                Picker("Appearance", selection: $model.windowLook) {
+                    ForEach(WindowLook.allCases) { look in
+                        Text(look.title).tag(look)
+                    }
+                }
+                if model.windowLook == .matchTerminal {
+                    Text(model.appearance.theme.isDark
+                         ? "Dark, because the terminal theme is dark."
+                         : "Light, because the terminal theme is light.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            Section("Terminal theme") {
                 Picker("Preset", selection: presetBinding) {
                     ForEach(TerminalTheme.presets) { theme in
                         Text(theme.name).tag(theme.name)
@@ -22,6 +37,13 @@ struct SettingsView: View {
                 ColorPicker("Cursor", selection: colour(\.cursor), supportsOpacity: false)
                 ColorPicker("Selection", selection: colour(\.selection), supportsOpacity: false)
                 LabeledContent("Palette") { Swatches(theme: model.appearance.theme) }
+            }
+            Section("Terminal rendering") {
+                Toggle("Draw terminals with the GPU (Metal)", isOn: $model.gpuRendering)
+                Text("SwiftTerm's Metal renderer, still marked experimental. It falls back to the standard drawing if Metal is unavailable.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             Section("Font") {
                 TextField("Family", text: $model.appearance.fontName)
@@ -37,10 +59,50 @@ struct SettingsView: View {
             Section {
                 Button("Match Orca (Ayu Dark, JetBrainsMono Nerd Font 14)") { model.appearance = .orca }
             }
+            Section("Multiplexer") {
+                Picker("Show agents and Workers inside", selection: $model.multiplexer.kind) {
+                    ForEach(Multiplexer.allCases) { kind in
+                        Text(kind.title).tag(kind)
+                    }
+                }
+                if model.multiplexer.kind == .custom {
+                    TextField("Command", text: $model.multiplexer.command, axis: .vertical)
+                        .font(.system(size: 12, design: .monospaced))
+                        .lineLimit(1...3)
+                } else if model.multiplexer.enabled {
+                    LabeledContent("Command") {
+                        Text(model.multiplexer.command)
+                            .font(.system(size: 12, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                            .multilineTextAlignment(.trailing)
+                    }
+                }
+                Text(help)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text("A change applies to terminals opened after it.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         }
         .formStyle(.grouped)
-        .frame(width: 460)
+        .frame(width: 520)
         .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private var help: String {
+        switch model.multiplexer.kind {
+        case .tmux:
+            return "Each agent or Worker gets its own tmux session, like echo-lanh-a3, with it in the first pane. Split and add windows beside it as usual (⌘D splits right, ⇧⌘D down). Ctrl-] in the agent's pane stops showing it there."
+        case .screen:
+            return "Each agent or Worker gets its own screen session, like echo-lanh-a3. Use screen's own keys to split; ⌘D is for tmux only."
+        case .none:
+            return "Each agent and Worker shows in a plain terminal, without splits or extra windows."
+        case .custom:
+            return "Runs in a login shell. {session} is a name per agent or Worker, like echo-lanh-a3; {dir} is where it works; {command} shows it and must run in the first pane."
+        }
     }
 
     private var isPreset: Bool { TerminalTheme.presets.contains(model.appearance.theme) }

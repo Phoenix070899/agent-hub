@@ -28,16 +28,22 @@ const START_TIMEOUT: Duration = Duration::from_secs(90);
 const IDLE_BLOCKER: Duration = Duration::from_secs(60);
 /// Settled Workers stay on the Dashboard this long.
 const KEEP_SETTLED_SECONDS: i64 = 10 * 60;
+/// Echo's Done list keeps a Final Report this long, unless the human dismisses it first.
+const KEEP_REPORTS_SECONDS: i64 = 7 * 24 * 60 * 60;
 const SCREEN_LINES: usize = 25;
 
 pub struct Hub {
     db: Mutex<Connection>,
     live: Mutex<HashMap<i64, Arc<Live>>>,
-    /// Each repo's live Orchestrator terminal.
-    orchestrators: Mutex<HashMap<String, Arc<Live>>>,
+    /// Each live agent's terminal (Orchestrators and Normal sessions), by agent id.
+    agents: Mutex<HashMap<i64, Arc<Live>>>,
+    /// When each Normal session's waiting permission prompt was first seen, by agent id.
+    agent_prompts: Mutex<HashMap<i64, i64>>,
     /// The human's own shells in the Hub App's split panes: id to (repo, terminal). No watching,
     /// no messages; they live until they exit or are closed.
     shells: Mutex<HashMap<i64, (String, Arc<Live>)>>,
+    /// The multiplexer shell showing each agent or Worker (`a3`, `w21`), by shell id.
+    muxes: Mutex<HashMap<String, i64>>,
     tick: Mutex<u64>,
     changed: Condvar,
     usage: Mutex<Usage>,
@@ -144,8 +150,10 @@ pub fn run() -> Result<()> {
     let hub = Arc::new(Hub {
         db: Mutex::new(conn),
         live: Mutex::new(HashMap::new()),
-        orchestrators: Mutex::new(HashMap::new()),
+        agents: Mutex::new(HashMap::new()),
+        agent_prompts: Mutex::new(HashMap::new()),
         shells: Mutex::new(HashMap::new()),
+        muxes: Mutex::new(HashMap::new()),
         tick: Mutex::new(0),
         changed: Condvar::new(),
         usage: Mutex::new(Usage::default()),
@@ -263,8 +271,9 @@ impl Hub {
         }
     }
 
-    /// The terminal a request names: `{"id": n}` for a Worker, `{"orchestrator": repo}` for the
-    /// Orchestrator, `{"shell": n}` for a shell.
+    /// The terminal a request names: `{"id": n}` for a Worker, `{"agent": n}` for an Orchestrator
+    /// or Normal session, `{"orchestrator": repo}` for the repo's first Orchestrator, `{"shell": n}`
+    /// for a shell.
     fn terminal(&self, p: &Value) -> Result<Arc<Live>> {
         if let Some(id) = p.get("shell").and_then(Value::as_i64) {
             return match self.shells.lock().unwrap().get(&id) {
@@ -272,82 +281,215 @@ impl Hub {
                 None => bail!("shell {id} is not open"),
             };
         }
+        if let Some(id) = p.get("agent").and_then(Value::as_i64) {
+            return self.agent_live(id);
+        }
         match p.get("orchestrator").and_then(Value::as_str) {
-            Some(repo) => match self.orchestrators.lock().unwrap().get(repo) {
-                Some(live) => Ok(Arc::clone(live)),
-                None => bail!("no live Orchestrator for {repo}"),
-            },
+            Some(repo) => {
+                let first = db::first_orchestrator(&self.db(), repo)?;
+                match first {
+                    Some(agent) => self.agent_live(agent.id),
+                    None => bail!("no Orchestrator for {repo}"),
+                }
+            }
             None => self.live(id_param(p, "id")?),
         }
     }
 
-    /// Starts the repo's Orchestrator, resuming its saved Claude session, unless it is already live.
-    fn open_session(self: &Arc<Self>, p: &Value) -> Result<Value> {
-        let repo = repo::root(Path::new(str_param(p, "repo")?))?;
-        let key = repo.display().to_string();
-        if self.orchestrators.lock().unwrap().contains_key(&key) {
-            return Ok(json!({ "repo": key, "started": false }));
+    fn agent_live(&self, id: i64) -> Result<Arc<Live>> {
+        match self.agents.lock().unwrap().get(&id) {
+            Some(live) => Ok(Arc::clone(live)),
+            None => bail!("agent {id} has no live terminal"),
         }
-        let session = db::session(&self.db(), &key)?;
-        let extra: Vec<String> = p
+    }
+
+    fn agent_is_live(&self, id: i64) -> bool {
+        self.agents.lock().unwrap().contains_key(&id)
+    }
+
+    /// `session.open`, as `hub` and older clients call it: starts the repo's first Orchestrator, or
+    /// a new one when the repo has none.
+    fn open_session(self: &Arc<Self>, p: &Value) -> Result<Value> {
+        let repo = repo::root(Path::new(str_param(p, "repo")?))?.display().to_string();
+        let first = db::first_orchestrator(&self.db(), &repo)?;
+        let mut params = p.clone();
+        params["repo"] = json!(repo);
+        params["kind"] = json!(db::agent_kind::ORCHESTRATOR);
+        if let Some(agent) = first {
+            params["agent"] = json!(agent.id);
+        }
+        self.open_agent(&params)
+    }
+
+    /// Starts an agent: an existing one by `agent` id (resuming its Claude session), or a new
+    /// `kind` (orchestrator or claude) in `repo` with an optional `name` and `model`.
+    fn open_agent(self: &Arc<Self>, p: &Value) -> Result<Value> {
+        let picked = |key: &str| {
+            p.get(key)
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .map(String::from)
+        };
+        let id = match p.get("agent").and_then(Value::as_i64) {
+            Some(id) => id,
+            None => {
+                let repo = repo::root(Path::new(str_param(p, "repo")?))?.display().to_string();
+                let kind = p
+                    .get("kind")
+                    .and_then(Value::as_str)
+                    .unwrap_or(db::agent_kind::ORCHESTRATOR);
+                let id = db::insert_agent(
+                    &self.db(),
+                    &repo,
+                    kind,
+                    picked("name").as_deref(),
+                    picked("model").as_deref(),
+                )?;
+                self.notify();
+                id
+            }
+        };
+        // A model picked now is kept, so a later start or `hub` resumes with it.
+        if let Some(model) = picked("model") {
+            db::set_agent_model(&self.db(), id, &model)?;
+        }
+        if let Some(name) = picked("name") {
+            db::set_agent_name(&self.db(), id, &name)?;
+        }
+        let agent = db::agent(&self.db(), id)?;
+        let view = |started: bool, resumed: bool| {
+            json!({ "repo": agent.repo, "agent": agent.id, "kind": agent.kind, "started": started,
+                    "resumed": resumed, "model": agent.model, "name": agent.name })
+        };
+        if self.agent_is_live(id) {
+            return Ok(view(false, false));
+        }
+        let mut extra: Vec<String> = p
             .get("args")
             .and_then(Value::as_array)
             .map(|args| args.iter().filter_map(|a| a.as_str().map(String::from)).collect())
             .unwrap_or_default();
-        let resume = paths::transcript_exists(&session.session_id);
+        if let Some(model) = &agent.model {
+            if !extra.iter().any(|arg| arg == "--model") {
+                extra.extend(["--model".to_string(), model.clone()]);
+            }
+        }
+        let repo = PathBuf::from(&agent.repo);
+        let resume = paths::transcript_exists(&agent.session_id);
+        let orchestrator = agent.kind == db::agent_kind::ORCHESTRATOR;
         let (program, args) = match &self.test_agent {
-            Some(agent) => (agent.clone(), vec!["orchestrator".to_string()]),
-            None => (
-                "claude".to_string(),
-                launch::orchestrator_args(&self.hub_dir, &repo, &session.session_id, resume, &extra)?,
+            Some(test) if orchestrator => (test.clone(), vec!["orchestrator".to_string()]),
+            // Tests name a Normal session after the fake agent script it should run.
+            Some(test) => (
+                test.clone(),
+                vec![agent.name.clone().unwrap_or_else(|| "claude".into())],
             ),
+            None if orchestrator => (
+                "claude".to_string(),
+                launch::orchestrator_args(&self.hub_dir, &repo, &agent.session_id, resume, &extra)?,
+            ),
+            None => ("claude".to_string(), launch::claude_args(&agent, resume, &extra)),
         };
         let spawn = Spawn {
             program,
             args,
-            cwd: repo.clone(),
-            env: self.agent_env(None)?,
+            cwd: repo,
+            env: self.agent_env(None, Some(agent.id))?,
             env_remove: inherited_agent_vars(),
         };
         let hub: Weak<Hub> = Arc::downgrade(self);
-        let exited = key.clone();
-        let live = Live::spawn(session.id, spawn, move |_| {
+        let live = Live::spawn(agent.id, spawn, move |id| {
             if let Some(hub) = hub.upgrade() {
-                hub.orchestrators.lock().unwrap().remove(&exited);
+                hub.agents.lock().unwrap().remove(&id);
+                hub.agent_prompts.lock().unwrap().remove(&id);
                 hub.notify();
             }
         })?;
-        self.orchestrators.lock().unwrap().insert(key.clone(), live);
+        self.agents.lock().unwrap().insert(agent.id, Arc::clone(&live));
+        if !orchestrator {
+            let hub = Arc::clone(self);
+            std::thread::spawn(move || hub.watch_agent(live));
+        }
         self.notify();
-        Ok(json!({ "repo": key, "started": true, "resumed": resume }))
+        Ok(view(true, resume))
     }
 
+    /// Stops an agent's terminal; it stays on the repo's list, ready to resume.
+    fn stop_agent(&self, id: i64) {
+        if let Some(live) = self.agents.lock().unwrap().get(&id) {
+            live.kill();
+        }
+    }
+
+    /// Every repo with agents, each with its agents. `live` and `model` describe the repo's first
+    /// Orchestrator, as older clients read them.
     fn list_sessions(&self) -> Result<Value> {
-        let sessions = db::sessions(&self.db())?;
-        let live = self.orchestrators.lock().unwrap();
-        let out: Vec<Value> = sessions
+        let agents = db::agents(&self.db(), None)?;
+        let mut repos: Vec<String> = agents.iter().map(|a| a.repo.clone()).collect();
+        repos.sort();
+        repos.dedup();
+        let out: Vec<Value> = repos
             .iter()
-            .map(|s| json!({ "repo": s.repo, "session_id": s.session_id, "live": live.contains_key(&s.repo) }))
+            .map(|repo| {
+                let mine: Vec<&db::Agent> = agents.iter().filter(|a| &a.repo == repo).collect();
+                let first = mine.iter().find(|a| a.kind == db::agent_kind::ORCHESTRATOR);
+                json!({
+                    "repo": repo,
+                    "session_id": first.map(|a| a.session_id.clone()),
+                    "live": mine.iter().any(|a| self.agent_is_live(a.id)),
+                    "model": first.and_then(|a| a.model.clone()),
+                    "agents": mine.iter().map(|a| self.agent_view(a)).collect::<Vec<_>>(),
+                })
+            })
             .collect();
         Ok(json!({ "sessions": out }))
+    }
+
+    fn agent_view(&self, agent: &db::Agent) -> Value {
+        json!({
+            "id": agent.id,
+            "kind": agent.kind,
+            "name": agent.name,
+            "model": agent.model,
+            "live": self.agent_is_live(agent.id),
+        })
+    }
+
+    /// Names an unnamed agent after the first line the human types into it.
+    fn name_from_input(&self, agent: i64, line: &str) -> Result<bool> {
+        let Some(name) = name_from_request(line) else {
+            return Ok(false);
+        };
+        let db = self.db();
+        if db::agent(&db, agent)?.name.is_some() {
+            return Ok(true);
+        }
+        db::set_agent_name(&db, agent, &name)?;
+        drop(db);
+        self.notify();
+        Ok(true)
     }
 
     /// A login shell in the repo, the human's own: their `$SHELL` (`HUB_SHELL` overrides it).
     fn open_shell(self: &Arc<Self>, p: &Value) -> Result<Value> {
         let repo = repo::root(Path::new(str_param(p, "repo")?))?;
         let key = repo.display().to_string();
-        let id = db::new_shell(&self.db(), &key)?;
-        let program = std::env::var("HUB_SHELL")
-            .or_else(|_| std::env::var("SHELL"))
-            .unwrap_or_else(|_| "/bin/zsh".into());
+        let id = self.spawn_shell(&key, repo, vec!["-l".into()])?;
+        Ok(json!({ "shell": id }))
+    }
+
+    /// Starts the human's shell with `args` in `cwd`, listed under `repo`; it lives until it exits.
+    fn spawn_shell(self: &Arc<Self>, repo: &str, cwd: PathBuf, args: Vec<String>) -> Result<i64> {
+        let id = db::new_shell(&self.db(), repo)?;
         let env = vec![
             ("TERM".to_string(), "xterm-256color".to_string()),
             ("COLORTERM".into(), "truecolor".into()),
         ];
         let spawn = Spawn {
-            program,
-            args: vec!["-l".into()],
-            cwd: repo,
+            program: user_shell(),
+            args,
+            cwd,
             env,
             env_remove: inherited_agent_vars(),
         };
@@ -355,12 +497,56 @@ impl Hub {
         let live = Live::spawn(id, spawn, move |id| {
             if let Some(hub) = hub.upgrade() {
                 hub.shells.lock().unwrap().remove(&id);
+                hub.muxes.lock().unwrap().retain(|_, shell| *shell != id);
                 hub.notify();
             }
         })?;
-        self.shells.lock().unwrap().insert(id, (key, live));
+        self.shells.lock().unwrap().insert(id, (repo.to_string(), live));
         self.notify();
-        Ok(json!({ "shell": id }))
+        Ok(id)
+    }
+
+    /// The human's multiplexer around one agent's or Worker's terminal: `command` (e.g.
+    /// `tmux new-session -A -s {session} -c {dir} {command}`) runs in a login shell, with
+    /// `{session}` a stable name for the target, `{dir}` where it works, and `{command}` a
+    /// `hub attach --follow` that shows the target in the multiplexer's first pane. One shell per
+    /// target: asking again returns the same one while it lives.
+    fn open_mux(self: &Arc<Self>, p: &Value) -> Result<Value> {
+        let template = str_param(p, "command")?;
+        let (label, repo, dir) = if let Some(id) = p.get("agent").and_then(Value::as_i64) {
+            let agent = db::agent(&self.db(), id)?;
+            (format!("a{id}"), agent.repo.clone(), agent.repo)
+        } else {
+            let id = id_param(p, "id")?;
+            let worker = db::worker(&self.db(), id)?;
+            (format!("w{id}"), worker.repo, worker.cwd)
+        };
+        if let Some(&shell) = self.muxes.lock().unwrap().get(&label) {
+            if self.shells.lock().unwrap().contains_key(&shell) {
+                return Ok(json!({ "shell": shell }));
+            }
+        }
+        let name = Path::new(&repo)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let session = mux_session(&name, &label);
+        let mut attach = vec![
+            std::env::current_exe()?.display().to_string(),
+            "attach".into(),
+            "--follow".into(),
+            label.clone(),
+        ];
+        // The multiplexer's server may have been started elsewhere, so this daemon is named.
+        attach.splice(0..0, ["env".to_string(), format!("HUB_STATE={}", paths::state_dir().display())]);
+        let attach = attach.iter().map(|word| shell_quote(word)).collect::<Vec<_>>().join(" ");
+        let command = template
+            .replace("{session}", &shell_quote(&session))
+            .replace("{dir}", &shell_quote(&dir))
+            .replace("{command}", &shell_quote(&attach));
+        let shell = self.spawn_shell(&repo, PathBuf::from(&dir), vec!["-l".into(), "-c".into(), command])?;
+        self.muxes.lock().unwrap().insert(label, shell);
+        Ok(json!({ "shell": shell, "session": session }))
     }
 
     fn recover(&self) -> Result<()> {
@@ -400,7 +586,7 @@ impl Hub {
         match method {
             "ping" => Ok(json!({ "pid": std::process::id() })),
             "worker.start" => self.start_worker(p),
-            "worker.list" => self.list_workers(str_param(p, "repo")?),
+            "worker.list" => self.list_workers(str_param(p, "repo")?, p.get("agent").and_then(Value::as_i64)),
             "status" => self.status(str_param(p, "repo")?),
             "worker.read" => {
                 let live = self.live(id_param(p, "id")?)?;
@@ -434,13 +620,35 @@ impl Hub {
             "session.open" => self.open_session(p),
             "session.close" => {
                 let repo = repo::root(Path::new(str_param(p, "repo")?))?.display().to_string();
-                if let Some(live) = self.orchestrators.lock().unwrap().get(&repo) {
-                    live.kill();
+                for agent in db::agents(&self.db(), Some(&repo))? {
+                    self.stop_agent(agent.id);
                 }
+                Ok(json!({}))
+            }
+            "agent.open" => self.open_agent(p),
+            "agent.close" => {
+                self.stop_agent(id_param(p, "agent")?);
+                Ok(json!({}))
+            }
+            "agent.forget" => {
+                let id = id_param(p, "agent")?;
+                self.stop_agent(id);
+                db::close_agent(&self.db(), id)?;
+                self.notify();
+                Ok(json!({}))
+            }
+            "agent.rename" => {
+                let name = str_param(p, "name")?.trim();
+                if name.is_empty() {
+                    bail!("a name cannot be empty");
+                }
+                db::set_agent_name(&self.db(), id_param(p, "agent")?, name)?;
+                self.notify();
                 Ok(json!({}))
             }
             "sessions.list" => self.list_sessions(),
             "shell.open" => self.open_shell(p),
+            "mux.open" => self.open_mux(p),
             "shell.close" => {
                 if let Some((_, live)) = self.shells.lock().unwrap().get(&id_param(p, "shell")?) {
                     live.kill();
@@ -454,6 +662,11 @@ impl Hub {
             "usage" => Ok(self.usage.lock().unwrap().view()),
             "decide" => self.decide(p),
             "worker.close" => self.close_worker(id_param(p, "id")?),
+            "worker.dismiss" => {
+                db::mark_dismissed(&self.db(), id_param(p, "id")?)?;
+                self.notify();
+                Ok(json!({}))
+            }
             "worker.resume" => self.resume_worker(id_param(p, "id")?),
             "send" => {
                 let worker = db::worker(&self.db(), id_param(p, "worker")?)?;
@@ -491,6 +704,7 @@ impl Hub {
             }
             "wait" => self.wait(
                 str_param(p, "repo")?,
+                p.get("agent").and_then(Value::as_i64),
                 timeout_param(p, Duration::from_secs(3600)),
                 stream,
             ),
@@ -522,7 +736,7 @@ impl Hub {
                 Ok(json!({ "open_questions": open }))
             }
             "shutdown" => {
-                let live = self.live.lock().unwrap().len() + self.orchestrators.lock().unwrap().len();
+                let live = self.live.lock().unwrap().len() + self.agents.lock().unwrap().len();
                 if live > 0 && !p.get("force").and_then(Value::as_bool).unwrap_or(false) {
                     bail!("{live} terminal(s) still live (Workers or Orchestrators); close them first or pass --force");
                 }
@@ -541,7 +755,7 @@ impl Hub {
                     db::mark_closed(&db, live.id)?;
                 }
                 drop(db);
-                for live in self.orchestrators.lock().unwrap().values() {
+                for live in self.agents.lock().unwrap().values() {
                     live.kill();
                 }
                 for (_, live) in self.shells.lock().unwrap().values() {
@@ -577,14 +791,14 @@ impl Hub {
             program,
             args,
             cwd: PathBuf::from(&worker.cwd),
-            env: self.agent_env(Some(worker.id))?,
+            env: self.agent_env(Some(worker.id), None)?,
             env_remove: inherited_agent_vars(),
         })
     }
 
     /// Environment for an agent terminal. This `hub` comes first on PATH, so the agent's `hub`
     /// commands and its Notification hook reach this daemon.
-    fn agent_env(&self, worker: Option<i64>) -> Result<Vec<(String, String)>> {
+    fn agent_env(&self, worker: Option<i64>, agent: Option<i64>) -> Result<Vec<(String, String)>> {
         let exe_dir = std::env::current_exe()?
             .parent()
             .map(Path::to_path_buf)
@@ -599,6 +813,11 @@ impl Hub {
         ];
         if let Some(id) = worker {
             env.push(("HUB_WORKER".into(), id.to_string()));
+        }
+        // An Orchestrator's `hub worker start` and `hub wait` name it, so Workers and their
+        // messages stay with the Orchestrator that started them.
+        if let Some(id) = agent {
+            env.push(("HUB_AGENT".into(), id.to_string()));
         }
         Ok(env)
     }
@@ -643,6 +862,11 @@ impl Hub {
             bail!("--worktree must be current, new:<type>/<task>, or path:<abs path>");
         };
 
+        // The Orchestrator starting it (`HUB_AGENT` via `hub worker start`), else the repo's first.
+        let agent = match p.get("agent").and_then(Value::as_i64) {
+            Some(agent) => Some(agent),
+            None => db::first_orchestrator(&self.db(), &repo_root.display().to_string())?.map(|a| a.id),
+        };
         let session_id = uuid::Uuid::new_v4().to_string();
         let id = db::insert_worker(
             &self.db(),
@@ -654,6 +878,7 @@ impl Hub {
                 cwd: &cwd.display().to_string(),
                 branch: branch.as_deref(),
                 session_id: &session_id,
+                agent,
             },
         )?;
         let worker = db::worker(&self.db(), id)?;
@@ -849,7 +1074,7 @@ impl Hub {
         Ok(json!({ "question": question, "answer": answer }))
     }
 
-    fn wait(&self, repo: &str, timeout: Duration, stream: &UnixStream) -> Result<Value> {
+    fn wait(&self, repo: &str, agent: Option<i64>, timeout: Duration, stream: &UnixStream) -> Result<Value> {
         let messages = self.wait_until(
             timeout,
             || peer_gone(stream),
@@ -857,7 +1082,7 @@ impl Hub {
                 if peer_gone(stream) {
                     return Ok(None); // never hand messages to a listener that hung up
                 }
-                let taken = db::take_undelivered(&self.db(), repo)?;
+                let taken = db::take_undelivered(&self.db(), repo, agent)?;
                 Ok((!taken.is_empty()).then_some(taken))
             },
         )?;
@@ -901,11 +1126,12 @@ impl Hub {
         }))
     }
 
-    fn list_workers(&self, repo: &str) -> Result<Value> {
+    /// The repo's open Workers; with an `agent`, only the ones that Orchestrator started.
+    fn list_workers(&self, repo: &str, agent: Option<i64>) -> Result<Value> {
         let db = self.db();
         let mut out = Vec::new();
         for worker in db::workers(&db, repo)? {
-            if worker.closed_at.is_none() {
+            if worker.closed_at.is_none() && agent.is_none_or(|agent| worker.agent_id == Some(agent)) {
                 out.push(self.view(&db, &worker)?);
             }
         }
@@ -914,23 +1140,33 @@ impl Hub {
 
     /// The Dashboard rows: live Workers, and settled ones for a while after.
     fn status(&self, repo: &str) -> Result<Value> {
-        Ok(json!({ "workers": self.rows(repo)? }))
+        Ok(json!({ "workers": self.rows(repo, false)? }))
     }
 
     /// One row per recent Worker, ordered needs you, running, failed, done. `state` is the
-    /// Dashboard state; `phase` is the Worker's lifecycle state.
-    fn rows(&self, repo: &str) -> Result<Vec<Value>> {
+    /// Dashboard state; `phase` is the Worker's lifecycle state. For Echo (`for_echo`), settled
+    /// Workers stay until dismissed or a week old, so a Final Report waits to be read; the
+    /// Orchestrator's `hub status` drops them after ten minutes.
+    fn rows(&self, repo: &str, for_echo: bool) -> Result<Vec<Value>> {
         let db = self.db();
         let now = db::now();
         let mut rows = Vec::new();
         for worker in db::workers(&db, repo)? {
-            let recent = worker.settled_at.is_none_or(|at| now - at < KEEP_SETTLED_SECONDS);
+            let recent = match worker.settled_at {
+                None => true,
+                Some(at) if for_echo => worker.dismissed_at.is_none() && now - at < KEEP_REPORTS_SECONDS,
+                Some(at) => now - at < KEEP_SETTLED_SECONDS,
+            };
             if !recent {
                 continue;
             }
             let live = self.live(worker.id).ok();
             let blocker = live.as_ref().and_then(|live| live.blocker.lock().unwrap().clone());
             let open: Vec<i64> = db::open_questions(&db, worker.id)?.iter().map(|m| m.id).collect();
+            let profile = profile::load(&self.hub_dir, &worker.profile).ok();
+            // The Worker's latest `hub send --type status`, first line only: the ledger's progress line.
+            let progress = db::last_message(&db, worker.id, kind::STATUS)?
+                .and_then(|m| m.body.lines().map(str::trim).find(|l| !l.is_empty()).map(String::from));
             let row_state = match worker.state.as_str() {
                 state::DONE => "done",
                 state::BLOCKED | state::LOST => "needs you",
@@ -951,6 +1187,11 @@ impl Hub {
                 "blocker": blocker,
                 "openQuestions": open,
                 "finalReport": worker.final_report,
+                "agent": worker.agent_id,
+                "model": profile.as_ref().map(|p| p.model.clone()),
+                "effort": profile.as_ref().and_then(|p| p.effort.clone()),
+                "progress": progress,
+                "settledAt": worker.settled_at,
             }));
         }
         let order = |row: &Value| match row["state"].as_str() {
@@ -972,6 +1213,7 @@ impl Hub {
                 needs.push(json!({
                     "kind": "question",
                     "message": question.id,
+                    "agent": worker.agent_id,
                     "worker": format!("w{}", worker.id),
                     "profile": worker.profile,
                     "title": worker.title,
@@ -990,6 +1232,7 @@ impl Hub {
                 needs.push(json!({
                     "kind": blocker,
                     "message": message.id,
+                    "agent": worker.agent_id,
                     "worker": format!("w{}", worker.id),
                     "profile": worker.profile,
                     "title": worker.title,
@@ -998,6 +1241,25 @@ impl Hub {
                     "at": message.created_at,
                 }));
             }
+        }
+        drop(db);
+        // A Normal session's own permission prompt: there is no Orchestrator to tell, only the human.
+        for agent in db::agents(&self.db(), Some(repo))? {
+            let Some(at) = self.agent_prompts.lock().unwrap().get(&agent.id).copied() else {
+                continue;
+            };
+            let Ok(live) = self.agent_live(agent.id) else { continue };
+            needs.push(json!({
+                "kind": "permission_prompt",
+                "message": 0,
+                "agent": agent.id,
+                "worker": null,
+                "profile": "claude",
+                "title": agent.name.clone().unwrap_or_else(|| "Claude Code".into()),
+                "body": "A permission prompt is waiting on screen.",
+                "prompt": screen::prompt_lines(&live.screen()),
+                "at": at,
+            }));
         }
         needs.sort_by_key(|need| need["at"].as_i64().unwrap_or(0));
         Ok(needs)
@@ -1017,20 +1279,25 @@ impl Hub {
         ids
     }
 
-    /// Everything the Hub App draws for one Hub Session.
+    /// Everything the app draws for one repo: its agents, their Workers, and what needs the human.
     fn snapshot(&self, repo: &str) -> Result<Value> {
+        // Read before the json! below: its other parts take the database lock themselves.
+        let agents = db::agents(&self.db(), Some(repo))?;
+        let first = agents.iter().find(|a| a.kind == db::agent_kind::ORCHESTRATOR);
         Ok(json!({
             "repo": repo,
-            "orchestrator": { "live": self.orchestrators.lock().unwrap().contains_key(repo) },
+            "orchestrator": {
+                "live": first.is_some_and(|a| self.agent_is_live(a.id)),
+                "model": first.and_then(|a| a.model.clone()),
+            },
+            "agents": agents.iter().map(|a| self.agent_view(a)).collect::<Vec<_>>(),
             "shells": self.shells_of(repo),
-            "workers": self.rows(repo)?,
+            "workers": self.rows(repo, true)?,
             "needs": self.needs(repo)?,
             "usage": self.usage.lock().unwrap().view(),
         }))
     }
 
-    /// Re-reads the account's plan limits with `claude -p /usage` on a thread of its own: it prints
-    /// the account's limits without a model call, and takes a few seconds.
     fn refresh_usage(self: &Arc<Self>) {
         {
             let mut usage = self.usage.lock().unwrap();
@@ -1114,10 +1381,13 @@ impl Hub {
     /// The human's answer to a waiting permission prompt, from the Hub App: press the key on the
     /// Worker, then tell the Orchestrator, so it never has to be typed to.
     fn decide(&self, p: &Value) -> Result<Value> {
-        let id = id_param(p, "worker")?;
         let approve = param(p, "approve")?
             .as_bool()
             .context("approve must be true or false")?;
+        if let Some(agent) = p.get("agent").and_then(Value::as_i64) {
+            return self.decide_agent(agent, approve, p.get("note").and_then(Value::as_str));
+        }
+        let id = id_param(p, "worker")?;
         let live = self.live(id)?;
         let screen = live.screen();
         if screen::look(&screen) != Look::PermissionPrompt {
@@ -1148,6 +1418,47 @@ impl Hub {
         Ok(json!({}))
     }
 
+    /// Approve or Deny on a Normal session's own prompt: press the key; the human is the only one to tell.
+    fn decide_agent(&self, id: i64, approve: bool, note: Option<&str>) -> Result<Value> {
+        let live = self.agent_live(id)?;
+        if screen::look(&live.screen()) != Look::PermissionPrompt {
+            bail!("no permission prompt is waiting on agent {id}");
+        }
+        if approve {
+            live.write(b"\r")?;
+        } else {
+            live.write(b"\x1b")?;
+            if let Some(note) = note.map(str::trim).filter(|n| !n.is_empty()) {
+                std::thread::sleep(Duration::from_millis(500));
+                live.write(note.as_bytes())?;
+                std::thread::sleep(Duration::from_millis(150));
+                live.write(b"\r")?;
+            }
+        }
+        self.agent_prompts.lock().unwrap().remove(&id);
+        self.notify();
+        Ok(json!({}))
+    }
+
+    /// Watches a Normal session's screen for permission prompts, so they reach Needs you.
+    fn watch_agent(self: Arc<Self>, live: Arc<Live>) {
+        while live.is_alive() {
+            std::thread::sleep(Duration::from_secs(1));
+            let waiting = screen::look(&live.screen()) == Look::PermissionPrompt;
+            let mut prompts = self.agent_prompts.lock().unwrap();
+            let changed = if waiting {
+                // Keep the time it was first seen.
+                !prompts.contains_key(&live.id) && prompts.insert(live.id, db::now()).is_none()
+            } else {
+                prompts.remove(&live.id).is_some()
+            };
+            drop(prompts);
+            if changed {
+                self.notify();
+            }
+        }
+    }
+
     fn attach(&self, p: &Value, mut reader: BufReader<UnixStream>, mut stream: UnixStream) -> Result<()> {
         let live = match self.terminal(p) {
             Ok(live) => live,
@@ -1173,11 +1484,27 @@ impl Hub {
             }
             let _ = out.shutdown(std::net::Shutdown::Both);
         });
+        // An unnamed agent takes its name from the first line the human types into it.
+        let mut naming = match p.get("agent").and_then(Value::as_i64) {
+            Some(id) if db::agent(&self.db(), id).is_ok_and(|a| a.name.is_none()) => Some((id, LineReader::default())),
+            _ => None,
+        };
         let mut buf = [0u8; 4096];
         loop {
             match reader.read(&mut buf) {
                 Ok(0) | Err(_) => break,
-                Ok(n) => live.write(&buf[..n])?,
+                Ok(n) => {
+                    live.write(&buf[..n])?;
+                    if let Some((id, line)) = &mut naming {
+                        let id = *id;
+                        for typed in line.feed(&buf[..n]) {
+                            if self.name_from_input(id, &typed).unwrap_or(true) {
+                                naming = None;
+                                break;
+                            }
+                        }
+                    }
+                }
             }
         }
         let _ = stream.shutdown(std::net::Shutdown::Both);
@@ -1187,6 +1514,98 @@ impl Hub {
 
 /// Session markers a Worker must not inherit from whatever agent started the daemon: Claude Code
 /// reads `CLAUDE_CODE_CHILD_SESSION`, for one, as "do not save transcripts", which breaks resume.
+/// Collects what the human types into a terminal, a line at a time, without escape sequences.
+#[derive(Default)]
+struct LineReader {
+    line: Vec<u8>,
+    escape: bool,
+}
+
+impl LineReader {
+    /// Feeds typed bytes; returns every non-empty line Enter finished.
+    fn feed(&mut self, bytes: &[u8]) -> Vec<String> {
+        let mut done = Vec::new();
+        for &b in bytes {
+            if self.escape {
+                // CSI and friends end on a letter or `~`.
+                if b.is_ascii_alphabetic() || b == b'~' {
+                    self.escape = false;
+                }
+                continue;
+            }
+            match b {
+                0x1b => self.escape = true,
+                b'\r' | b'\n' => {
+                    let line = String::from_utf8_lossy(&self.line).trim().to_string();
+                    self.line.clear();
+                    if !line.is_empty() {
+                        done.push(line);
+                    }
+                }
+                0x7f | 0x08 => {
+                    // Drop the last character, all of its UTF-8 bytes.
+                    while let Some(last) = self.line.pop() {
+                        if last & 0xC0 != 0x80 {
+                            break;
+                        }
+                    }
+                }
+                0x15 => self.line.clear(),
+                b if b >= 0x20 => self.line.push(b),
+                _ => {}
+            }
+        }
+        done
+    }
+}
+
+/// A short name from the human's first request: its first words, without a slash command.
+pub fn name_from_request(line: &str) -> Option<String> {
+    let line = line.trim();
+    if line.is_empty() || line.starts_with('/') || line.starts_with('!') {
+        return None;
+    }
+    let mut name = String::new();
+    for word in line.split_whitespace().take(6) {
+        if name.chars().count() + word.chars().count() + 1 > 48 {
+            break;
+        }
+        if !name.is_empty() {
+            name.push(' ');
+        }
+        name.push_str(word);
+    }
+    let name = name.trim_end_matches(|c: char| ",.;:!?".contains(c)).to_string();
+    let mut chars = name.chars();
+    let first = chars.next()?;
+    Some(first.to_uppercase().chain(chars).collect())
+}
+
+/// The human's shell: `HUB_SHELL`, else `$SHELL`, else zsh.
+fn user_shell() -> String {
+    std::env::var("HUB_SHELL")
+        .or_else(|_| std::env::var("SHELL"))
+        .unwrap_or_else(|_| "/bin/zsh".into())
+}
+
+/// A multiplexer session name for a target, e.g. `echo-lanh-a3`: letters, digits, `-` and `_`
+/// only, since tmux treats `.` and `:` as separators.
+fn mux_session(repo_name: &str, label: &str) -> String {
+    let clean: String = repo_name
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+        .collect();
+    format!("echo-{}-{label}", clean.trim_matches('-'))
+}
+
+/// `word` as one POSIX shell word.
+fn shell_quote(word: &str) -> String {
+    if !word.is_empty() && word.chars().all(|c| c.is_ascii_alphanumeric() || "-_./=:@%+,".contains(c)) {
+        return word.to_string();
+    }
+    format!("'{}'", word.replace('\'', "'\\''"))
+}
+
 fn inherited_agent_vars() -> Vec<String> {
     std::env::vars()
         .map(|(key, _)| key)
@@ -1240,6 +1659,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn mux_sessions_are_safe_names() {
+        assert_eq!(mux_session("lanh", "a3"), "echo-lanh-a3");
+        assert_eq!(mux_session("my.repo:v2", "w21"), "echo-my-repo-v2-w21");
+    }
+
+    #[test]
+    fn shell_words_are_quoted_only_when_needed() {
+        assert_eq!(shell_quote("/usr/local/bin/hub"), "/usr/local/bin/hub");
+        assert_eq!(shell_quote("HUB_STATE=/tmp/x"), "HUB_STATE=/tmp/x");
+        assert_eq!(shell_quote("a b"), "'a b'");
+        assert_eq!(shell_quote("it's"), "'it'\\''s'");
+        assert_eq!(shell_quote(""), "''");
+    }
+
+    #[test]
     fn usage_lines_become_named_limits() {
         let text = "You are currently using your subscription to power your Claude Code usage\n\n\
                     Current session: 48% used · resets Oct 17 at 4:50pm (Asia/Saigon)\n\
@@ -1257,6 +1691,27 @@ mod tests {
             limits[2],
             json!({ "name": "Week (Fable)", "percent": 0, "resets": null })
         );
+    }
+
+    #[test]
+    fn a_first_request_names_an_agent() {
+        assert_eq!(
+            name_from_request("  run all the rerank follow-ups, verify each one, and keep the bench going").as_deref(),
+            Some("Run all the rerank follow-ups, verify")
+        );
+        assert_eq!(name_from_request("fix it.").as_deref(), Some("Fix it"));
+        assert_eq!(name_from_request("/model opus"), None);
+        assert_eq!(name_from_request("   "), None);
+    }
+
+    #[test]
+    fn typed_lines_skip_escapes_and_backspaces() {
+        let mut reader = LineReader::default();
+        assert!(reader.feed(b"fix th").is_empty());
+        assert_eq!(reader.feed(b"\x1b[Ae\x7fe bug\r"), ["fix the bug"]);
+        assert!(reader.feed(b"\r").is_empty(), "an empty Enter is not a line");
+        assert_eq!(reader.feed("héllo\x7f\x7fo\r".as_bytes()), ["hélo"]);
+        assert_eq!(reader.feed(b"/model opus\rfix it\r"), ["/model opus", "fix it"]);
     }
 
     #[test]

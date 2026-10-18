@@ -5,6 +5,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use serde_json::json;
 
+use crate::db::Agent;
 use crate::{attach, proto, repo};
 
 /// The first message of a resumed Orchestrator session.
@@ -49,10 +50,29 @@ pub fn orchestrator_args(
     Ok(args)
 }
 
-/// Starts this repo's Orchestrator in the Hub Daemon, or finds it running, then attaches to it.
+/// Arguments after `claude` for a Normal session: plain Claude Code in the repo, new or resumed.
+pub fn claude_args(agent: &Agent, resume: bool, extra: &[String]) -> Vec<String> {
+    let name = agent.name.clone().unwrap_or_else(|| {
+        let repo = Path::new(&agent.repo);
+        repo.file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    });
+    let mut args = vec!["-n".to_string(), format!("echo: {name}")];
+    args.extend(extra.iter().cloned());
+    if resume {
+        args.extend(["--resume".into(), agent.session_id.clone()]);
+    } else {
+        args.extend(["--session-id".into(), agent.session_id.clone()]);
+    }
+    args
+}
+
+/// Starts this repo's first Orchestrator in the Hub Daemon, or finds it running, then attaches to it.
 pub fn run(extra: Vec<String>) -> Result<()> {
     let repo = repo::root(&std::env::current_dir()?)?;
     let repo = repo.display().to_string();
-    proto::call("session.open", json!({ "repo": repo, "args": extra })).context("starting the Orchestrator")?;
-    attach::run(json!({ "orchestrator": repo }), "the Orchestrator")
+    let opened =
+        proto::call("session.open", json!({ "repo": repo, "args": extra })).context("starting the Orchestrator")?;
+    attach::run(json!({ "agent": opened["agent"] }), "the Orchestrator")
 }

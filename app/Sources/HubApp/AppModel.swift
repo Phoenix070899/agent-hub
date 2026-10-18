@@ -2,40 +2,151 @@ import AppKit
 import HubCore
 import SwiftUI
 
-/// What the sidebar has selected: a session's Orchestrator, or one of its Workers.
+/// What the ledger has selected: one of a repo's agents, or one of its Workers.
 enum Selection: Hashable {
-    case orchestrator(repo: String)
+    case agent(repo: String, id: Int)
     case worker(repo: String, id: String)
 
     var repo: String {
         switch self {
-        case .orchestrator(let repo), .worker(let repo, _): return repo
+        case .agent(let repo, _), .worker(let repo, _): return repo
         }
     }
 }
 
-/// The app's state: every Hub Session the daemon knows, each one's live snapshot, and the
-/// selection. Every daemon call runs off the main thread; results come back here.
+/// A short line at the top of an agent's Needs you after the human acts, so they see it landed.
+struct Confirmation: Identifiable, Equatable {
+    let id = UUID()
+    let text: String
+}
+
+/// What the New session modal opens with.
+struct NewSessionRequest: Equatable {
+    var repo: String?
+    var kind: Agent.Kind = .orchestrator
+}
+
+/// How the window looks. By default it follows the terminal theme, so a dark terminal gets a
+/// dark window around it.
+enum WindowLook: String, CaseIterable, Identifiable, Codable {
+    case matchTerminal, system, light, dark
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .matchTerminal: return "Match the terminal theme"
+        case .system: return "Follow macOS"
+        case .light: return "Light"
+        case .dark: return "Dark"
+        }
+    }
+}
+
+/// Showing each agent's and Worker's terminal inside the human's multiplexer, where they can
+/// split and add windows beside it.
+struct MultiplexerSettings: Codable, Equatable {
+    var enabled = true
+    /// Run in a login shell with `{session}` (e.g. `echo-lanh-a3`), `{dir}` and `{command}` (what
+    /// shows the agent in the first pane) filled in, each already shell-quoted.
+    var command = MultiplexerSettings.tmux
+    /// Picked "Custom command", even while the command still reads like a preset. Optional, so
+    /// settings saved before it existed still load.
+    var custom: Bool?
+
+    static let tmux = "tmux new-session -A -s {session} -c {dir} {command}"
+    /// screen takes a program rather than a shell line, so `sh -c` runs the attach; `-U` for UTF-8.
+    static let screen = "cd {dir} && screen -U -xRR -S {session} sh -c {command}"
+
+    /// Which multiplexer this is, for the Settings picker: a known command, none, or the human's own.
+    var kind: Multiplexer {
+        get {
+            guard enabled else { return .none }
+            if custom == true { return .custom }
+            return Multiplexer.allCases.first { $0.command == command } ?? .custom
+        }
+        set {
+            enabled = newValue != .none
+            custom = newValue == .custom ? true : nil
+            if let preset = newValue.command { command = preset }
+        }
+    }
+}
+
+enum Multiplexer: String, CaseIterable, Identifiable {
+    case tmux, screen, none, custom
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .tmux: return "tmux"
+        case .screen: return "screen"
+        case .none: return "None (plain terminal)"
+        case .custom: return "Custom command"
+        }
+    }
+
+    /// The command it runs; nil for none, and for custom, which keeps whatever was typed.
+    var command: String? {
+        switch self {
+        case .tmux: return MultiplexerSettings.tmux
+        case .screen: return MultiplexerSettings.screen
+        case .none, .custom: return nil
+        }
+    }
+}
+
+/// The multiplexer shell showing one agent or Worker.
+struct MuxShell: Equatable {
+    let repo: String
+    let shell: Int
+    /// The multiplexer's own name for it, like `echo-lanh-a3`.
+    var session: String?
+    let opened: Date
+    /// Whether a snapshot has listed it yet.
+    var seen = false
+}
+
+/// The app's state: every repo the daemon knows, each one's live snapshot, and the selection.
+/// Every daemon call runs off the main thread; results come back here.
 @MainActor
 final class AppModel: ObservableObject {
     static let shared = AppModel()
 
+    /// Models offered when starting an agent; "" keeps the saved one, or `claude`'s default.
+    static let models = ["", "claude-opus-5-5", "claude-sonnet-5-5"]
+
     @Published private(set) var sessions: [SessionInfo] = []
     @Published private(set) var snapshots: [String: Snapshot] = [:]
     @Published var selection: Selection?
-    /// Sessions whose Worker list is folded in the sidebar.
-    @Published var collapsed: Set<String> = []
+    @Published var newSession: NewSessionRequest?
+    /// The agent being renamed, if any.
+    @Published var renaming: Agent?
+    /// The agent waiting on "Close?" to be confirmed, if any.
+    @Published var closing: Agent?
+    /// A question whose reply field should take the keyboard once the ledger shows it.
+    @Published var replyFocus: String?
+    /// The window is in full screen, where the traffic lights are hidden.
+    @Published var fullScreen = false
+    /// Quick open (⌘K) is up.
+    @Published var quickOpenShown = false
+    /// While a modal is up, terminals hand it the keyboard.
+    var modalShown: Bool { newSession != nil || renaming != nil || closing != nil || quickOpenShown }
+    /// Hides the ledger so the terminal takes the whole window.
+    @Published var ledgerHidden = false
+    /// Agent groups folded in the ledger.
+    @Published var collapsed: Set<Int> = []
     @Published private(set) var connected = false
+    /// True once the daemon could not be reached; the window says so until it is back.
+    @Published private(set) var daemonDown = false
     @Published var error: String?
+    /// The latest confirmation per agent.
+    @Published private(set) var confirmations: [Int: Confirmation] = [:]
 
     let client = DaemonClient()
     /// Set by the window, so a notification or the menu bar can bring it back after it closed.
     var openMainWindow: (() -> Void)?
-
-    /// Each session's split panes, remembered across launches.
-    @Published private(set) var layouts: [String: PaneLayout] = AppModel.loadLayouts()
-    /// The pane with keyboard focus in each session.
-    @Published private(set) var focusedGroups: [String: Int] = [:]
 
     /// How every terminal looks; Settings edits it.
     @Published var appearance: TerminalAppearance = AppModel.loadAppearance() {
@@ -43,39 +154,184 @@ final class AppModel: ObservableObject {
             if let data = try? JSONEncoder().encode(appearance) {
                 UserDefaults.standard.set(data, forKey: Self.appearanceKey)
             }
+            applyWindowLook()
         }
     }
 
+    @Published var windowLook: WindowLook = AppModel.load(WindowLook.self, key: "windowLook") ?? .matchTerminal {
+        didSet {
+            Self.save(windowLook, key: "windowLook")
+            applyWindowLook()
+        }
+    }
+
+    /// Terminals drawn by SwiftTerm's Metal renderer instead of Core Graphics. SwiftTerm calls it
+    /// experimental, so it is a setting; it falls back to Core Graphics if Metal fails.
+    @Published var gpuRendering: Bool = UserDefaults.standard.bool(forKey: "gpuRendering") {
+        didSet { UserDefaults.standard.set(gpuRendering, forKey: "gpuRendering") }
+    }
+
+    @Published var multiplexer: MultiplexerSettings =
+        AppModel.load(MultiplexerSettings.self, key: "multiplexer") ?? MultiplexerSettings()
+    {
+        didSet {
+            Self.save(multiplexer, key: "multiplexer")
+            // A new command gets another try everywhere it failed.
+            muxFailed.removeAll()
+        }
+    }
+
+    /// The multiplexer shell showing each agent or Worker, once the daemon has started it.
+    @Published private(set) var muxShells: [TerminalTarget: MuxShell] = [:]
+    /// Targets whose multiplexer command failed: they show their plain terminal.
+    @Published private(set) var muxFailed: Set<TerminalTarget> = []
+    private var muxPending: Set<TerminalTarget> = []
+
+    private static func load<T: Decodable>(_ type: T.Type, key: String) -> T? {
+        UserDefaults.standard.data(forKey: key).flatMap { try? JSONDecoder().decode(T.self, from: $0) }
+    }
+
+    private static func save<T: Encodable>(_ value: T, key: String) {
+        if let data = try? JSONEncoder().encode(value) { UserDefaults.standard.set(data, forKey: key) }
+    }
+
+    /// Sets the whole app light or dark; the ledger's colours follow.
+    func applyWindowLook() {
+        let name: NSAppearance.Name?
+        switch windowLook {
+        case .matchTerminal: name = appearance.theme.isDark ? .darkAqua : .aqua
+        case .system: name = nil
+        case .light: name = .aqua
+        case .dark: name = .darkAqua
+        }
+        NSApp?.appearance = name.flatMap { NSAppearance(named: $0) }
+    }
+
     private var trackers: [String: NeedTracker] = [:]
-    private static let layoutsKey = "layouts"
+    /// What each repo last showed, so switching back returns to it.
+    private var lastSelection: [String: Selection] = [:]
     private static let appearanceKey = "appearance"
+    private static let lastRepoKey = "lastRepo"
 
     private static func loadAppearance() -> TerminalAppearance {
         guard let data = UserDefaults.standard.data(forKey: appearanceKey),
               let saved = try? JSONDecoder().decode(TerminalAppearance.self, from: data) else { return .orca }
         return saved
     }
-    /// Each followed session's events connection generation; bumping it stops the old follower.
+
+    /// Each followed repo's events connection generation; bumping it stops the old follower.
     private var following: [String: Int] = [:]
-    private var sockets: [String: HubSocket] = [:]
     private var nextGeneration = 0
-    private static let lastRepoKey = "lastRepo"
 
     var selectedRepo: String? { selection?.repo }
     var selectedSnapshot: Snapshot? { selectedRepo.flatMap { snapshots[$0] } }
     var needsYouCount: Int { snapshots.values.reduce(0) { $0 + $1.needsYouCount } }
-    /// Account-wide: the freshest any session's snapshot carries.
+    /// Active Workers in every repo.
+    var runningCount: Int { snapshots.values.reduce(0) { $0 + $1.workers.filter(\.isActive).count } }
+    /// Account-wide: the freshest any repo's snapshot carries.
     var usage: Usage? { snapshots.values.compactMap(\.usage).max { ($0.updatedAt ?? 0) < ($1.updatedAt ?? 0) } }
 
+    func snapshot(_ repo: String) -> Snapshot { snapshots[repo] ?? .empty(repo: repo) }
+
+    func activeCount(_ repo: String) -> Int { snapshot(repo).workers.filter(\.isActive).count }
+
+    /// The repo's agents: from its snapshot once one arrives, else from the session list.
+    func agents(_ repo: String) -> [Agent] {
+        snapshots[repo]?.agents ?? sessions.first { $0.repo == repo }?.agents ?? []
+    }
+
+    /// One tab per repo with a live agent or Workers at work, by name. The order never follows
+    /// what is waiting, so a tab and its ⌘-number stay put; the needs badge marks those instead.
+    var tabSessions: [SessionInfo] {
+        sessions
+            .filter { $0.live || activeCount($0.repo) > 0 || $0.repo == selectedRepo }
+            .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+    }
+
+    /// Repos folded into the "stopped" menu.
+    var stoppedSessions: [SessionInfo] {
+        let shown = Set(tabSessions.map(\.repo))
+        return sessions.filter { !shown.contains($0.repo) }
+    }
+
     func start() {
+        applyWindowLook()
         Notifier.requestPermission()
         refreshSessions { sessions in
             let last = UserDefaults.standard.string(forKey: Self.lastRepoKey)
             let pick = sessions.first { $0.repo == last } ?? sessions.first(where: \.live) ?? sessions.first
-            if self.selection == nil, let pick { self.selection = .orchestrator(repo: pick.repo) }
+            if self.selection == nil, let pick { self.selectSession(pick.repo) }
         }
         Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { _ in
             Task { @MainActor in AppModel.shared.refreshSessions() }
+        }
+        readTmuxPrefix()
+    }
+
+    // MARK: Splitting the multiplexer
+
+    /// The terminal the main panel shows for the selection, before any multiplexer around it.
+    private var selectedTarget: TerminalTarget? {
+        switch selection {
+        case .agent(_, let id)?: return .agent(id: id)
+        case .worker(let repo, let id)?:
+            return snapshot(repo).workers.first { $0.id == id }?.number.map { .worker(id: $0) }
+        case nil: return nil
+        }
+    }
+
+    /// ⌘W: closes the tmux pane in focus, and its window if it was the last one there. The pane
+    /// showing the agent itself is never closed; tmux would drop the agent's view with it. Away
+    /// from tmux, ⌘W closes the window as usual.
+    func closePane() {
+        guard canSplit, let target = selectedTarget, let session = muxShells[target]?.session else {
+            NSApp.keyWindow?.performClose(nil)
+            return
+        }
+        let quoted = "'" + session.replacingOccurrences(of: "'", with: "'\\''") + "'"
+        // Exit 3: the focused pane is the agent's own (`hub attach --follow`).
+        let script = "case \"$(tmux display -p -t \(quoted): '#{pane_start_command}')\" in *attach*--follow*) exit 3;; esac; tmux kill-pane -t \(quoted):"
+        Task.detached {
+            let shell = Process()
+            shell.executableURL = URL(fileURLWithPath: "/bin/zsh")
+            shell.arguments = ["-lc", script]
+            shell.standardOutput = FileHandle.nullDevice
+            shell.standardError = FileHandle.nullDevice
+            guard (try? shell.run()) != nil else { return }
+            shell.waitUntilExit()
+            if shell.terminationStatus == 3 { await MainActor.run { NSSound.beep() } }
+        }
+    }
+
+    /// ⌘D splits by typing tmux keys, so it needs tmux on screen.
+    var canSplit: Bool { multiplexer.enabled && multiplexer.command.hasPrefix("tmux") }
+
+    /// The human's tmux prefix as the byte it types; Ctrl-b until tmux says otherwise.
+    private var tmuxPrefix: UInt8 = 0x02
+
+    /// ⌘D and ⇧⌘D: splits the shown tmux pane right or down by typing the prefix and `%` or `"`
+    /// into it, so the human's own bindings and split options apply.
+    func splitPane(down: Bool) {
+        guard canSplit else { return }
+        let keys = Data([tmuxPrefix, down ? UInt8(ascii: "\"") : UInt8(ascii: "%")])
+        NotificationCenter.default.post(name: .muxKeys, object: keys)
+    }
+
+    /// Asks tmux for the prefix, through a login shell for the human's PATH, off the main thread.
+    private func readTmuxPrefix() {
+        guard multiplexer.command.hasPrefix("tmux") else { return }
+        Task.detached {
+            let shell = Process()
+            let out = Pipe()
+            shell.executableURL = URL(fileURLWithPath: "/bin/zsh")
+            shell.arguments = ["-lc", "tmux start-server \\; show -gv prefix"]
+            shell.standardOutput = out
+            shell.standardError = FileHandle.nullDevice
+            guard (try? shell.run()) != nil else { return }
+            shell.waitUntilExit()
+            let text = String(decoding: out.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+            guard let byte = tmuxControlByte(text) else { return }
+            await MainActor.run { AppModel.shared.tmuxPrefix = byte }
         }
     }
 
@@ -93,59 +349,108 @@ final class AppModel: ObservableObject {
         _ = try HubSocket(path: client.socketPath)
     }
 
-    /// Reloads the session list and follows every session not yet followed.
+    /// Reloads the repo list and follows every repo not yet followed. A failure here means the
+    /// daemon is out of reach: the window shows that, not an error.
     func refreshSessions(then done: (([SessionInfo]) -> Void)? = nil) {
-        background { client in
+        background(quiet: true) { client in
             try Self.ensureDaemon(client)
             return try client.sessions()
         } then: { sessions in
             self.sessions = sessions
+            self.daemonDown = false
             for session in sessions where self.following[session.repo] == nil {
                 self.follow(repo: session.repo)
             }
+            // A first session started outside the window (`hub` in a terminal) opens here too.
+            if self.selection == nil, let first = sessions.first(where: \.live) ?? sessions.first {
+                self.selectSession(first.repo)
+            }
             done?(sessions)
+        } failed: {
+            self.daemonDown = true
         }
     }
 
-    func chooseSession() {
+    /// Opens the New session modal, on a repo and mode when given.
+    func showNewSession(repo: String? = nil, kind: Agent.Kind = .orchestrator) {
+        openMainWindow?()
+        NSApp.activate(ignoringOtherApps: true)
+        newSession = NewSessionRequest(repo: repo, kind: kind)
+    }
+
+    /// Asks for a folder outside the known repos; nil when cancelled.
+    func chooseFolder() -> String? {
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
-        panel.prompt = "Open Session"
-        panel.message = "Choose a git repo for the Hub Session."
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        open(repo: url.path)
+        panel.prompt = "Choose"
+        panel.message = "Choose a git repo."
+        guard panel.runModal() == .OK else { return nil }
+        return panel.url?.path
     }
 
-    /// Starts (or finds) the repo's Orchestrator and selects it.
-    func open(repo path: String) {
+    /// Starts a new agent in a repo and selects it. An empty name is taken from the first request.
+    func open(repo path: String, kind: Agent.Kind, name: String, model: String) {
         background { client in
             try Self.ensureDaemon(client)
-            let result = try client.call("session.open", ["repo": path]) as? [String: Any]
-            return result?["repo"] as? String ?? path
-        } then: { repo in
-            self.select(.orchestrator(repo: repo))
-            self.collapsed.remove(repo)
+            return try client.openAgent(repo: path, kind: kind, name: name, model: model)
+        } then: { opened in
+            self.select(.agent(repo: opened.repo, id: opened.agent))
             self.refreshSessions()
         }
     }
 
-    /// Shows the Orchestrator or a Worker: where its tab is open, else as a new tab in the focused pane.
     func select(_ selection: Selection) {
         self.selection = selection
-        UserDefaults.standard.set(selection.repo, forKey: Self.lastRepoKey)
-        let tab: TabRef
-        switch selection {
-        case .orchestrator: tab = .orchestrator
-        case .worker(_, let id): tab = .worker(id)
+        lastSelection[selection.repo] = selection
+        if case .worker(let repo, let id) = selection,
+           let worker = snapshot(repo).workers.first(where: { $0.id == id }) {
+            setRead(worker, repo: repo, true)
         }
-        let (layout, group) = layout(for: selection.repo).opening(tab, in: focusedGroup(in: selection.repo))
-        setLayout(layout, for: selection.repo)
-        focusedGroups[selection.repo] = group
+        UserDefaults.standard.set(selection.repo, forKey: Self.lastRepoKey)
+        if case .agent(_, let id) = selection { collapsed.remove(id) }
     }
 
-    func toggleCollapsed(_ repo: String) {
-        if collapsed.contains(repo) { collapsed.remove(repo) } else { collapsed.insert(repo) }
+    /// Switches to a repo, back to whatever it last showed, else its first agent.
+    func selectSession(_ repo: String) {
+        if let last = lastSelection[repo], exists(last) {
+            select(last)
+        } else if let first = agents(repo).first {
+            select(.agent(repo: repo, id: first.id))
+        } else {
+            selection = nil
+        }
+    }
+
+    private func exists(_ selection: Selection) -> Bool {
+        switch selection {
+        case .agent(let repo, let id): return agents(repo).contains { $0.id == id }
+        case .worker(let repo, let id): return snapshot(repo).workers.contains { $0.id == id }
+        }
+    }
+
+    /// The first agent of the current repo (⌘0).
+    func showFirstAgent() {
+        if let repo = selectedRepo, let first = agents(repo).first { select(.agent(repo: repo, id: first.id)) }
+    }
+
+    /// The next (or previous) repo tab, wrapping around.
+    func cycleSession(forward: Bool) {
+        let tabs = tabSessions.map(\.repo)
+        guard !tabs.isEmpty else { return }
+        let index = selectedRepo.flatMap { tabs.firstIndex(of: $0) } ?? 0
+        selectSession(tabs[(index + (forward ? 1 : tabs.count - 1)) % tabs.count])
+    }
+
+    /// Whether an agent's group shows anything under its header: not folded, and an Orchestrator
+    /// (Workers, or the hint that there are none), or a session with a Need or a confirmation.
+    func showsContent(_ group: AgentGroup) -> Bool {
+        guard !collapsed.contains(group.agent.id) else { return false }
+        return group.agent.isOrchestrator || !group.needs.isEmpty || confirmations[group.agent.id] != nil
+    }
+
+    func toggleCollapsed(_ agent: Int) {
+        if collapsed.contains(agent) { collapsed.remove(agent) } else { collapsed.insert(agent) }
     }
 
     private func follow(repo: String) {
@@ -161,8 +466,8 @@ final class AppModel: ObservableObject {
                     _ = try DaemonClient.result(of: socket.readLine())
                     let current = DispatchQueue.main.sync { () -> Bool in
                         guard let self, self.following[repo] == generation else { return false }
-                        self.sockets[repo] = socket
                         self.connected = true
+                        self.daemonDown = false
                         return true
                     }
                     guard current else { return socket.shutdown() }
@@ -174,6 +479,7 @@ final class AppModel: ObservableObject {
                     let stop = DispatchQueue.main.sync { () -> Bool in
                         guard let self, self.following[repo] == generation else { return true }
                         self.connected = false
+                        self.daemonDown = true
                         return false
                     }
                     if stop { return }
@@ -185,154 +491,216 @@ final class AppModel: ObservableObject {
 
     private func apply(_ snapshot: Snapshot, repo: String, generation: Int) {
         guard following[repo] == generation else { return }
+        let before = snapshots[repo]
         snapshots[repo] = snapshot
-        // Tabs of shells that exited (or a daemon restart) and of Workers no longer listed close.
-        if let shells = snapshot.shells, let layout = layouts[repo] {
-            let kept = layout.keeping(shells: Set(shells), workers: Set(snapshot.workers.map(\.id)))
-            if kept != layout {
-                setLayout(kept, for: repo)
-                syncSelection(repo)
-            }
-        }
         var tracker = trackers[repo] ?? NeedTracker()
         for need in tracker.fresh(in: snapshot.needs) {
-            Notifier.post(need, repo: repo)
+            Notifier.post(need, repo: repo, agent: need.agent.flatMap { snapshot.agent($0) })
         }
         trackers[repo] = tracker
-        if case .worker(let selected, let id)? = selection, selected == repo,
-           !snapshot.workers.contains(where: { $0.id == id }) {
-            selection = .orchestrator(repo: repo)
+        forgetEndedMuxes(in: repo, shells: snapshot.shells)
+        // A report that arrives while its Worker is on screen has been seen; only as it arrives,
+        // so Mark as Unread on the Worker being looked at holds.
+        if case .worker(repo, let id)? = selection, let worker = snapshot.workers.first(where: { $0.id == id }),
+           worker.settledAt != nil, before?.workers.first(where: { $0.id == id })?.settledAt == nil {
+            setRead(worker, repo: repo, true)
+        }
+        // A Worker that left the ledger, or an agent that was closed, falls back to the repo's first agent.
+        if let selection, selection.repo == repo, !exists(selection) {
+            if let first = snapshot.agents?.first {
+                self.selection = .agent(repo: repo, id: first.id)
+            }
         }
     }
 
-    /// Brings the window forward on a session's Worker, or its Orchestrator.
-    func reveal(repo: String?, worker: String?) {
+    /// Brings the window forward on a Worker, an agent, or the repo.
+    func reveal(repo: String?, worker: String?, agent: Int? = nil) {
         if let repo {
-            collapsed.remove(repo)
-            select(worker.map { .worker(repo: repo, id: $0) } ?? .orchestrator(repo: repo))
+            if let worker {
+                select(.worker(repo: repo, id: worker))
+            } else if let agent {
+                select(.agent(repo: repo, id: agent))
+            } else {
+                selectSession(repo)
+            }
         }
         openMainWindow?()
         NSApp.activate(ignoringOtherApps: true)
     }
 
-    func decide(_ need: Need, approve: Bool, note: String) {
-        guard let worker = Int(need.worker.dropFirst()) else { return }
-        background { client in try client.decide(worker: worker, approve: approve, note: note) } then: { _ in }
+    // MARK: Multiplexer
+
+    /// What a terminal view attaches to: the multiplexer around `target` when that is on and
+    /// running, `target` itself when it is off or failed, nil while the multiplexer starts.
+    func shownTarget(for target: TerminalTarget) -> TerminalTarget? {
+        guard multiplexer.enabled, !muxFailed.contains(target) else { return target }
+        return muxShells[target].map { .shell(id: $0.shell) }
     }
 
-    func reply(_ need: Need, text: String) {
-        background { client in try client.reply(message: need.message, text: text) } then: { _ in }
+    /// Starts the multiplexer around `target` unless it runs, is starting, or failed.
+    func ensureMux(_ target: TerminalTarget, repo: String) {
+        guard multiplexer.enabled, !muxFailed.contains(target), muxShells[target] == nil,
+              !muxPending.contains(target) else { return }
+        muxPending.insert(target)
+        let command = multiplexer.command
+        background { client in
+            try client.openMux(target, command: command)
+        } then: { opened in
+            self.muxPending.remove(target)
+            self.muxShells[target] = MuxShell(repo: repo, shell: opened.shell, session: opened.session, opened: Date())
+        } failed: {
+            self.muxPending.remove(target)
+            self.muxFailed.insert(target)
+        }
+    }
+
+    /// Drops multiplexer shells that exited (the human quit the multiplexer, or it could not
+    /// start); the view then starts a new one. One that exits right away marks the command as
+    /// failing for that target, so it shows its plain terminal instead of retrying forever.
+    private func forgetEndedMuxes(in repo: String, shells: [Int]?) {
+        guard let shells else { return }
+        let alive = Set(shells)
+        for (target, mux) in muxShells where mux.repo == repo {
+            let age = Date().timeIntervalSince(mux.opened)
+            if alive.contains(mux.shell) {
+                if !mux.seen { muxShells[target]?.seen = true }
+            } else if mux.seen || age > 3 {
+                muxShells[target] = nil
+                if age < 5 {
+                    muxFailed.insert(target)
+                    error = "The multiplexer command exited right away, so \(target.label) shows its own terminal. Check the command in Settings."
+                }
+            }
+        }
+    }
+
+    // MARK: Acting on Needs
+
+    func decide(_ need: Need, repo: String, approve: Bool, note: String) {
+        if let worker = need.worker {
+            decide(worker: worker, repo: repo, agent: need.agent, approve: approve, note: note, what: need.command)
+        } else if let agent = need.agent {
+            decide(agent: agent, approve: approve, note: note, what: need.command)
+        }
+    }
+
+    /// Presses Approve or Deny on a Worker's permission prompt; the daemon tells its Orchestrator.
+    func decide(worker: String, repo: String, agent: Int?, approve: Bool, note: String, what: String? = nil) {
+        guard let number = Int(worker.dropFirst()) else { return }
+        background { client in try client.decide(worker: number, approve: approve, note: note) } then: { _ in
+            let verb = approve ? "Approved" : "Denied"
+            let command = what.map { ": \($0)" } ?? ""
+            if let agent { self.confirm("\(verb) \(worker)’s request\(command). Its Orchestrator knows.", for: agent) }
+        }
+    }
+
+    /// Presses Approve or Deny on a Normal session's own permission prompt.
+    func decide(agent: Int, approve: Bool, note: String, what: String? = nil) {
+        background { client in try client.decide(agent: agent, approve: approve, note: note) } then: { _ in
+            let verb = approve ? "Approved" : "Denied"
+            self.confirm("\(verb)\(what.map { " \($0)" } ?? "").", for: agent)
+        }
+    }
+
+    func reply(_ need: Need, repo: String, text: String) {
+        background { client in try client.reply(message: need.message, text: text) } then: { _ in
+            if let agent = need.agent, let worker = need.worker {
+                self.confirm("Sent your answer to \(worker). Its Orchestrator gets a copy.", for: agent)
+            }
+        }
+    }
+
+    private func confirm(_ text: String, for agent: Int) {
+        let confirmation = Confirmation(text: text)
+        confirmations[agent] = confirmation
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(8))
+            if self.confirmations[agent] == confirmation { self.confirmations[agent] = nil }
+        }
+    }
+
+    // MARK: Agents and Workers
+
+    func startAgent(_ id: Int) {
+        background { client in try client.startAgent(id) } then: { _ in self.refreshSessions() }
+    }
+
+    func stopAgent(_ id: Int) {
+        background { client in try client.stopAgent(id) } then: { _ in }
+    }
+
+    /// Takes an agent out of the ledger; its terminal stops. Callers confirm through `closing` first.
+    func forgetAgent(_ id: Int) {
+        background { client in try client.forgetAgent(id) } then: { _ in self.refreshSessions() }
+    }
+
+    /// A new conversation in place of an ended one: same repo, kind and model.
+    func startFresh(_ agent: Agent, repo: String) {
+        background { client in
+            let opened = try client.openAgent(repo: repo, kind: agent.kind, model: agent.model)
+            try client.forgetAgent(agent.id)
+            return opened
+        } then: { opened in
+            self.select(.agent(repo: opened.repo, id: opened.agent))
+            self.refreshSessions()
+        }
+    }
+
+    func rename(_ id: Int, to name: String) {
+        let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { return }
+        background { client in try client.renameAgent(id, to: name) } then: { _ in self.refreshSessions() }
+    }
+
+    func stopWorker(_ worker: WorkerRow) {
+        guard let number = worker.number else { return }
+        background { client in try client.closeWorker(number) } then: { _ in }
+    }
+
+    // MARK: Done: read, unread, dismissed
+
+    /// Final Reports the human has opened, as "repo|w12|settledAt": one that settles again after
+    /// a resume reads as new.
+    @Published private var readReports: Set<String> =
+        Set(UserDefaults.standard.stringArray(forKey: "readReports") ?? [])
+
+    private func reportKey(_ worker: WorkerRow, repo: String) -> String? {
+        worker.settledAt.map { "\(repo)|\(worker.id)|\($0)" }
+    }
+
+    /// A settled Worker whose report the human has not opened yet.
+    func isUnread(_ worker: WorkerRow, repo: String) -> Bool {
+        reportKey(worker, repo: repo).map { !readReports.contains($0) } ?? false
+    }
+
+    func setRead(_ worker: WorkerRow, repo: String, _ read: Bool) {
+        guard let key = reportKey(worker, repo: repo), readReports.contains(key) != read else { return }
+        if read { readReports.insert(key) } else { readReports.remove(key) }
+        // Reports leave Done within a week, so the newest few hundred keys are plenty.
+        let kept = readReports.sorted { ($0.split(separator: "|").last ?? "") > ($1.split(separator: "|").last ?? "") }.prefix(500)
+        UserDefaults.standard.set(Array(kept), forKey: "readReports")
+    }
+
+    /// Takes settled Workers off the Done list.
+    func dismiss(_ workers: [WorkerRow]) {
+        let numbers = workers.compactMap(\.number)
+        guard !numbers.isEmpty else { return }
+        background { client in
+            for number in numbers { try client.dismissWorker(number) }
+        } then: { _ in }
     }
 
     func refreshUsage() {
         background { client in try client.call("usage.refresh") } then: { _ in }
     }
 
-    // MARK: Panes and tabs
-
-    func layout(for repo: String) -> PaneLayout { layouts[repo] ?? .single }
-
-    /// The focused pane, or the first one.
-    func focusedGroup(in repo: String) -> Int {
-        let layout = layout(for: repo)
-        if let id = focusedGroups[repo], layout.group(id) != nil { return id }
-        return layout.groups[0].id
-    }
-
-    func focus(group id: Int, in repo: String) {
-        guard focusedGroups[repo] != id else { return }
-        focusedGroups[repo] = id
-        syncSelection(repo)
-    }
-
-    /// Shows tab `index` of pane `id`.
-    func activate(_ index: Int, in id: Int, repo: String) {
-        setLayout(layout(for: repo).updating(id) { $0.active = index }, for: repo)
-        focusedGroups[repo] = id
-        syncSelection(repo)
-    }
-
-    /// The sidebar follows the focused pane's tab when it shows the Orchestrator or a Worker.
-    private func syncSelection(_ repo: String) {
-        switch layout(for: repo).group(focusedGroup(in: repo))?.activeTab {
-        case .orchestrator?: selection = .orchestrator(repo: repo)
-        case .worker(let id)?: selection = .worker(repo: repo, id: id)
-        default: break
-        }
-    }
-
-    /// A new shell as a tab in the focused pane.
-    func newShellTab() {
-        guard let repo = selectedRepo else { return }
-        let group = focusedGroup(in: repo)
-        openShell(in: repo) { id in
-            let (layout, at) = self.layout(for: repo).opening(.shell(id), in: group)
-            self.setLayout(layout, for: repo)
-            self.focusedGroups[repo] = at
-        }
-    }
-
-    /// A new pane right of (or below) the focused one, holding a new shell.
-    func split(_ axis: SplitAxis) {
-        guard let repo = selectedRepo else { return }
-        let group = focusedGroup(in: repo)
-        openShell(in: repo) { id in
-            let (layout, at) = self.layout(for: repo).splitting(group, axis, with: .shell(id))
-            self.setLayout(layout, for: repo)
-            self.focusedGroups[repo] = at
-        }
-    }
-
-    private func openShell(in repo: String, then place: @escaping @MainActor (Int) -> Void) {
-        background { client in
-            let result = try client.call("shell.open", ["repo": repo]) as? [String: Any]
-            guard let id = result?["shell"] as? Int else { throw HubError.badResponse }
-            return id
-        } then: { id in
-            place(id)
-        }
-    }
-
-    /// Closes a tab. A shell tab ends its shell; the Orchestrator's or a Worker's tab only hides it.
-    func close(_ tab: TabRef, in repo: String) {
-        setLayout(layout(for: repo).closing(tab), for: repo)
-        syncSelection(repo)
-        if case .shell(let id) = tab {
-            background { client in try client.call("shell.close", ["shell": id]) } then: { _ in }
-        }
-    }
-
-    func closeActiveTab() {
-        guard let repo = selectedRepo,
-              let tab = layout(for: repo).group(focusedGroup(in: repo))?.activeTab else { return }
-        close(tab, in: repo)
-    }
-
-    func moveFocus(forward: Bool) {
-        guard let repo = selectedRepo else { return }
-        focus(group: layout(for: repo).neighbor(of: focusedGroup(in: repo), forward: forward), in: repo)
-    }
-
-    private func setLayout(_ layout: PaneLayout, for repo: String) {
-        layouts[repo] = layout
-        if let data = try? JSONEncoder().encode(layouts) {
-            UserDefaults.standard.set(data, forKey: Self.layoutsKey)
-        }
-    }
-
-    private static func loadLayouts() -> [String: PaneLayout] {
-        guard let data = UserDefaults.standard.data(forKey: layoutsKey) else { return [:] }
-        return (try? JSONDecoder().decode([String: PaneLayout].self, from: data)) ?? [:]
-    }
-
-    func stopOrchestrator(repo: String) {
-        background { client in try client.call("session.close", ["repo": repo]) } then: { _ in }
-    }
-
-    /// Runs `work` off the main thread; shows its error, or hands its result to `then`.
+    /// Runs `work` off the main thread, then hands its result to `then`. A failure shows as the
+    /// window's error, or, when `quiet`, only reaches `failed`.
     private func background<T>(
+        quiet: Bool = false,
         _ work: @escaping @Sendable (DaemonClient) throws -> T,
-        then: @escaping @MainActor (T) -> Void
+        then: @escaping @MainActor (T) -> Void,
+        failed: (@MainActor () -> Void)? = nil
     ) {
         let client = client
         Thread.detachNewThread {
@@ -340,12 +708,18 @@ final class AppModel: ObservableObject {
             DispatchQueue.main.async {
                 switch result {
                 case .success(let value):
-                    self.error = nil
+                    if !quiet { self.error = nil }
                     then(value)
                 case .failure(let error):
-                    self.error = "\(error)"
+                    if !quiet { self.error = "\(error)" }
+                    failed?()
                 }
             }
         }
     }
+}
+
+extension Notification.Name {
+    /// Keys for the multiplexer on screen; the terminal showing one types them into it.
+    static let muxKeys = Notification.Name("EchoMuxKeys")
 }

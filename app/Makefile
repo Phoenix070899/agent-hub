@@ -1,5 +1,5 @@
-# Builds Hub.app (unsigned, ad-hoc signed for this Mac) from the SwiftPM package.
-APP := build/Hub.app
+# Builds Echo.app (unsigned, ad-hoc signed for this Mac) from the SwiftPM package.
+APP := build/Echo.app
 
 .PHONY: app test clean run
 
@@ -9,6 +9,7 @@ app:
 	mkdir -p $(APP)/Contents/MacOS $(APP)/Contents/Resources
 	cp .build/release/HubApp $(APP)/Contents/MacOS/HubApp
 	cp bundle/Info.plist $(APP)/Contents/Info.plist
+	cp bundle/AppIcon.icns $(APP)/Contents/Resources/AppIcon.icns
 	codesign --force --sign - $(APP)
 	@echo "Built $(APP)"
 

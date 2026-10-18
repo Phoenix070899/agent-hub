@@ -22,6 +22,12 @@ public struct TerminalTheme: Codable, Equatable, Sendable, Identifiable {
         self.ansi = ansi
     }
 
+    /// Whether its background is dark, so the window around it should be too.
+    public var isDark: Bool {
+        guard let c = Self.rgb(background) else { return true }
+        return 0.2126 * c.red + 0.7152 * c.green + 0.0722 * c.blue < 0.5
+    }
+
     /// Orca's "Ayu Dark", the theme the human's Orca terminal uses.
     public static let ayuDark = TerminalTheme(
         name: "Ayu Dark", background: "#0a0e14", foreground: "#b3b1ad", cursor: "#e6b450", selection: "#273747",

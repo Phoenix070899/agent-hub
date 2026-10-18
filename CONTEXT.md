@@ -1,16 +1,24 @@
 # Agent Hub
 
-A working environment where one human talks only to an Orchestrator, which hands Tasks to specialised Workers and reports back.
+A working environment where one human talks to Orchestrators, which hand Tasks to specialised Workers and report back, or to plain Claude Code sessions, all in one app: Echo.
 
 ## Language
 
 **Orchestrator**:
-The single agent the human talks to; it owns all Tasks, Workers, and summaries.
+An agent that hands Tasks to Workers and reports back; it owns the Tasks, Workers, and summaries it started, and hears only from its own Workers.
 _Avoid_: main agent, coordinator, lead
 
 **Hub Session**:
-One Orchestrator run bound to exactly one repo; working on another repo means starting a separate Hub Session there.
+Everything Echo runs in one repo: its Orchestrators and Normal sessions, and their Workers. Working on another repo means a separate Hub Session there, shown as its own repo tab.
 _Avoid_: run, workspace
+
+**Agent**:
+One long-lived Claude conversation the human starts in a repo, either an Orchestrator or a Normal session. A repo can hold several; each has an optional name, else it is named after its first request.
+_Avoid_: session (alone), tab
+
+**Normal session**:
+A plain Claude Code agent with no Workers; its own permission prompts still land in Needs you.
+_Avoid_: solo mode, chat
 
 **Agent Profile**:
 A reusable definition of a specialist: which agent CLI, model, tools, role, skills, and context it starts with.
@@ -52,6 +60,6 @@ _Avoid_: status panel, monitor
 The long-running process that owns every Worker's terminal, worktree, and messages, so Workers outlive the Orchestrator and the app.
 _Avoid_: server, backend, runtime
 
-**Hub App**:
-The native macOS window onto a Hub Session: its Orchestrator, Workers, and Needs you items; it only views and drives the Hub Daemon.
-_Avoid_: client, GUI, frontend
+**Echo**:
+The native macOS app (formerly Hub App): one tab per repo, a ledger grouped by agent (Needs you, Running, Done), and one terminal; it only views and drives the Hub Daemon. The CLI and daemon keep the name `hub`.
+_Avoid_: Hub App, client, GUI, frontend

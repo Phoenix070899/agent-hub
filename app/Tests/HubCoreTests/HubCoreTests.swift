@@ -41,6 +41,33 @@ let snapshotLine = """
     #expect(formatAge(7200) == "2h")
 }
 
+@Test func tmuxPrefixesBecomeControlBytes() {
+    #expect(tmuxControlByte("C-b\n") == 0x02)
+    #expect(tmuxControlByte("C-a") == 0x01)
+    #expect(tmuxControlByte("C-Space") == 0x00)
+    #expect(tmuxControlByte("M-a") == nil)
+    #expect(tmuxControlByte("None") == nil)
+}
+
+@Test func quickOpenRanksWordStartsFirst() {
+    #expect(quickOpenScore("rer", "Rerank follow-ups")! > quickOpenScore("follow", "Rerank follow-ups")!)
+    #expect(quickOpenScore("follow", "Rerank follow-ups")! > quickOpenScore("ollow", "Rerank follow-ups")!)
+    #expect(quickOpenScore("rfu", "Rerank follow-ups") != nil)
+    #expect(quickOpenScore("zzz", "Rerank follow-ups") == nil)
+    #expect(quickOpenScore("", "anything") == 0)
+}
+
+@Test func droppedPathsAreEscapedLikeTerminal() {
+    #expect(droppedPaths(["/tmp/a.png"]) == "/tmp/a.png ")
+    #expect(droppedPaths(["/Users/me/My Shot (1).png", "/tmp/b"]) == "/Users/me/My\\ Shot\\ \\(1\\).png /tmp/b ")
+    #expect(droppedPaths(["/tmp/it's"]) == "/tmp/it\\'s ")
+}
+
+@Test func oneWorkerIsSingular() {
+    #expect(workers(1, "running") == "1 Worker running")
+    #expect(workers(3, "at work") == "3 Workers at work")
+}
+
 /// The real `hub` binary with the daemon tests' fake agent, in a throwaway state folder.
 struct LiveDaemon {
     let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
@@ -113,43 +140,74 @@ struct LiveDaemon {
     #expect(try hub.client.sessions().isEmpty)
 }
 
-@Test func eachPaneKeepsItsOwnTabs() {
-    var (layout, right) = PaneLayout.single.splitting(0, .horizontal, with: .shell(1))
-    #expect(right == 1)
-    (layout, _) = layout.opening(.shell(2), in: right)
-    #expect(layout.group(0)?.tabs == [.orchestrator])
-    #expect(layout.group(1)?.tabs == [.shell(1), .shell(2)])
-    #expect(layout.group(1)?.activeTab == .shell(2))
-
-    let (again, holder) = layout.opening(.orchestrator, in: 1)
-    #expect(holder == 0, "an open terminal is shown where it is, not opened twice")
-    #expect(again.groups.flatMap(\.tabs).filter { $0 == .orchestrator }.count == 1)
-
-    let (withWorker, at) = layout.opening(.worker("w3"), in: 0)
-    #expect(at == 0)
-    #expect(withWorker.group(0)?.tabs == [.orchestrator, .worker("w3")])
-    #expect(withWorker.group(0)?.activeTab == .worker("w3"))
+/// One Worker row with the fields the ledger reads.
+func row(_ id: String, phase: String, quiet: Int, model: String? = nil, effort: String? = nil, agent: Int? = nil) -> String {
+    let model = model.map { "\"\($0)\"" } ?? "null"
+    let effort = effort.map { "\"\($0)\"" } ?? "null"
+    let agent = agent.map(String.init) ?? "null"
+    return """
+    {"id":"\(id)","profile":"naruto","title":"t","state":"running","phase":"\(phase)","quietSeconds":\(quiet),\
+    "place":"in place","branch":null,"live":true,"blocker":null,"openQuestions":[],"finalReport":null,\
+    "model":\(model),"effort":\(effort),"progress":null,"agent":\(agent)}
+    """
 }
 
-@Test func closingTheLastTabRemovesThePane() {
-    var (layout, _) = PaneLayout.single.splitting(0, .vertical, with: .shell(5))
-    layout = layout.closing(.shell(5))
-    #expect(layout == .single)
-    #expect(PaneLayout.single.closing(.orchestrator) == .single, "the last pane falls back to the Orchestrator")
-    #expect(layout.neighbor(of: 0, forward: true) == 0)
+@Test func decodesModelsAndProgress() throws {
+    let line = """
+    {"repo":"/r","orchestrator":{"live":true,"model":"claude-opus-5-5"},"workers":[{"id":"w14","profile":"naruto",\
+    "title":"Fix rerank","state":"running","phase":"running","quietSeconds":120,"place":"worktree lanh-rerank",\
+    "branch":"lanh-rerank","live":true,"blocker":null,"openQuestions":[],"finalReport":null,\
+    "model":"claude-sonnet-5-5","effort":"high","progress":"41 of 44 tests passing"}],"needs":[]}
+    """
+    let snapshot = try JSONDecoder().decode(Snapshot.self, from: Data(line.utf8))
+    #expect(snapshot.orchestrator.model == "claude-opus-5-5")
+    #expect(snapshot.workers[0].progress == "41 of 44 tests passing")
+    #expect(snapshot.workers[0].modelLine == "claude-sonnet-5-5, high effort")
+    let old = try JSONDecoder().decode(Snapshot.self, from: Data(snapshotLine.utf8))
+    #expect(old.orchestrator.model == nil, "a daemon without models still decodes")
+    #expect(old.workers[0].modelLine == nil)
 }
 
-@Test func tabsOfGoneTerminalsLeave() {
-    var (layout, _) = PaneLayout.single.splitting(0, .horizontal, with: .shell(1))
-    (layout, _) = layout.opening(.worker("w2"), in: 0)
-    let kept = layout.keeping(shells: [], workers: [])
-    #expect(kept == .single)
+@Test func theLedgerSplitsRunningFromSettled() throws {
+    let line = """
+    {"repo":"/r","orchestrator":{"live":true},"workers":[\(row("w1", phase: "running", quiet: 30)),\
+    \(row("w2", phase: "running", quiet: 400)),\(row("w3", phase: "done", quiet: 900)),\
+    \(row("w4", phase: "blocked", quiet: 4000)),\(row("w5", phase: "done", quiet: 60)),\
+    \(row("w6", phase: "running", quiet: 10))],"needs":[{"kind":"question","message":1,"worker":"w6",\
+    "profile":"naruto","title":"t","body":"Which?","prompt":null,"at":1}]}
+    """
+    let snapshot = try JSONDecoder().decode(Snapshot.self, from: Data(line.utf8))
+    #expect(snapshot.running.map(\.id) == ["w2", "w1"], "longest quiet first; w6 waits on the human")
+    #expect(snapshot.settled.map(\.id) == ["w4", "w5", "w3"], "trouble first, then newest")
 }
 
-@Test func layoutsSurviveARoundTrip() throws {
-    let (layout, _) = PaneLayout.single.splitting(0, .vertical, with: .shell(7))
-    let data = try JSONEncoder().encode(layout)
-    #expect(try JSONDecoder().decode(PaneLayout.self, from: data) == layout)
+@Test func theLedgerGroupsByAgent() throws {
+    let line = """
+    {"repo":"/r","orchestrator":{"live":true},"agents":[{"id":1,"kind":"orchestrator","name":"Rerank","model":null,"live":true},\
+    {"id":2,"kind":"orchestrator","name":null,"model":"claude-opus-5-5","live":false},\
+    {"id":3,"kind":"claude","name":null,"model":null,"live":true}],\
+    "workers":[\(row("w1", phase: "running", quiet: 30, agent: 2)),\(row("w2", phase: "done", quiet: 9, agent: 1)),\
+    \(row("w3", phase: "running", quiet: 5, agent: nil)),\(row("w4", phase: "running", quiet: 5, agent: 99))],\
+    "needs":[{"kind":"permission_prompt","message":0,"agent":3,"worker":null,"profile":"claude","title":"Claude Code",\
+    "body":"","prompt":"Bash command\\nmake app\\nDo you want to proceed?","at":5}]}
+    """
+    let snapshot = try JSONDecoder().decode(Snapshot.self, from: Data(line.utf8))
+    let groups = snapshot.groups
+    #expect(groups.map(\.agent.id) == [1, 2, 3])
+    #expect(groups[0].running.map(\.id) == ["w3", "w4"], "Workers of no known agent go to the first Orchestrator")
+    #expect(groups[0].settled.map(\.id) == ["w2"])
+    #expect(groups[1].running.map(\.id) == ["w1"])
+    #expect(groups[2].needs.first?.command == "make app")
+    #expect(groups[2].needs.first?.worker == nil)
+    #expect(groups[1].agent.displayName == "Orchestrator a2")
+    #expect(groups[2].agent.displayName == "Claude Code a3")
+}
+
+@Test func aPermissionPromptNamesItsCommand() throws {
+    let snapshot = try JSONDecoder().decode(Snapshot.self, from: Data(snapshotLine.utf8))
+    #expect(snapshot.needs[0].promptLines == ["Bash command", "rm -rf junk"])
+    #expect(snapshot.needs[0].command == "rm -rf junk")
+    #expect(snapshot.needs[1].command == nil)
 }
 
 @Test func themeColoursRoundTripThroughHex() throws {
@@ -162,4 +220,17 @@ struct LiveDaemon {
         #expect(([theme.background, theme.foreground, theme.cursor, theme.selection] + theme.ansi).allSatisfy { TerminalTheme.rgb($0) != nil })
     }
     #expect(TerminalAppearance.orca.theme == .ayuDark)
+}
+
+@Test func theWindowFollowsTheTerminalBackground() {
+    #expect(TerminalTheme.ayuDark.isDark)
+    var light = TerminalTheme.ayuDark
+    light.background = "#fbfcfd"
+    #expect(!light.isDark)
+}
+
+@Test func terminalTargetsNameThemselvesLikeHubAttach() {
+    #expect(TerminalTarget.agent(id: 3).label == "a3")
+    #expect(TerminalTarget.worker(id: 21).label == "w21")
+    #expect(TerminalTarget.shell(id: 7).params["shell"] as? Int == 7)
 }

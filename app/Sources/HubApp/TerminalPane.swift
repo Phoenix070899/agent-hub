@@ -9,30 +9,51 @@ struct TerminalPane: NSViewRepresentable {
     let target: TerminalTarget
     let client: DaemonClient
     let appearance: TerminalAppearance
-    /// Whether this pane should hold keyboard focus (the app moves focus between panes).
-    var isFocused = false
-    /// Called when the human clicks into this terminal, so the app knows which pane is active.
-    var onFocus: () -> Void = {}
+    /// False while a modal is up: the terminal gives up the keyboard, so typing and Escape reach
+    /// the modal rather than the agent.
+    let keyboard: Bool
+    /// Draw with SwiftTerm's Metal renderer (Settings > Terminal rendering).
+    let gpu: Bool
 
     func makeCoordinator() -> Coordinator { Coordinator(client: client) }
 
     func makeNSView(context: Context) -> TerminalView {
-        let view = TerminalView(frame: NSRect(x: 0, y: 0, width: 800, height: 500))
-        context.coordinator.onFocus = onFocus
-        context.coordinator.watchClicks(on: view)
+        let view = DropTerminalView(frame: NSRect(x: 0, y: 0, width: 800, height: 500))
         view.optionAsMetaKey = true
         context.coordinator.apply(appearance, to: view)
+        try? view.setUseMetal(gpu)
         view.terminalDelegate = context.coordinator
-        context.coordinator.show(target, in: view)
+        context.coordinator.keyboard = keyboard
+        if context.coordinator.show(target, in: view), keyboard { Self.focus(view) }
         return view
     }
 
     func updateNSView(_ view: TerminalView, context: Context) {
-        context.coordinator.onFocus = onFocus
         context.coordinator.apply(appearance, to: view)
-        context.coordinator.show(target, in: view)
-        if isFocused, let window = view.window, window.firstResponder !== view {
-            DispatchQueue.main.async { window.makeFirstResponder(view) }
+        // A no-op unless the setting changed; on failure SwiftTerm keeps Core Graphics.
+        try? view.setUseMetal(gpu)
+        let regained = keyboard && !context.coordinator.keyboard
+        context.coordinator.keyboard = keyboard
+        if !keyboard {
+            Self.unfocus(view)
+            context.coordinator.show(target, in: view)
+            return
+        }
+        // Focus moves to the terminal only when it starts showing something new or a modal
+        // closes, never on a redraw, so a reply being typed in the ledger keeps its focus.
+        if context.coordinator.show(target, in: view) || regained { Self.focus(view) }
+    }
+
+    private static func unfocus(_ view: TerminalView) {
+        guard let window = view.window, window.firstResponder === view else { return }
+        window.makeFirstResponder(nil)
+    }
+
+    /// Gives the terminal the keyboard once it is in a window.
+    private static func focus(_ view: TerminalView) {
+        DispatchQueue.main.async {
+            guard let window = view.window, window.firstResponder !== view else { return }
+            window.makeFirstResponder(view)
         }
     }
 
@@ -49,9 +70,9 @@ struct TerminalPane: NSViewRepresentable {
         /// The grid size SwiftTerm last reported; 0 until the first layout.
         private var size = (rows: 0, cols: 0)
 
-        var onFocus: () -> Void = {}
-        private var clickMonitor: Any?
         private var applied: TerminalAppearance?
+        /// Whether the pane last had leave to hold the keyboard.
+        var keyboard = true
 
         /// Sets the font and colours, only when they changed: re-installing colours redraws everything.
         func apply(_ appearance: TerminalAppearance, to view: TerminalView) {
@@ -78,26 +99,23 @@ struct TerminalPane: NSViewRepresentable {
             return SwiftTerm.Color(red: UInt16(c.red * 65535), green: UInt16(c.green * 65535), blue: UInt16(c.blue * 65535))
         }
 
-        init(client: DaemonClient) { self.client = client }
-
-        deinit {
-            if let clickMonitor { NSEvent.removeMonitor(clickMonitor) }
+        init(client: DaemonClient) {
+            self.client = client
+            super.init()
+            NotificationCenter.default.addObserver(self, selector: #selector(typeMuxKeys(_:)), name: .muxKeys, object: nil)
         }
 
-        /// SwiftTerm does not report focus, so a click inside the view marks this pane active.
-        func watchClicks(on view: TerminalView) {
-            clickMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { [weak self, weak view] event in
-                if let view, event.window === view.window,
-                   view.bounds.contains(view.convert(event.locationInWindow, from: nil)) {
-                    self?.onFocus()
-                }
-                return event
-            }
+        /// Types ⌘D's keys into this terminal when it shows a multiplexer in the key window.
+        @objc private func typeMuxKeys(_ note: Notification) {
+            guard case .shell = target, let keys = note.object as? Data, let socket,
+                  view?.window?.isKeyWindow == true else { return }
+            DispatchQueue.global(qos: .userInteractive).async { try? socket.write(keys) }
         }
 
-        /// Attaches to `target`, unless already showing it.
-        func show(_ target: TerminalTarget, in view: TerminalView) {
-            guard target != self.target else { return }
+        /// Attaches to `target`, unless already showing it. Returns whether it attached.
+        @discardableResult
+        func show(_ target: TerminalTarget, in view: TerminalView) -> Bool {
+            guard target != self.target else { return false }
             detach()
             self.target = target
             self.view = view
@@ -138,6 +156,7 @@ struct TerminalPane: NSViewRepresentable {
                     }
                 }
             }
+            return true
         }
 
         func detach() {
@@ -187,5 +206,44 @@ struct TerminalPane: NSViewRepresentable {
         }
         func iTermContent(source: TerminalView, content: ArraySlice<UInt8>) {}
         func rangeChanged(source: TerminalView, startY: Int, endY: Int) {}
+    }
+}
+
+/// SwiftTerm's view, taking dropped files and images: their paths are typed at the cursor, as
+/// Terminal.app does, so Claude Code attaches an image or reads a file.
+final class DropTerminalView: TerminalView {
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        registerForDraggedTypes([.fileURL, .png, .tiff])
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        registerForDraggedTypes([.fileURL, .png, .tiff])
+    }
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation { .copy }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        let paths = Self.paths(from: sender.draggingPasteboard)
+        guard !paths.isEmpty else { return false }
+        window?.makeFirstResponder(self)
+        send(txt: droppedPaths(paths))
+        return true
+    }
+
+    /// Files as their paths; an image with no file behind it (from a browser, say) saved first.
+    private static func paths(from board: NSPasteboard) -> [String] {
+        let options: [NSPasteboard.ReadingOptionKey: Any] = [.urlReadingFileURLsOnly: true]
+        if let urls = board.readObjects(forClasses: [NSURL.self], options: options) as? [URL], !urls.isEmpty {
+            return urls.map(\.path)
+        }
+        guard let image = NSImage(pasteboard: board), let tiff = image.tiffRepresentation,
+              let png = NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:]) else { return [] }
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("EchoDrops", isDirectory: true)
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let file = folder.appendingPathComponent("dropped-\(UUID().uuidString.prefix(8)).png")
+        guard (try? png.write(to: file)) != nil else { return [] }
+        return [file.path]
     }
 }

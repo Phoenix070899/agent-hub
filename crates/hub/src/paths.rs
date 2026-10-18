@@ -11,9 +11,14 @@ pub fn hub_dir() -> PathBuf {
     built.canonicalize().unwrap_or(built)
 }
 
-/// The Hub Daemon's own files. `HUB_STATE` overrides `~/.agent-hub`.
+/// The Hub Daemon's own files. `HUB_STATE` overrides `~/.agent-hub`; set but empty counts as
+/// unset, as the app reads it, rather than as the current directory.
 pub fn state_dir() -> PathBuf {
-    match std::env::var_os("HUB_STATE") {
+    state_dir_from(std::env::var_os("HUB_STATE"))
+}
+
+fn state_dir_from(hub_state: Option<std::ffi::OsString>) -> PathBuf {
+    match hub_state.filter(|dir| !dir.is_empty()) {
         Some(dir) => PathBuf::from(dir),
         None => home().join(".agent-hub"),
     }
@@ -46,4 +51,17 @@ pub fn transcript_exists(session_id: &str) -> bool {
     };
     let file = format!("{session_id}.jsonl");
     projects.flatten().any(|project| project.path().join(&file).exists())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_empty_hub_state_means_the_default() {
+        let default = home().join(".agent-hub");
+        assert_eq!(state_dir_from(None), default);
+        assert_eq!(state_dir_from(Some("".into())), default);
+        assert_eq!(state_dir_from(Some("/tmp/hub".into())), PathBuf::from("/tmp/hub"));
+    }
 }

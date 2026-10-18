@@ -18,6 +18,8 @@ echo "· Working… (1s · fake agent)"
 case "$1" in
   ask*) answer=$(hub ask "Which color?") && hub done --state done "answer was $answer" ;;
   done*) hub done --state done "finished" ;;
+  status*) hub send --type status "41 of 44 tests passing
+details the ledger leaves out" ;;
   exit*) sleep 2; echo "fake agent giving up"; sleep 1; exit 1 ;;
   echo*) while IFS= read -r line; do echo "got: $line"; done ;;
   prompt*)

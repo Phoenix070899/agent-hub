@@ -73,12 +73,69 @@ public struct DaemonClient: Sendable {
         try call("terminal.resize", params)
     }
 
-    public func openSession(repo: String) throws {
-        try call("session.open", ["repo": repo])
+    /// Starts a new agent in a repo: an Orchestrator or a Normal session, with an optional name and
+    /// model. Returns the repo's key as the daemon names it, and the new agent's id.
+    public func openAgent(repo: String, kind: Agent.Kind, name: String? = nil, model: String? = nil) throws
+        -> (repo: String, agent: Int)
+    {
+        var params: [String: Any] = ["repo": repo, "kind": kind.rawValue]
+        if let name, !name.isEmpty { params["name"] = name }
+        if let model, !model.isEmpty { params["model"] = model }
+        let result = try call("agent.open", params) as? [String: Any]
+        guard let agent = result?["agent"] as? Int else { throw HubError.badResponse }
+        return (result?["repo"] as? String ?? repo, agent)
+    }
+
+    /// Starts a stopped agent again, resuming its conversation.
+    public func startAgent(_ id: Int) throws {
+        try call("agent.open", ["agent": id])
+    }
+
+    /// Stops an agent's terminal; it stays in the ledger, ready to start again.
+    public func stopAgent(_ id: Int) throws {
+        try call("agent.close", ["agent": id])
+    }
+
+    /// Stops an agent and takes it out of the ledger.
+    public func forgetAgent(_ id: Int) throws {
+        try call("agent.forget", ["agent": id])
+    }
+
+    public func renameAgent(_ id: Int, to name: String) throws {
+        try call("agent.rename", ["agent": id, "name": name])
+    }
+
+    /// The human's multiplexer around an agent's or a Worker's terminal: `command` runs with
+    /// `{session}`, `{dir}` and `{command}` filled in. Returns the shell to attach to; asking again
+    /// returns the same one while it lives.
+    /// The shell running the multiplexer around `target`, and the multiplexer session it opened.
+    public func openMux(_ target: TerminalTarget, command: String) throws -> (shell: Int, session: String?) {
+        var params = target.params
+        params["command"] = command
+        let result = try call("mux.open", params) as? [String: Any]
+        guard let shell = result?["shell"] as? Int else { throw HubError.badResponse }
+        return (shell, result?["session"] as? String)
+    }
+
+    /// Stops a Worker and closes its terminal.
+    public func closeWorker(_ id: Int) throws {
+        try call("worker.close", ["id": id])
+    }
+
+    /// Takes a settled Worker off Echo's Done list; the Orchestrator's view is unchanged.
+    public func dismissWorker(_ id: Int) throws {
+        try call("worker.dismiss", ["id": id])
     }
 
     public func decide(worker: Int, approve: Bool, note: String? = nil) throws {
         var params: [String: Any] = ["worker": worker, "approve": approve]
+        if let note, !note.isEmpty { params["note"] = note }
+        try call("decide", params)
+    }
+
+    /// Approve or Deny on a Normal session's own permission prompt.
+    public func decide(agent: Int, approve: Bool, note: String? = nil) throws {
+        var params: [String: Any] = ["agent": agent, "approve": approve]
         if let note, !note.isEmpty { params["note"] = note }
         try call("decide", params)
     }
