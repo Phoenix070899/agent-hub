@@ -754,6 +754,73 @@ fn a_reopened_multiplexer_shell_still_names_its_session() {
 }
 
 #[test]
+fn an_orchestrator_in_its_own_worktree_keeps_its_workers_there() {
+    let hub = Hub::new("place");
+    hub.ok(&["status"]);
+    let commit = ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam"];
+    git(&hub.repo, &["branch", "fix/old"]);
+    let open = |params: serde_json::Value| {
+        let opened = hub.call("agent.open", params);
+        assert_eq!(opened["ok"], true, "{opened}");
+        opened["result"]["agent"].as_i64().unwrap()
+    };
+    let login = open(
+        serde_json::json!({ "repo": hub.repo_key(), "kind": "orchestrator", "new_branch": "feat/login", "base": "main" }),
+    );
+    let old =
+        open(serde_json::json!({ "repo": hub.repo_key(), "kind": "claude", "name": "sleeper", "branch": "fix/old" }));
+    let here =
+        open(serde_json::json!({ "repo": hub.repo_key(), "kind": "claude", "name": "sleeper", "branch": "main" }));
+    let agents = hub.call("sessions.list", serde_json::json!({}))["result"]["sessions"][0]["agents"].clone();
+    let agent = |id: i64| {
+        agents
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["id"] == id)
+            .unwrap()
+            .clone()
+    };
+    let home = PathBuf::from(agent(login)["cwd"].as_str().unwrap());
+    assert!(home.ends_with("feat-login"), "{}", home.display());
+    assert_eq!(agent(login)["branch"], "feat/login");
+    assert!(agent(old)["cwd"].as_str().unwrap().ends_with("fix-old"));
+    assert_eq!(
+        agent(here)["cwd"],
+        serde_json::Value::Null,
+        "main is the repo's own checkout"
+    );
+
+    // The Orchestrator commits on its branch; its Workers start from there, not from main.
+    std::fs::write(home.join("README.md"), "# login\n").unwrap();
+    git(&home, &[&commit[..], &["login work"]].concat());
+    let start = |worktree: &str| {
+        let started = hub.call(
+            "worker.start",
+            serde_json::json!({ "repo": hub.repo_key(), "profile": "bash", "spec": "sleep", "agent": login, "worktree": worktree }),
+        );
+        PathBuf::from(started["result"]["cwd"].as_str().unwrap_or_else(|| panic!("{started}")))
+    };
+    assert_eq!(start("current"), home, "in place means the Orchestrator's worktree");
+    let branched = start("new:feat/form");
+    assert_eq!(
+        std::fs::read_to_string(branched.join("README.md")).unwrap(),
+        "# login\n"
+    );
+
+    let branches = hub.call("branches.list", serde_json::json!({ "repo": hub.repo_key() }))["result"].clone();
+    assert_eq!(branches["current"], "main");
+    let row = branches["branches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|b| b["name"] == "feat/login")
+        .unwrap()
+        .clone();
+    assert_eq!(row["agent"], login, "{branches}");
+}
+
+#[test]
 fn simultaneous_starts_leave_one_daemon() {
     let hub = Hub::new("race");
     let starts: Vec<_> = (0..10)

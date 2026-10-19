@@ -334,11 +334,22 @@ impl Hub {
         let id = match p.get("agent").and_then(Value::as_i64) {
             Some(id) => id,
             None => {
-                let repo = repo::root(Path::new(str_param(p, "repo")?))?.display().to_string();
+                let root = repo::root(Path::new(str_param(p, "repo")?))?;
+                let repo = root.display().to_string();
                 let kind = p
                     .get("kind")
                     .and_then(Value::as_str)
                     .unwrap_or(db::agent_kind::ORCHESTRATOR);
+                // Where it works: a branch the human picked, a new branch in a new worktree, or
+                // (neither) the repo's own checkout. Made first, so a bad branch starts nothing.
+                let place = if let Some(branch) = picked("branch") {
+                    Some((repo::checkout(&root, &branch)?, branch))
+                } else if let Some(branch) = picked("new_branch") {
+                    let base = picked("base").unwrap_or_else(|| "HEAD".into());
+                    Some((repo::new_branch_worktree(&root, &branch, &base)?, branch))
+                } else {
+                    None
+                };
                 let id = db::insert_agent(
                     &self.db(),
                     &repo,
@@ -346,6 +357,11 @@ impl Hub {
                     picked("name").as_deref(),
                     picked("model").as_deref(),
                 )?;
+                if let Some((cwd, branch)) = &place {
+                    // The repo's own checkout is no worktree of its own.
+                    let cwd = (cwd != &root).then(|| cwd.display().to_string());
+                    db::set_agent_place(&self.db(), id, cwd.as_deref(), Some(branch))?;
+                }
                 self.notify();
                 id
             }
@@ -376,6 +392,7 @@ impl Hub {
             }
         }
         let repo = PathBuf::from(&agent.repo);
+        let home = PathBuf::from(agent.home());
         let resume = paths::transcript_exists(&agent.session_id);
         // What the human asked for up front, like an issue to work on; a resumed session has its own.
         let request = picked("request").filter(|_| !resume);
@@ -394,6 +411,7 @@ impl Hub {
                 launch::orchestrator_args(
                     &self.hub_dir,
                     &repo,
+                    agent.cwd.as_deref().zip(agent.branch.as_deref()),
                     &agent.session_id,
                     resume,
                     request.as_deref(),
@@ -408,7 +426,7 @@ impl Hub {
         let spawn = Spawn {
             program,
             args,
-            cwd: repo,
+            cwd: home,
             env: self.agent_env(None, Some(agent.id))?,
             env_remove: inherited_agent_vars(),
         };
@@ -467,6 +485,8 @@ impl Hub {
             "name": agent.name,
             "model": agent.model,
             "live": self.agent_is_live(agent.id),
+            "branch": agent.branch,
+            "cwd": agent.cwd,
         })
     }
 
@@ -529,7 +549,7 @@ impl Hub {
         let template = str_param(p, "command")?;
         let (label, repo, dir) = if let Some(id) = p.get("agent").and_then(Value::as_i64) {
             let agent = db::agent(&self.db(), id)?;
-            (format!("a{id}"), agent.repo.clone(), agent.repo)
+            (format!("a{id}"), agent.repo.clone(), agent.home().to_string())
         } else {
             let id = id_param(p, "id")?;
             let worker = db::worker(&self.db(), id)?;
@@ -696,11 +716,28 @@ impl Hub {
                 if !cwd.exists() {
                     bail!("w{}'s folder {} is gone", worker.id, worker.cwd);
                 }
-                let (diff, cut) = repo::diff(Path::new(&worker.repo), cwd, worker.branch.is_some())?;
+                let home = self.home_of(worker.agent_id, &worker.repo);
+                let (diff, cut) = repo::diff(&home, cwd, worker.branch.is_some())?;
                 Ok(json!({ "diff": diff, "truncated": cut, "branch": worker.branch, "cwd": worker.cwd }))
             }
             "worker.review" => self.review_worker(p),
             "worker.fanout" => self.fan_out(p),
+            "branches.list" => {
+                let root = repo::root(Path::new(str_param(p, "repo")?))?;
+                let (current, branches) = repo::branches(&root)?;
+                let agents = db::agents(&self.db(), Some(&root.display().to_string()))?;
+                let rows: Vec<Value> = branches
+                    .iter()
+                    .map(|b| {
+                        let agent = agents
+                            .iter()
+                            .find(|a| a.branch.as_deref() == Some(b.name.as_str()))
+                            .map(|a| a.id);
+                        json!({ "name": b.name, "checkout": b.checkout, "agent": agent })
+                    })
+                    .collect();
+                Ok(json!({ "current": current, "branches": rows }))
+            }
             "profiles.list" => {
                 let profiles: Vec<Value> = profile::all(&self.hub_dir)?
                     .iter()
@@ -889,11 +926,21 @@ impl Hub {
             Some(title) if !title.trim().is_empty() => title.to_string(),
             _ => title_from_spec(spec),
         };
+        // The Orchestrator starting it (`HUB_AGENT` via `hub worker start`), else the repo's first.
+        let agent = match p.get("agent").and_then(Value::as_i64) {
+            Some(agent) => Some(agent),
+            None => db::first_orchestrator(&self.db(), &repo_root.display().to_string())?.map(|a| a.id),
+        };
+        // In place means where its Orchestrator works, which may be that agent's own worktree.
+        let home = self.home_of(agent, &repo_root.display().to_string());
         let choice = p.get("worktree").and_then(Value::as_str).unwrap_or("current");
         let (cwd, branch) = if choice == "current" {
-            (repo_root.clone(), None)
+            (home.clone(), None)
         } else if let Some(branch) = choice.strip_prefix("new:") {
-            (repo::create_worktree(&repo_root, branch)?, Some(branch.to_string()))
+            (
+                repo::create_worktree(&repo_root, branch, &home)?,
+                Some(branch.to_string()),
+            )
         } else if let Some(path) = choice.strip_prefix("path:") {
             let path = PathBuf::from(path);
             if repo::root(&path)? != repo_root {
@@ -902,12 +949,6 @@ impl Hub {
             (path, None)
         } else {
             bail!("--worktree must be current, new:<type>/<task>, or path:<abs path>");
-        };
-
-        // The Orchestrator starting it (`HUB_AGENT` via `hub worker start`), else the repo's first.
-        let agent = match p.get("agent").and_then(Value::as_i64) {
-            Some(agent) => Some(agent),
-            None => db::first_orchestrator(&self.db(), &repo_root.display().to_string())?.map(|a| a.id),
         };
         let session_id = uuid::Uuid::new_v4().to_string();
         let id = db::insert_worker(
@@ -1050,7 +1091,8 @@ impl Hub {
         }
         let repo = PathBuf::from(&winner.repo);
         repo::commit_all(Path::new(&winner.cwd), &format!("{} (w{id})", winner.title))?;
-        let into = repo::merge(&repo, &branch)?;
+        // Into the branch its Orchestrator works on.
+        let into = repo::merge(&self.home_of(winner.agent_id, &winner.repo), &branch)?;
         let others: Vec<db::Worker> = db::workers(&self.db(), &winner.repo)?
             .into_iter()
             .filter(|w| w.id != id && w.fanout.as_deref() == Some(fanout.as_str()))
@@ -1074,6 +1116,14 @@ impl Hub {
         db::insert_message(&self.db(), &winner, kind::HUMAN, &note)?;
         self.notify();
         Ok(json!({ "branch": branch, "into": into, "closed": closed }))
+    }
+
+    /// Where an agent works (`db::Agent::home`), or the repo's checkout without one.
+    fn home_of(&self, agent: Option<i64>, repo: &str) -> PathBuf {
+        agent
+            .and_then(|id| db::agent(&self.db(), id).ok())
+            .map(|a| PathBuf::from(a.home()))
+            .unwrap_or_else(|| PathBuf::from(repo))
     }
 
     fn close_worker(&self, id: i64) -> Result<Value> {

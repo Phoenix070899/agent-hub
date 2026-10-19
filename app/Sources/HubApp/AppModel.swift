@@ -453,6 +453,34 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Starts a new agent on a branch (`branch`, or `newBranch` from `base`); `done` gets nil once
+    /// it runs and is selected, else why it could not start, for the dialog to show.
+    func open(repo path: String, kind: Agent.Kind, name: String, model: String, request: String?,
+              branch: String?, newBranch: String?, base: String?, then done: @escaping @MainActor (String?) -> Void) {
+        let client = client
+        Thread.detachNewThread {
+            let result = Result {
+                try Self.ensureDaemon(client)
+                return try client.openAgent(repo: path, kind: kind, name: name, model: model, request: request,
+                                            branch: branch, newBranch: newBranch, base: base)
+            }
+            DispatchQueue.main.async {
+                switch result {
+                case .success(let opened):
+                    self.select(.agent(repo: opened.repo, id: opened.agent))
+                    self.refreshSessions()
+                    done(nil)
+                case .failure(let error):
+                    done("\(error)")
+                }
+            }
+        }
+    }
+
+    func loadBranches(_ repo: String, then done: @escaping @MainActor ((current: String, branches: [RepoBranch])) -> Void) {
+        background(quiet: true) { client in try client.branches(repo: repo) } then: { done($0) }
+    }
+
     func select(_ selection: Selection) {
         self.selection = selection
         lastSelection[selection.repo] = selection

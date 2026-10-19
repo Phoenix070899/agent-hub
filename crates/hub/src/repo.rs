@@ -37,24 +37,35 @@ pub fn parse_branch(branch: &str) -> Result<(&str, &str)> {
     Ok((kind, task))
 }
 
-/// A new worktree on branch `<type>/<task>` from the repo's current HEAD, outside the repo.
-pub fn create_worktree(repo: &Path, branch: &str) -> Result<PathBuf> {
-    let (kind, task) = parse_branch(branch)?;
+/// A Worker's new worktree on branch `<type>/<task>`, from the HEAD of `from` (the checkout its
+/// Orchestrator works in), outside the repo.
+pub fn create_worktree(repo: &Path, branch: &str, from: &Path) -> Result<PathBuf> {
+    parse_branch(branch)?;
+    add_worktree(repo, branch, from, "HEAD")
+}
+
+/// Where a branch's worktree goes: `<worktrees>/<repo>/<branch, "/" as "-">`.
+fn worktree_path(repo: &Path, branch: &str) -> PathBuf {
     let name = repo
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "repo".into());
-    let path = crate::paths::worktrees().join(name).join(format!("{kind}-{task}"));
+    crate::paths::worktrees().join(name).join(branch.replace('/', "-"))
+}
+
+/// A new worktree on new branch `branch`, starting at `start` as `dir` resolves it.
+fn add_worktree(repo: &Path, branch: &str, dir: &Path, start: &str) -> Result<PathBuf> {
+    let path = worktree_path(repo, branch);
     if path.exists() {
         bail!("worktree {} already exists", path.display());
     }
     std::fs::create_dir_all(path.parent().unwrap())?;
     let output = Command::new("git")
         .arg("-C")
-        .arg(repo)
+        .arg(dir)
         .args(["worktree", "add", "-b", branch])
         .arg(&path)
-        .arg("HEAD")
+        .arg(start)
         .output()
         .context("running git worktree add")?;
     if !output.status.success() {
@@ -63,6 +74,74 @@ pub fn create_worktree(repo: &Path, branch: &str) -> Result<PathBuf> {
             String::from_utf8_lossy(&output.stderr).trim()
         );
     }
+    Ok(path)
+}
+
+/// An agent's new worktree on new branch `branch`, starting from branch or commit `base`.
+pub fn new_branch_worktree(repo: &Path, branch: &str, base: &str) -> Result<PathBuf> {
+    git(repo, &["check-ref-format", "--branch", branch])
+        .with_context(|| format!("{branch:?} is not a branch name git takes"))?;
+    add_worktree(repo, branch, repo, base)
+}
+
+/// A local branch and the checkout that has it, if one does.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Branch {
+    pub name: String,
+    pub checkout: Option<PathBuf>,
+}
+
+/// The repo's checked-out branch (empty when detached) and its local branches, newest commit first.
+pub fn branches(repo: &Path) -> Result<(String, Vec<Branch>)> {
+    let current = git(repo, &["branch", "--show-current"])?.trim().to_string();
+    let mut checkouts = std::collections::HashMap::new();
+    let mut path = None;
+    for line in git(repo, &["worktree", "list", "--porcelain"])?.lines() {
+        if let Some(p) = line.strip_prefix("worktree ") {
+            path = Some(PathBuf::from(p));
+        } else if let Some(b) = line.strip_prefix("branch refs/heads/") {
+            if let Some(p) = path.clone() {
+                checkouts.insert(b.to_string(), p);
+            }
+        }
+    }
+    let names = git(
+        repo,
+        &[
+            "for-each-ref",
+            "--sort=-committerdate",
+            "--format=%(refname:short)",
+            "refs/heads",
+        ],
+    )?;
+    let branches = names
+        .lines()
+        .filter(|n| !n.is_empty())
+        .map(|name| Branch {
+            name: name.to_string(),
+            checkout: checkouts.get(name).cloned(),
+        })
+        .collect();
+    Ok((current, branches))
+}
+
+/// A checkout of existing branch `branch` to work in: the one that already has it (the repo's
+/// own included), else a new worktree.
+pub fn checkout(repo: &Path, branch: &str) -> Result<PathBuf> {
+    let (_, branches) = branches(repo)?;
+    let found = branches
+        .iter()
+        .find(|b| b.name == branch)
+        .with_context(|| format!("{repo} has no branch {branch}", repo = repo.display()))?;
+    if let Some(path) = &found.checkout {
+        return Ok(path.clone());
+    }
+    let path = worktree_path(repo, branch);
+    if path.exists() {
+        bail!("worktree {} already exists", path.display());
+    }
+    std::fs::create_dir_all(path.parent().unwrap())?;
+    git(repo, &["worktree", "add", &path.display().to_string(), branch])?;
     Ok(path)
 }
 

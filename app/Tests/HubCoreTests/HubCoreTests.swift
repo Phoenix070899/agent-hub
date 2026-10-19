@@ -134,6 +134,15 @@ Binary files a/logo.png and /dev/null differ
     #expect(fanoutBranch(String(repeating: "word ", count: 20)).count <= 45)
 }
 
+@Test func theSmartFieldTellsIssuesBranchesAndNamesApart() {
+    let branches = ["main", "fix/old"]
+    #expect(smartCreateFrom("  ", branches: branches) == nil)
+    #expect(smartCreateFrom("#12", branches: branches) == .issue("#12"))
+    #expect(smartCreateFrom("https://github.com/o/r/issues/7", branches: branches) == .issue("https://github.com/o/r/issues/7"))
+    #expect(smartCreateFrom("fix/old", branches: branches) == .branch("fix/old"))
+    #expect(smartCreateFrom("Magic link login", branches: branches) == .name("Magic link login"))
+}
+
 @Test func oneWorkerIsSingular() {
     #expect(workers(1, "running") == "1 Worker running")
     #expect(workers(3, "at work") == "3 Workers at work")

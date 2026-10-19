@@ -17,6 +17,7 @@ const RESUMED: &str = "Your terminal was restarted. Run `hub worker list`, give 
 pub fn orchestrator_args(
     hub: &Path,
     repo: &Path,
+    worktree: Option<(&str, &str)>,
     session_id: &str,
     resume: bool,
     request: Option<&str>,
@@ -25,10 +26,16 @@ pub fn orchestrator_args(
     let orchestrator =
         std::fs::read_to_string(hub.join("orchestrator.md"))?.replace("$AGENT_HUB", &hub.display().to_string());
     let preferences = std::fs::read_to_string(hub.join("memory").join("preferences.md")).unwrap_or_default();
-    let prompt = format!(
+    let mut prompt = format!(
         "{orchestrator}\n\n# Preferences\n\n{preferences}\n\nRepo for this Hub Session: {}",
         repo.display()
     );
+    if let Some((cwd, branch)) = worktree {
+        prompt += &format!(
+            "\nYou work in your own worktree {cwd} on branch {branch}, apart from other Orchestrators in this repo. \
+             Workers you start in place work there too, and new Worker worktrees branch from it."
+        );
+    }
     let name = repo
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())

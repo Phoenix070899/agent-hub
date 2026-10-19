@@ -148,6 +148,9 @@ pub fn open(path: &Path) -> Result<Connection> {
     if !has_column(&conn, "workers", "dismissed_at")? {
         conn.execute_batch("alter table workers add column dismissed_at integer")?;
     }
+    if !has_column(&conn, "agents", "cwd")? {
+        conn.execute_batch("alter table agents add column cwd text; alter table agents add column branch text")?;
+    }
     if !has_column(&conn, "workers", "fanout")? {
         conn.execute_batch("alter table workers add column fanout text")?;
     }
@@ -408,9 +411,21 @@ pub struct Agent {
     pub model: Option<String>,
     pub session_id: String,
     pub created_at: i64,
+    /// Its own worktree, when it works on a branch apart from the repo's checkout.
+    pub cwd: Option<String>,
+    /// The branch it works on, when the human picked one.
+    pub branch: Option<String>,
 }
 
-const AGENT_COLUMNS: &str = "id, repo, kind, name, model, session_id, created_at";
+impl Agent {
+    /// Where it works: its worktree, else the repo's main checkout. Its in-place Workers work
+    /// here too, and new Worker worktrees branch from here.
+    pub fn home(&self) -> &str {
+        self.cwd.as_deref().unwrap_or(&self.repo)
+    }
+}
+
+const AGENT_COLUMNS: &str = "id, repo, kind, name, model, session_id, created_at, cwd, branch";
 
 fn agent_row(row: &Row) -> rusqlite::Result<Agent> {
     Ok(Agent {
@@ -421,7 +436,17 @@ fn agent_row(row: &Row) -> rusqlite::Result<Agent> {
         model: row.get(4)?,
         session_id: row.get(5)?,
         created_at: row.get(6)?,
+        cwd: row.get(7)?,
+        branch: row.get(8)?,
     })
+}
+
+pub fn set_agent_place(conn: &Connection, id: i64, cwd: Option<&str>, branch: Option<&str>) -> Result<()> {
+    conn.execute(
+        "update agents set cwd = ?2, branch = ?3 where id = ?1",
+        params![id, cwd, branch],
+    )?;
+    Ok(())
 }
 
 pub fn insert_agent(conn: &Connection, repo: &str, kind: &str, name: Option<&str>, model: Option<&str>) -> Result<i64> {

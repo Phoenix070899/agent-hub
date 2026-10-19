@@ -18,13 +18,20 @@ public struct Agent: Decodable, Equatable, Identifiable, Sendable {
     public let name: String?
     public let model: String?
     public let live: Bool
+    /// The branch it works on, when the human picked or made one for it.
+    public let branch: String?
+    /// Its own worktree; nil when it works in the repo's checkout.
+    public let cwd: String?
 
-    public init(id: Int, kind: Kind, name: String? = nil, model: String? = nil, live: Bool = false) {
+    public init(id: Int, kind: Kind, name: String? = nil, model: String? = nil, live: Bool = false,
+                branch: String? = nil, cwd: String? = nil) {
         self.id = id
         self.kind = kind
         self.name = name
         self.model = model
         self.live = live
+        self.branch = branch
+        self.cwd = cwd
     }
 
     public var isOrchestrator: Bool { kind == .orchestrator }
@@ -421,4 +428,35 @@ public func fanoutBranch(_ title: String) -> String {
         task += (task.isEmpty ? "" : "-") + word
     }
     return "feat/" + (task.isEmpty ? "task" : task)
+}
+
+/// A local branch of a repo, from `branches.list`.
+public struct RepoBranch: Decodable, Equatable, Identifiable, Sendable {
+    public let name: String
+    /// The checkout that has it: the repo's own, or a worktree.
+    public let checkout: String?
+    /// The agent working on it, if one is.
+    public let agent: Int?
+
+    public var id: String { name }
+}
+
+/// Where a new agent works, from the Create from field.
+public enum CreateFrom: Equatable, Sendable {
+    /// A GitHub issue (number or link): read it, then work on a new branch named after it.
+    case issue(String)
+    /// An existing branch, in the checkout that has it or a new worktree.
+    case branch(String)
+    /// A new branch named after this, in a new worktree.
+    case name(String)
+}
+
+/// Reads the Smart field: an issue number or link, else a branch the repo has, else a name for
+/// a new branch. Empty means the repo's own checkout.
+public func smartCreateFrom(_ typed: String, branches: [String]) -> CreateFrom? {
+    let text = typed.trimmingCharacters(in: .whitespaces)
+    if text.isEmpty { return nil }
+    if issueReference(text) != nil { return .issue(text) }
+    if branches.contains(text) { return .branch(text) }
+    return .name(text)
 }

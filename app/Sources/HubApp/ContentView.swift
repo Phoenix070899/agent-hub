@@ -526,9 +526,10 @@ struct AgentHeader: View {
 
     /// "Orchestrator, opus"; the default model goes unsaid, so the row does not truncate it.
     private var meta: String {
-        let model = agent.model.map(Self.short)
-        guard agent.isOrchestrator else { return model ?? "" }
-        return model.map { "Orchestrator, \($0)" } ?? "Orchestrator"
+        // "Orchestrator, feat/login, opus": what it is, the branch it works on, its model.
+        [agent.isOrchestrator ? "Orchestrator" : nil, agent.branch, agent.model.map(Self.short)]
+            .compactMap { $0 }
+            .joined(separator: ", ")
     }
 
     private var agent: Agent { group.agent }
@@ -639,7 +640,8 @@ struct AgentPanel: View {
     private var meta: String {
         let name = URL(fileURLWithPath: repo).lastPathComponent
         let model = agent.model ?? "default model"
-        return agent.isOrchestrator ? "Orchestrator in \(name), \(model)" : "Claude Code in \(name), \(model)"
+        let place = agent.branch.map { "\(name) on \($0)" } ?? name
+        return agent.isOrchestrator ? "Orchestrator in \(place), \(model)" : "Claude Code in \(place), \(model)"
     }
 }
 

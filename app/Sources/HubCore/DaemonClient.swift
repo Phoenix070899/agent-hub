@@ -75,10 +75,16 @@ public struct DaemonClient: Sendable {
 
     /// Starts a new agent in a repo: an Orchestrator or a Normal session, with an optional name and
     /// model. Returns the repo's key as the daemon names it, and the new agent's id.
+    /// Starts a new agent. `branch` puts it on an existing branch; `newBranch` on a new branch
+    /// from `base`, in its own worktree; neither, in the repo's checkout.
     public func openAgent(repo: String, kind: Agent.Kind, name: String? = nil, model: String? = nil,
-                          request: String? = nil) throws -> (repo: String, agent: Int)
+                          request: String? = nil, branch: String? = nil, newBranch: String? = nil,
+                          base: String? = nil) throws -> (repo: String, agent: Int)
     {
         var params: [String: Any] = ["repo": repo, "kind": kind.rawValue]
+        if let branch { params["branch"] = branch }
+        if let newBranch { params["new_branch"] = newBranch }
+        if let base, !base.isEmpty { params["base"] = base }
         if let name, !name.isEmpty { params["name"] = name }
         if let model, !model.isEmpty { params["model"] = model }
         if let request, !request.isEmpty { params["request"] = request }
@@ -133,6 +139,13 @@ public struct DaemonClient: Sendable {
         let result = try call("worker.diff", ["id": id]) as? [String: Any]
         guard let diff = result?["diff"] as? String else { throw HubError.badResponse }
         return (diff, result?["truncated"] as? Bool ?? false)
+    }
+
+    /// The repo's checked-out branch and its local branches, newest first.
+    public func branches(repo: String) throws -> (current: String, branches: [RepoBranch]) {
+        let result = try call("branches.list", ["repo": repo]) as? [String: Any]
+        let data = try JSONSerialization.data(withJSONObject: result?["branches"] ?? [])
+        return (result?["current"] as? String ?? "", try JSONDecoder().decode([RepoBranch].self, from: data))
     }
 
     public func profiles() throws -> [WorkerProfile] {

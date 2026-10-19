@@ -75,50 +75,22 @@ struct NewSessionModal: View {
                     .padding(.horizontal, 24)
                     .padding(.top, 10)
 
+                if form.picked != nil {
+                    CreateFromSection(form: form, submit: start)
+                        .padding(.horizontal, 24)
+                        .padding(.top, 18)
+                }
+
+                // Name and model share a row, keeping the dialog short enough for small windows.
                 HStack(alignment: .firstTextBaseline, spacing: 10) {
                     Text("Name")
                         .font(.system(size: 12.5, weight: .semibold))
                         .foregroundStyle(Ledger.ink2)
                         .frame(width: 44, alignment: .leading)
-                    TextField("optional", text: $form.name)
+                    TextField(namePlaceholder, text: $form.name)
                         .textFieldStyle(.plain)
                         .ledgerField()
                         .focused($nameFocused)
-                }
-                .padding(.horizontal, 24)
-                .padding(.top, 18)
-
-                HStack(alignment: .firstTextBaseline, spacing: 10) {
-                    Text("Issue")
-                        .font(.system(size: 12.5, weight: .semibold))
-                        .foregroundStyle(Ledger.ink2)
-                        .frame(width: 44, alignment: .leading)
-                    TextField("optional: a GitHub issue number or link to start on", text: $form.issue)
-                        .textFieldStyle(.plain)
-                        .autocorrectionDisabled()
-                        .ledgerField()
-                        .onSubmit(start)
-                }
-                .padding(.horizontal, 24)
-                .padding(.top, 12)
-                .onChange(of: form.issue) { form.problem = nil }
-
-                if let problem = form.problem {
-                    Text(problem)
-                        .font(.system(size: 12.5))
-                        .foregroundStyle(Ledger.failInk)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .textSelection(.enabled)
-                        .padding(.leading, 78)
-                        .padding(.trailing, 24)
-                        .padding(.top, 6)
-                }
-
-                HStack(spacing: 10) {
-                    Text("Model")
-                        .font(.system(size: 12.5, weight: .semibold))
-                        .foregroundStyle(Ledger.ink2)
-                        .frame(width: 44, alignment: .leading)
                     Picker("Model", selection: $form.model) {
                         ForEach(AppModel.models, id: \.self) { name in
                             Text(name.isEmpty ? "Default model" : name).tag(name)
@@ -128,7 +100,7 @@ struct NewSessionModal: View {
                     .fixedSize()
                 }
                 .padding(.horizontal, 24)
-                .padding(.top, 12)
+                .padding(.top, 16)
 
                 if let note = joinNote {
                     Text(note)
@@ -147,7 +119,7 @@ struct NewSessionModal: View {
                     Button(startTitle, action: start)
                         .buttonStyle(.ledgerPrimary)
                         .keyboardShortcut(.defaultAction)
-                        .disabled(form.picked == nil || model.daemonDown || form.reading)
+                        .disabled(form.picked == nil || model.daemonDown || form.starting)
                 }
                 .padding(.horizontal, 24)
                 .padding(.top, 20)
@@ -164,10 +136,33 @@ struct NewSessionModal: View {
             let request = model.newSession
             form.kind = request?.kind ?? .orchestrator
             if form.picked == nil { form.picked = request?.repo ?? model.selectedRepo ?? repos.first }
-            // After the terminal behind has let go of the keyboard.
-            DispatchQueue.main.async { nameFocused = true }
+            loadBranches()
+            // Without a repo there is no Create from; start at the name.
+            if form.picked == nil { DispatchQueue.main.async { nameFocused = true } }
         }
+        .onChange(of: form.picked) { loadBranches() }
         .onExitCommand(perform: close)
+    }
+
+    private var namePlaceholder: String {
+        switch form.choice {
+        case .name(let text)?: text
+        case .issue?: "optional; the issue names it"
+        default: "optional"
+        }
+    }
+
+    private func loadBranches() {
+        guard let repo = form.picked else { return }
+        form.branches = []
+        model.loadBranches(repo) { listed in
+            guard form.picked == repo else { return }
+            form.branches = listed.branches
+            form.current = listed.current
+            if !listed.branches.contains(where: { $0.name == form.base }) {
+                form.base = listed.current.isEmpty ? listed.branches.first?.name ?? "" : listed.current
+            }
+        }
     }
 
     /// What a repo has running, for its row: "Orchestrator live", "Claude Code live", "stopped".
@@ -195,33 +190,50 @@ struct NewSessionModal: View {
     }
 
     private var startTitle: String {
-        if form.reading { return "Reading the issue…" }
+        if form.starting { return form.choice.map { if case .issue = $0 { "Reading the issue…" } else { "Starting…" } } ?? "Starting…" }
         return form.kind == .orchestrator ? "Start Orchestrator" : "Start Claude Code"
     }
 
-    /// Starts the agent; with an issue, reads it first and starts the agent on it, named after it.
+    /// Starts the agent where Create from says: the repo's checkout, a branch, or a new branch in
+    /// its own worktree; from an issue, it reads the issue first and starts on it. A failure keeps
+    /// the dialog open and says why.
     private func start() {
-        guard let picked = form.picked, !form.reading else { return }
-        let typed = form.issue.trimmingCharacters(in: .whitespaces)
-        guard !typed.isEmpty else {
-            model.open(repo: picked, kind: form.kind, name: form.name, model: form.model)
-            return close()
-        }
-        guard let reference = issueReference(typed) else {
-            form.problem = "Type an issue number, like 12, or its link, like https://github.com/owner/repo/issues/12."
-            return
-        }
-        form.reading = true
-        Task {
-            do {
-                let issue = try await AppModel.fetchIssue(reference, in: picked)
-                let name = form.name.trimmingCharacters(in: .whitespaces).isEmpty ? issue.name : form.name
-                model.open(repo: picked, kind: form.kind, name: name, model: form.model, request: issue.request)
-                close()
-            } catch {
-                form.reading = false
-                form.problem = "\(error)"
+        guard let picked = form.picked, !form.starting else { return }
+        let name = form.name.trimmingCharacters(in: .whitespaces)
+        switch form.choice {
+        case nil:
+            model.open(repo: picked, kind: form.kind, name: name, model: form.model)
+            close()
+        case .branch(let branch)?:
+            launch(picked, name: name, branch: branch)
+        case .name(let text)?:
+            launch(picked, name: name.isEmpty ? text : name, newBranch: fanoutBranch(text))
+        case .issue(let typed)?:
+            guard let reference = issueReference(typed) else {
+                form.problem = "Type an issue number, like 12, or its link, like https://github.com/owner/repo/issues/12."
+                return
             }
+            form.starting = true
+            Task {
+                do {
+                    let issue = try await AppModel.fetchIssue(reference, in: picked)
+                    launch(picked, name: name.isEmpty ? issue.name : name,
+                           newBranch: fanoutBranch("\(issue.number) \(issue.title)"), request: issue.request)
+                } catch {
+                    form.starting = false
+                    form.problem = "\(error)"
+                }
+            }
+        }
+    }
+
+    private func launch(_ repo: String, name: String, branch: String? = nil, newBranch: String? = nil, request: String? = nil) {
+        form.starting = true
+        form.problem = nil
+        model.open(repo: repo, kind: form.kind, name: name, model: form.model, request: request,
+                   branch: branch, newBranch: newBranch, base: newBranch == nil ? nil : form.base) { problem in
+            form.starting = false
+            if let problem { form.problem = problem } else { close() }
         }
     }
 
@@ -235,12 +247,29 @@ final class NewSessionForm: ObservableObject {
     @Published var name = ""
     @Published var model = ""
     @Published var picked: String?
-    /// A GitHub issue, by number or link, the agent starts on.
-    @Published var issue = ""
-    /// Why the issue could not be read.
+    /// Create from: which tab, and what is typed or picked there.
+    @Published var tab: CreateFromTab = .smart
+    @Published var from = ""
+    @Published var pickedBranch: String?
+    /// The picked repo's branches and its checked-out one; new branches start from `base`.
+    @Published var branches: [RepoBranch] = []
+    @Published var current = ""
+    @Published var base = ""
+    /// Why the agent could not start: an unreadable issue, a branch git refused.
     @Published var problem: String?
-    /// True while `gh` reads the issue.
-    @Published var reading = false
+    /// True while the issue is read or the agent starts.
+    @Published var starting = false
+
+    /// Where the new agent works; nil means the repo's own checkout.
+    var choice: CreateFrom? {
+        let text = from.trimmingCharacters(in: .whitespaces)
+        switch tab {
+        case .smart: return smartCreateFrom(text, branches: branches.map(\.name))
+        case .github: return text.isEmpty ? nil : .issue(text)
+        case .branch: return pickedBranch.map(CreateFrom.branch)
+        case .name: return text.isEmpty ? nil : .name(text)
+        }
+    }
     /// Folders chosen with the open panel this time, listed first.
     @Published var chosen: [String] = []
 }
