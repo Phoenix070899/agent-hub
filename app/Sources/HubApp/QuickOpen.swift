@@ -58,7 +58,8 @@ struct QuickOpen: View {
             .frame(width: 600)
             .background(Ledger.paper)
             .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-            .shadow(color: .black.opacity(0.25), radius: 30, y: 16)
+            // A hairline, not a shadow, sets it apart from the dimmed window.
+            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Ledger.rule))
             .padding(.top, 110)
             .accessibilityElement(children: .contain)
             .accessibilityAddTraits(.isModal)

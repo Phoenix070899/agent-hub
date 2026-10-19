@@ -119,7 +119,8 @@ struct FanOutModal: View {
             }
             .frame(width: 560)
             .background(Ledger.paper, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-            .shadow(color: .black.opacity(0.25), radius: 30, y: 16)
+            // A hairline, not a shadow, sets it apart from the dimmed window.
+            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Ledger.rule))
             .accessibilityElement(children: .contain)
             .accessibilityAddTraits(.isModal)
         }
