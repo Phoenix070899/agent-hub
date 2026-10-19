@@ -486,3 +486,33 @@ func row(_ id: String, phase: String, quiet: Int, model: String? = nil, effort: 
         .code("  let x = 1", language: "js"),
     ])
 }
+
+@Test func eachMarkdownBlockKnowsItsSourceLines() {
+    let source = "---\ntitle: Plan\n---\n# Title\n\nOne\ntwo\n\n- a\n  more\n- b\n> q\n> r\n\n| x |\n| - |\n| 1 |\n```sh\nls\n```\nTitle\n---"
+    let read = parseMarkdownLines(source)
+    #expect(read.blocks.count == read.lines.count)
+    #expect(read.lines == [1...3, 4...4, 6...7, 9...10, 11...11, 12...13, 15...17, 18...20, 21...22])
+}
+
+@Test func notesQuoteTheirLinesAndCutLongBlocks() {
+    let short = FileNote(path: "docs/plan.md", lines: 4...4, quote: ["# Title"], text: "Rename it. ")
+    let long = FileNote(path: "README.md", lines: 1...10, quote: (1...10).map { "l\($0)" }, text: "Shorter")
+    #expect(notesBody([short, long]) == """
+    The human left notes on these files. Address each one:
+
+    docs/plan.md:4
+    > # Title
+    Rename it.
+
+    README.md:1-10
+    > l1
+    > l2
+    > l3
+    > l4
+    > ...
+    > l8
+    > l9
+    > l10
+    Shorter
+    """)
+}

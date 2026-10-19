@@ -193,6 +193,11 @@ final class AppModel: ObservableObject {
     @Published var treeFocused = false
     /// Bumped to move the keyboard to the Files tree.
     @Published var filesFocusRequest = 0
+    /// Bumped to hand the keyboard to the previewed file (Tab in the tree).
+    @Published var previewFocusRequest = 0
+    /// Notes on files, per checkout, until they are sent to the agent working there; in memory
+    /// only, as review comments are.
+    @Published var fileNotes: [String: [FileNote]] = [:]
     var checkouts: [String: CheckoutFiles] = [:]
     private var noticeHide: DispatchWorkItem?
 
@@ -1003,6 +1008,34 @@ extension AppModel {
         case .worker(let repo, let id)?:
             return snapshot(repo).workers.first { $0.id == id }.map { $0.isActive && $0.live } ?? false
         case nil: return false
+        }
+    }
+
+    /// What the terminal on screen is called: the agent's name, or the Worker's id.
+    var terminalName: String? {
+        switch selection {
+        case .agent(let repo, let id)?: return agents(repo).first { $0.id == id }?.displayName
+        case .worker(_, let id)?: return id
+        case nil: return nil
+        }
+    }
+
+    /// Pastes the checkout's notes into the terminal on screen and presses Return, then clears
+    /// them. A paste, so the agent reads the notes as one message, not a line at a time.
+    func sendNotes(root: String) {
+        guard terminalTypeable, selectedCheckout == root, let notes = fileNotes[root], !notes.isEmpty else { return }
+        let text = "\u{1b}[200~" + notesBody(notes) + "\u{1b}[201~"
+        let count = notes.count
+        let name = terminalName ?? "the agent"
+        fileNotes[root] = nil
+        preview = nil
+        // After the terminal takes the screen back; Return on its own, as the daemon sends a review.
+        DispatchQueue.main.async {
+            NotificationCenter.default.post(name: .typeIntoTerminal, object: Data(text.utf8))
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                NotificationCenter.default.post(name: .typeIntoTerminal, object: Data("\r".utf8))
+                self.note("Sent \(count) note\(count == 1 ? "" : "s") to \(name).")
+            }
         }
     }
 

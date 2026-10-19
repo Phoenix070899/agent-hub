@@ -195,12 +195,12 @@ struct ChangesView: View {
                         .help("The Orchestrator decides what happens next, like resuming \(worker.id) or starting a new Task.")
                     Button("Send to \(worker.id)") { send(toWorker: true) }
                         .buttonStyle(.ledgerPrimary)
-                        .keyboardShortcut(.return, modifiers: [.command, .shift])
+                        .keyboardShortcut(sendShortcut)
                         .help("Typed into \(worker.id)'s terminal; the Orchestrator is told too. ⇧⌘Return")
                 } else {
                     Button("Send to the Orchestrator") { send(toWorker: false) }
                         .buttonStyle(.ledgerPrimary)
-                        .keyboardShortcut(.return, modifiers: [.command, .shift])
+                        .keyboardShortcut(sendShortcut)
                         .help("The Orchestrator decides what happens next, like resuming \(worker.id) or starting a new Task. ⇧⌘Return")
                 }
             }
@@ -210,6 +210,11 @@ struct ChangesView: View {
         .padding(.vertical, 9)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Ledger.wash)
+    }
+
+    /// ⇧⌘Return, unless a previewed file covers the review and sends its own notes with it.
+    private var sendShortcut: KeyboardShortcut? {
+        model.preview == nil ? KeyboardShortcut(.return, modifiers: [.command, .shift]) : nil
     }
 
     private func message(_ title: String, detail: String) -> some View {
@@ -389,6 +394,8 @@ struct DiffLineRow: View {
 /// A saved comment under its line.
 struct CommentCard: View {
     let text: String
+    /// From the left edge: past a diff's gutters, or none under a Markdown block.
+    var inset: CGFloat = 110
     let edit: () -> Void
     let delete: () -> Void
 
@@ -408,8 +415,8 @@ struct CommentCard: View {
         .padding(.vertical, 9)
         .frame(maxWidth: 640, alignment: .leading)
         .background(Ledger.needCard, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
-        .padding(.leading, 110)
-        .padding(.trailing, 18)
+        .padding(.leading, inset)
+        .padding(.trailing, inset == 0 ? 0 : 18)
         .padding(.vertical, 6)
     }
 }
@@ -417,13 +424,16 @@ struct CommentCard: View {
 /// Writing a comment on a line: Return adds it, ⌥Return starts a new line, Escape cancels.
 struct CommentEditor: View {
     @Binding var draft: String
+    var placeholder = "What should change here?"
+    var action = "Add comment"
+    var inset: CGFloat = 110
     let cancel: () -> Void
     let save: () -> Void
     @FocusState private var focused: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            TextField("What should change here?", text: $draft, axis: .vertical)
+            TextField(placeholder, text: $draft, axis: .vertical)
                 .textFieldStyle(.plain)
                 .font(.system(size: 13))
                 .lineLimit(2...8)
@@ -441,14 +451,14 @@ struct CommentEditor: View {
                 Spacer()
                 Button("Cancel", action: cancel)
                     .buttonStyle(.ledger)
-                Button("Add comment", action: save)
+                Button(action, action: save)
                     .buttonStyle(.ledgerPrimary)
                     .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
         }
         .frame(maxWidth: 640)
-        .padding(.leading, 110)
-        .padding(.trailing, 18)
+        .padding(.leading, inset)
+        .padding(.trailing, inset == 0 ? 0 : 18)
         .padding(.vertical, 8)
         .onAppear { DispatchQueue.main.async { focused = true } }
     }

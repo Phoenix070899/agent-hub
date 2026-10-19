@@ -202,25 +202,41 @@ public enum TableAlignment: Equatable, Sendable {
 }
 
 public func parseMarkdown(_ source: String) -> [MarkdownBlock] {
+    parseMarkdownLines(source).blocks
+}
+
+/// The blocks, and for each the 1-based source lines it was read from, so a note on a block can
+/// say where it is.
+public func parseMarkdownLines(_ source: String) -> (blocks: [MarkdownBlock], lines: [ClosedRange<Int>]) {
     let lines = source.replacingOccurrences(of: "\r\n", with: "\n").components(separatedBy: "\n")
     var blocks: [MarkdownBlock] = []
+    var spans: [ClosedRange<Int>] = []
+    /// Adds a block read from lines `from` to `to`, 0-based.
+    func add(_ block: MarkdownBlock, _ from: Int, _ to: Int) {
+        blocks.append(block)
+        spans.append(from + 1...max(from, to) + 1)
+    }
     var index = 0
     if lines.first?.trimmingCharacters(in: .whitespaces) == "---",
        let close = lines.indices.dropFirst().first(where: { ["---", "..."].contains(lines[$0].trimmingCharacters(in: .whitespaces)) }) {
-        blocks.append(.frontMatter(lines[1..<close].joined(separator: "\n")))
+        add(.frontMatter(lines[1..<close].joined(separator: "\n")), 0, close)
         index = close + 1
     }
 
     var paragraph = ""
     var quote: [String] = []
+    /// Where the running paragraph and quote started, and the last line either took.
+    var paragraphStart = 0
+    var quoteStart = 0
+    var lastLine = 0
     /// The indents of the lists open around the current item, outermost first.
     var listIndents: [Int] = []
     var afterBlank = false
     func flush() {
-        if !paragraph.isEmpty { blocks.append(.paragraph(unmark(paragraph))) }
+        if !paragraph.isEmpty { add(.paragraph(unmark(paragraph)), paragraphStart, lastLine) }
         paragraph = ""
         if !quote.isEmpty {
-            blocks.append(.quote(quote.joined(separator: " ").replacingOccurrences(of: " \n\n ", with: "\n\n")))
+            add(.quote(quote.joined(separator: " ").replacingOccurrences(of: " \n\n ", with: "\n\n")), quoteStart, lastLine)
         }
         quote = []
     }
@@ -256,6 +272,7 @@ public func parseMarkdown(_ source: String) -> [MarkdownBlock] {
         }
         if line.hasPrefix("```") || line.hasPrefix("~~~") {
             flush()
+            let start = index
             let fence = String(line.prefix(3))
             let language = String(line.dropFirst(3)).trimmingCharacters(in: .whitespaces)
             var code: [String] = []
@@ -265,11 +282,12 @@ public func parseMarkdown(_ source: String) -> [MarkdownBlock] {
                 code.append(String(lines[index].dropFirst(min(indent, lines[index].prefix { $0 == " " }.count))))
                 index += 1
             }
-            blocks.append(.code(code.joined(separator: "\n"), language: language))
+            add(.code(code.joined(separator: "\n"), language: language), start, min(index, lines.count - 1))
             continue
         }
         if line.contains("|"), index + 1 < lines.count, let alignments = tableAlignments(lines[index + 1]) {
             flush()
+            let start = index
             let header = tableCells(line)
             let width = header.count
             var rows: [[String]] = []
@@ -283,13 +301,13 @@ public func parseMarkdown(_ source: String) -> [MarkdownBlock] {
             }
             index -= 1
             let aligned = Array(alignments.prefix(width)) + Array(repeating: .leading, count: max(0, width - alignments.count))
-            blocks.append(.table(header: header, rows: rows, alignments: aligned))
+            add(.table(header: header, rows: rows, alignments: aligned), start, index)
             listIndents = []
             continue
         }
         // "Title" over "=====" or "-----" is a heading.
         if !paragraph.isEmpty, quote.isEmpty, !line.isEmpty, line.allSatisfy({ $0 == "=" }) || line.allSatisfy({ $0 == "-" }) {
-            blocks.append(.heading(level: line.first == "=" ? 1 : 2, text: paragraph))
+            add(.heading(level: line.first == "=" ? 1 : 2, text: paragraph), paragraphStart, index)
             paragraph = ""
             continue
         }
@@ -297,13 +315,13 @@ public func parseMarkdown(_ source: String) -> [MarkdownBlock] {
             flush()
             var text = String(line.dropFirst(level + 1))
             while text.hasSuffix("#") { text.removeLast() }
-            blocks.append(.heading(level: level, text: text.trimmingCharacters(in: .whitespaces)))
+            add(.heading(level: level, text: text.trimmingCharacters(in: .whitespaces)), index, index)
             listIndents = []
             continue
         }
         if isRule(line) {
             flush()
-            blocks.append(.rule)
+            add(.rule, index, index)
             listIndents = []
             continue
         }
@@ -311,6 +329,8 @@ public func parseMarkdown(_ source: String) -> [MarkdownBlock] {
             if !paragraph.isEmpty { flush() }
             var text = line.dropFirst()
             if text.hasPrefix(" ") { text = text.dropFirst() }
+            if quote.isEmpty { quoteStart = index }
+            lastLine = index
             quote.append(text.isEmpty ? "\n\n" : String(text))
             continue
         }
@@ -324,24 +344,63 @@ public func parseMarkdown(_ source: String) -> [MarkdownBlock] {
                 checked = value
                 text = String(text.dropFirst(box.count))
             }
-            blocks.append(.bullet(text, ordered: item.number, depth: listIndents.count - 1, checked: checked))
+            add(.bullet(text, ordered: item.number, depth: listIndents.count - 1, checked: checked), index, index)
             continue
         }
         // A list item's next lines: indented under it, or straight after it.
         if quote.isEmpty, paragraph.isEmpty, case .bullet(let text, let number, let depth, let checked)? = blocks.last,
            !blank || indent >= 2 {
             blocks[blocks.count - 1] = .bullet(join(text, raw), ordered: number, depth: depth, checked: checked)
+            spans[spans.count - 1] = spans[spans.count - 1].lowerBound...index + 1
             continue
         }
         if !quote.isEmpty { flush() }
         if indent < 2 || paragraph.isEmpty && blank { listIndents = [] }
+        if paragraph.isEmpty { paragraphStart = index }
+        lastLine = index
         paragraph = join(paragraph, raw)
     }
     flush()
-    return blocks.map { block in
+    let unmarked = blocks.map { block in
         guard case .bullet(let text, let number, let depth, let checked) = block else { return block }
-        return .bullet(unmark(text), ordered: number, depth: depth, checked: checked)
+        return MarkdownBlock.bullet(unmark(text), ordered: number, depth: depth, checked: checked)
     }
+    return (unmarked, spans)
+}
+
+/// A note the human left on lines of a file, for the agent working in that checkout.
+public struct FileNote: Equatable, Sendable {
+    public var path: String
+    /// 1-based, as the file read when the note was written.
+    public var lines: ClosedRange<Int>
+    /// Those lines' text.
+    public var quote: [String]
+    public var text: String
+
+    public init(path: String, lines: ClosedRange<Int>, quote: [String], text: String) {
+        self.path = path
+        self.lines = lines
+        self.quote = quote
+        self.text = text
+    }
+
+    /// `docs/plan.md:12`, or `docs/plan.md:12-14` for a block over several lines.
+    public var place: String {
+        lines.count == 1 ? "\(path):\(lines.lowerBound)" : "\(path):\(lines.lowerBound)-\(lines.upperBound)"
+    }
+}
+
+/// Notes as the agent reads them: each under the place and the lines it is about, a long block
+/// cut to its first four and last three lines.
+public func notesBody(_ notes: [FileNote]) -> String {
+    let each = notes.map { note in
+        var quote = note.quote
+        while quote.last?.trimmingCharacters(in: .whitespaces).isEmpty == true { quote.removeLast() }
+        if quote.count > 8 { quote = Array(quote.prefix(4)) + ["..."] + Array(quote.suffix(3)) }
+        let quoted = quote.map { "> \($0)" }.joined(separator: "\n")
+        return "\(note.place)\n\(quoted)\n\(note.text.trimmingCharacters(in: .whitespacesAndNewlines))"
+    }
+    return "The human left notes on these files. Address each one:\n\n" + each.joined(separator: "\n\n")
 }
 
 private func headingLevel(_ line: String) -> Int? {

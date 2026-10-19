@@ -194,6 +194,10 @@ private struct FilesTree: View {
         case .escape:
             guard model.preview != nil else { return .ignored }
             model.preview = nil
+        case .tab:
+            // Tab hands the keyboard to the previewed file, to leave notes on it.
+            guard model.preview != nil, !press.modifiers.contains(.shift) else { return .ignored }
+            model.previewFocusRequest += 1
         default:
             // Typing a name jumps to it, as in Finder.
             let text = press.characters.lowercased()

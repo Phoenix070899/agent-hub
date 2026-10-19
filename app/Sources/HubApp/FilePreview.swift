@@ -13,6 +13,7 @@ struct FilePreviewPanel: View {
     let file: FileRef
     @ObservedObject var files: CheckoutFiles
     @StateObject private var content = PreviewContent()
+    @StateObject private var notes = NotesState()
     @FocusState private var focused: Bool
 
     var body: some View {
@@ -23,13 +24,44 @@ struct FilePreviewPanel: View {
             body(of: content.state)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .background(Ledger.paper)
+            notesBar
         }
         .focusable()
         .focused($focused)
         .focusEffectDisabled()
         .onKeyPress(.escape) {
-            model.preview = nil
+            if notes.editing != nil {
+                notes.editing = nil
+                focused = true
+            } else {
+                model.preview = nil
+            }
             return .handled
+        }
+        // In rendered Markdown, ↑ and ↓ pick a block and Return leaves a note on it. Keys typed in
+        // a note bubble up here too; while one is being written, they are its own.
+        .onKeyPress(keys: [.downArrow, .upArrow, .return]) { press in
+            guard notesOpen, notes.editing == nil, press.modifiers.isDisjoint(with: [.command, .option, .control]),
+                  case .markdown(let blocks, _, _, _) = content.state, !blocks.isEmpty else { return .ignored }
+            if press.key == .return {
+                guard let cursor = notes.cursor else { return .ignored }
+                notes.start(at: cursor)
+            } else {
+                let step = press.key == .downArrow ? 1 : -1
+                notes.cursor = notes.cursor.map { max(0, min(blocks.count - 1, $0 + step)) } ?? (step > 0 ? 0 : blocks.count - 1)
+            }
+            return .handled
+        }
+        // ⇧Tab gives the keyboard back to the tree.
+        .onKeyPress(.tab) {
+            guard NSEvent.modifierFlags.contains(.shift), model.filesShown, notes.editing == nil else { return .ignored }
+            model.filesFocusRequest += 1
+            return .handled
+        }
+        .onChange(of: model.previewFocusRequest) { focused = true }
+        .onChange(of: file) {
+            notes.cursor = nil
+            notes.editing = nil
         }
         // From the tree, the tree keeps the keyboard (Space, arrows, Esc); from Quick Open, Esc
         // needs the preview to hold it.
@@ -76,6 +108,51 @@ struct FilePreviewPanel: View {
         .padding(.top, 6)
         .padding(.horizontal, 8)
         .background(Ledger.band)
+    }
+
+    /// Notes can be written on the file: Markdown, shown rendered.
+    private var notesOpen: Bool {
+        if case .markdown = content.state { return content.rendered }
+        return false
+    }
+
+    private var rootNotes: [FileNote] { model.fileNotes[file.root] ?? [] }
+
+    /// How to leave a note, or the notes waiting in this checkout and the button that sends them.
+    @ViewBuilder
+    private var notesBar: some View {
+        let notes = rootNotes
+        if notesOpen || !notes.isEmpty {
+            let name = model.terminalName ?? "the agent"
+            HStack(spacing: 10) {
+                if notes.isEmpty {
+                    Text("Click + beside a block, or press Tab, ↑ ↓ and Return, to leave \(name) a note.")
+                        .foregroundStyle(Ledger.ink3)
+                        .lineLimit(1)
+                } else {
+                    let files = Set(notes.map(\.path)).count
+                    Text("\(notes.count) note\(notes.count == 1 ? "" : "s")\(files > 1 ? " in \(files) files" : "")")
+                        .fontWeight(.semibold)
+                    Button("Discard") { model.fileNotes[file.root] = nil }
+                        .buttonStyle(.ledgerLink)
+                }
+                Spacer(minLength: 8)
+                if !notes.isEmpty {
+                    Button("Send to \(name)") { model.sendNotes(root: file.root) }
+                        .buttonStyle(.ledgerPrimary)
+                        .keyboardShortcut(.return, modifiers: [.command, .shift])
+                        .disabled(!model.terminalTypeable)
+                        .help(model.terminalTypeable
+                              ? "Pasted into \(name)'s terminal as one message. ⇧⌘Return"
+                              : "The agent isn't running, so there is no terminal to send to.")
+                }
+            }
+            .font(.system(size: 12.5))
+            .padding(.horizontal, 18)
+            .padding(.vertical, 9)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Ledger.wash)
+        }
     }
 
     private var header: some View {
@@ -143,9 +220,10 @@ struct FilePreviewPanel: View {
             PDFPreview(document: document)
         case .text(let lines, let cut):
             CodeLines(lines: lines, changed: content.changed, cut: cut, focus: model.previewLine)
-        case .markdown(let blocks, let lines, let cut):
+        case .markdown(let blocks, let spans, let lines, let cut):
             if content.rendered {
-                MarkdownView(blocks: blocks)
+                MarkdownView(blocks: blocks, spans: spans, source: lines.map { String($0.characters) },
+                             file: file, notes: notes) { focused = true }
             } else {
                 CodeLines(lines: lines, changed: content.changed, cut: cut, focus: model.previewLine)
             }
@@ -178,7 +256,8 @@ final class PreviewContent: ObservableObject {
         case image(NSImage)
         case pdf(PDFDocument)
         case text([AttributedString], cut: Bool)
-        case markdown([MarkdownBlock], [AttributedString], cut: Bool)
+        /// The blocks, the source lines each was read from, and the source coloured.
+        case markdown([MarkdownBlock], [ClosedRange<Int>], [AttributedString], cut: Bool)
     }
 
     @Published var state: State = .loading
@@ -188,9 +267,9 @@ final class PreviewContent: ObservableObject {
     @Published var changed: Set<Int> = []
 
     private var shown: (path: String, lines: [String])?
-    private static let limit = 1_000_000
+    nonisolated private static let limit = 1_000_000
     /// Bigger text shows without colours, which would take too long.
-    private static let colourLimit = 300_000
+    nonisolated private static let colourLimit = 300_000
 
     func load(_ file: FileRef, dark: Bool) async {
         let url = file.url
@@ -211,7 +290,8 @@ final class PreviewContent: ObservableObject {
                 let plain = text.components(separatedBy: "\n")
                 let lines = Self.colour(text, path: path, dark: dark) ?? plain.map { AttributedString($0) }
                 if kind == .markdown {
-                    return (.markdown(parseMarkdown(text), lines, cut: cut), plain)
+                    let read = parseMarkdownLines(text)
+                    return (.markdown(read.blocks, read.lines, lines, cut: cut), plain)
                 }
                 return (.text(lines, cut: cut), plain)
             }
@@ -327,16 +407,67 @@ private struct CodeLines: View {
     }
 }
 
+/// The block the keyboard is on and the note being written, for one previewed file.
+final class NotesState: ObservableObject {
+    /// The block ↑ and ↓ moved to; Return leaves a note on it.
+    @Published var cursor: Int?
+    /// The block a note is being written on.
+    @Published var editing: Int?
+    @Published var draft = ""
+
+    func start(at block: Int, draft: String = "") {
+        cursor = block
+        self.draft = draft
+        editing = block
+    }
+}
+
 /// Markdown as a document: front matter, headings, paragraphs, lists, quotes, tables, and code.
+/// Each block takes notes for the agent: + beside it, or the keyboard cursor and Return.
 private struct MarkdownView: View {
+    @EnvironmentObject private var model: AppModel
     let blocks: [MarkdownBlock]
+    /// The source lines each block was read from.
+    let spans: [ClosedRange<Int>]
+    let source: [String]
+    let file: FileRef
+    @ObservedObject var notes: NotesState
+    /// Gives the keyboard back to the preview once a note is saved.
+    let done: () -> Void
 
     var body: some View {
+        let all = model.fileNotes[file.root] ?? []
+        ScrollViewReader { proxy in
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
                 ForEach(Array(blocks.enumerated()), id: \.offset) { index, block in
-                    view(block)
-                        .padding(.top, index == 0 ? 0 : gap(blocks[index - 1], block))
+                    VStack(alignment: .leading, spacing: 0) {
+                        NoteableBlock(marked: notes.cursor == index || notes.editing == index) {
+                            notes.start(at: index)
+                        } content: {
+                            view(block)
+                        }
+                        ForEach(Array(all.enumerated()).filter { $0.element.path == file.path && $0.element.lines == spans[index] },
+                                id: \.offset) { position, note in
+                            CommentCard(text: note.text, inset: 0) {
+                                model.fileNotes[file.root]?.remove(at: position)
+                                notes.start(at: index, draft: note.text)
+                            } delete: {
+                                model.fileNotes[file.root]?.remove(at: position)
+                            }
+                        }
+                        if notes.editing == index {
+                            CommentEditor(draft: $notes.draft, placeholder: "What should the agent know or change here?",
+                                          action: "Add note", inset: 0) {
+                                notes.editing = nil
+                                done()
+                            } save: {
+                                save(on: index)
+                            }
+                        }
+                    }
+                    .padding(.top, index == 0 ? 0 : gap(blocks[index - 1], block))
+                    .id(index)
                 }
             }
             .font(.system(size: 14))
@@ -348,6 +479,20 @@ private struct MarkdownView: View {
             .padding(.vertical, 28)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .onChange(of: notes.cursor) {
+            if let cursor = notes.cursor { withAnimation(.easeOut(duration: 0.15)) { proxy.scrollTo(cursor) } }
+        }
+        }
+    }
+
+    private func save(on index: Int) {
+        let text = notes.draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        let span = spans[index]
+        let quote = Array(source[min(span.lowerBound - 1, source.count)..<min(span.upperBound, source.count)])
+        model.fileNotes[file.root, default: []].append(FileNote(path: file.path, lines: span, quote: quote, text: text))
+        notes.editing = nil
+        done()
     }
 
     /// Items of one list sit close; other blocks get room, headings the most.
@@ -434,6 +579,45 @@ private struct MarkdownView: View {
         } else {
             Text(["•", "◦", "▪"][depth % 3]).foregroundStyle(Ledger.ink2)
         }
+    }
+}
+
+/// One rendered block that takes a note: + in the margin on hover, and a tint while the keyboard
+/// cursor is on it. The block's text stays selectable, so only + starts a note.
+private struct NoteableBlock<Content: View>: View {
+    let marked: Bool
+    let note: () -> Void
+    @ViewBuilder let content: Content
+    @StateObject private var hover = Flag()
+
+    var body: some View {
+        content
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background {
+                if marked {
+                    RoundedRectangle(cornerRadius: 6, style: .continuous).fill(Ledger.selected).padding(-6)
+                }
+            }
+            .overlay(alignment: .topLeading) {
+                if hover.on || marked {
+                    Button(action: note) {
+                        Image(systemName: "plus.bubble.fill")
+                            .font(.system(size: 12))
+                            .foregroundStyle(Ledger.run)
+                            .frame(width: 22, height: 22)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .offset(x: -32, y: -3)
+                    .help("Leave a note on this for the agent")
+                    .accessibilityLabel("Add a note")
+                }
+            }
+            // The margin + sits in counts as the block, so the pointer can reach it.
+            .padding(.leading, 34)
+            .contentShape(Rectangle())
+            .padding(.leading, -34)
+            .onHover { hover.on = $0 }
     }
 }
 
