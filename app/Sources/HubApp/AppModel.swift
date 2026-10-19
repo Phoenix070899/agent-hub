@@ -692,6 +692,59 @@ final class AppModel: ObservableObject {
         background { client in try client.closeWorker(number) } then: { _ in }
     }
 
+    // MARK: Changes: a Worker's diff and the human's review of it
+
+    /// Workers showing Changes instead of their terminal or Final Report, as "repo|w12".
+    @Published var changesShown: Set<String> = []
+    /// Review comments not sent yet, per Worker ("repo|w12"), kept while the human looks elsewhere.
+    @Published var reviews: [String: [ReviewComment]] = [:]
+
+    static func workerKey(_ repo: String, _ worker: WorkerRow) -> String { "\(repo)|\(worker.id)" }
+
+    func showChanges(_ shown: Bool, repo: String, worker: WorkerRow) {
+        let key = Self.workerKey(repo, worker)
+        if shown { changesShown.insert(key) } else { changesShown.remove(key) }
+    }
+
+    /// The Worker on screen, if a Worker is.
+    var selectedWorker: (repo: String, worker: WorkerRow)? {
+        guard case .worker(let repo, let id)? = selection,
+              let worker = snapshot(repo).workers.first(where: { $0.id == id }) else { return nil }
+        return (repo, worker)
+    }
+
+    var changesSelected: Bool {
+        selectedWorker.map { changesShown.contains(Self.workerKey($0.repo, $0.worker)) } ?? false
+    }
+
+    /// ⌥⌘D: the selected Worker's Changes, or back to its terminal or Final Report.
+    func toggleChanges() {
+        guard let (repo, worker) = selectedWorker else { return }
+        showChanges(!changesSelected, repo: repo, worker: worker)
+    }
+
+    func loadDiff(_ worker: WorkerRow, then done: @escaping @MainActor (Result<(diff: String, truncated: Bool), Error>) -> Void) {
+        guard let number = worker.number else { return }
+        let client = client
+        Thread.detachNewThread {
+            let result = Result { try client.workerDiff(number) }
+            DispatchQueue.main.async { done(result) }
+        }
+    }
+
+    /// Sends the Worker's review; on success the comments are cleared.
+    func sendReview(repo: String, worker: WorkerRow, toWorker: Bool, then done: @escaping @MainActor () -> Void) {
+        let key = Self.workerKey(repo, worker)
+        guard let number = worker.number, let comments = reviews[key], !comments.isEmpty else { return }
+        let body = reviewBody(comments)
+        background { client in
+            try client.reviewWorker(number, toWorker: toWorker, body: body)
+        } then: { _ in
+            self.reviews[key] = nil
+            done()
+        }
+    }
+
     // MARK: Done: read, unread, dismissed
 
     /// Final Reports the human has opened, as "repo|w12|settledAt": one that settles again after

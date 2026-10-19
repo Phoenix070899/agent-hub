@@ -66,6 +66,73 @@ pub fn create_worktree(repo: &Path, branch: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
+/// The most diff text a review carries; past it the rest is cut, and the review says so.
+const DIFF_LIMIT: usize = 2_000_000;
+
+/// What a Worker changed in `cwd`, as one unified diff: in a worktree, everything since it
+/// branched from the repo's HEAD, commits and uncommitted work alike; in place, everything not
+/// yet committed. New files count. Returns the diff and whether it was cut short.
+pub fn diff(repo: &Path, cwd: &Path, worktree: bool) -> Result<(String, bool)> {
+    let base = if worktree {
+        let main = git(repo, &["rev-parse", "HEAD"])?;
+        git(cwd, &["merge-base", "HEAD", main.trim()])?
+    } else {
+        git(cwd, &["rev-parse", "HEAD"])?
+    };
+    let mut out = git(cwd, &["diff", "--no-color", "--no-ext-diff", base.trim()])?;
+    let untracked = git(cwd, &["ls-files", "--others", "--exclude-standard", "-z"])?;
+    for file in untracked.split('\0').filter(|f| !f.is_empty()) {
+        if out.len() > DIFF_LIMIT {
+            break;
+        }
+        // Exit 1 means the files differ, which a new file always does.
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(cwd)
+            .args([
+                "diff",
+                "--no-color",
+                "--no-ext-diff",
+                "--no-index",
+                "--",
+                "/dev/null",
+                file,
+            ])
+            .output()
+            .context("running git diff")?;
+        out.push_str(&String::from_utf8_lossy(&output.stdout));
+    }
+    let cut = out.len() > DIFF_LIMIT;
+    if cut {
+        let mut end = DIFF_LIMIT;
+        while !out.is_char_boundary(end) {
+            end -= 1;
+        }
+        // Whole lines only.
+        end = out[..end].rfind('\n').map_or(0, |n| n + 1);
+        out.truncate(end);
+    }
+    Ok((out, cut))
+}
+
+/// Runs git in `dir` and returns what it printed; its error output when it fails.
+fn git(dir: &Path, args: &[&str]) -> Result<String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .output()
+        .context("running git")?;
+    if !output.status.success() {
+        bail!(
+            "git {} failed: {}",
+            args[0],
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

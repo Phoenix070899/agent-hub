@@ -39,6 +39,9 @@ struct HubApp: App {
                     .disabled(model.selectedRepo == nil)
                 Button(model.ledgerHidden ? "Show Ledger" : "Hide Ledger") { model.ledgerHidden.toggle() }
                     .keyboardShortcut("l")
+                Button(model.changesSelected ? "Hide Changes" : "Show Changes") { model.toggleChanges() }
+                    .keyboardShortcut("d", modifiers: [.command, .option])
+                    .disabled(model.selectedWorker == nil)
                 Button("Next Repo") { model.cycleSession(forward: true) }
                     .keyboardShortcut("]", modifiers: [.command, .shift])
                 Button("Previous Repo") { model.cycleSession(forward: false) }

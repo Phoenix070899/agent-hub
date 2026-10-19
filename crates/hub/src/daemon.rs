@@ -689,6 +689,16 @@ impl Hub {
                 Ok(json!({}))
             }
             "worker.resume" => self.resume_worker(id_param(p, "id")?),
+            "worker.diff" => {
+                let worker = db::worker(&self.db(), id_param(p, "id")?)?;
+                let cwd = Path::new(&worker.cwd);
+                if !cwd.exists() {
+                    bail!("w{}'s folder {} is gone", worker.id, worker.cwd);
+                }
+                let (diff, cut) = repo::diff(Path::new(&worker.repo), cwd, worker.branch.is_some())?;
+                Ok(json!({ "diff": diff, "truncated": cut, "branch": worker.branch, "cwd": worker.cwd }))
+            }
+            "worker.review" => self.review_worker(p),
             "send" => {
                 let worker = db::worker(&self.db(), id_param(p, "worker")?)?;
                 let message_kind = str_param(p, "kind")?;
@@ -942,6 +952,38 @@ impl Hub {
         self.launch(&worker, Launch::Resume)?;
         self.notify();
         Ok(json!({ "id": format!("w{id}") }))
+    }
+
+    /// The human's review of a Worker's changes: typed into the Worker when it is live and that is
+    /// where it goes, else told to the Orchestrator, which decides what happens next.
+    fn review_worker(&self, p: &Value) -> Result<Value> {
+        let id = id_param(p, "id")?;
+        let body = str_param(p, "body")?.trim();
+        if body.is_empty() {
+            bail!("a review needs at least one comment");
+        }
+        match str_param(p, "to")? {
+            "worker" => {
+                let live = self.live(id)?;
+                live.write(format!("The human reviewed your changes. Address each comment:\n\n{body}").as_bytes())?;
+                // As worker.send: the text, then its Enter on its own.
+                std::thread::sleep(Duration::from_millis(150));
+                live.write(b"\r")?;
+                let db = self.db();
+                let worker = db::worker(&db, id)?;
+                let note = format!("The human sent w{id} a review of its changes in Echo:\n{body}");
+                db::insert_message(&db, &worker, kind::HUMAN, &note)?;
+            }
+            "orchestrator" => {
+                let db = self.db();
+                let worker = db::worker(&db, id)?;
+                let note = format!("The human reviewed w{id}'s changes in Echo and wants them addressed:\n{body}");
+                db::insert_message(&db, &worker, kind::HUMAN, &note)?;
+            }
+            other => bail!("a review goes to worker or orchestrator, not {other}"),
+        }
+        self.notify();
+        Ok(json!({}))
     }
 
     fn close_worker(&self, id: i64) -> Result<Value> {

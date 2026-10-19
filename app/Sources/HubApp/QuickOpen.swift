@@ -96,6 +96,13 @@ struct QuickOpen: View {
                 openSettings()
             },
         ]
+        if let (_, worker) = model.selectedWorker {
+            items.insert(QuickOpenItem(id: "changes", icon: "plus.forwardslash.minus",
+                                       title: model.changesSelected ? "Hide Changes" : "Show Changes",
+                                       detail: "Command, \(worker.id)'s diff") {
+                model.toggleChanges()
+            }, at: 2)
+        }
         for session in model.sessions {
             let repo = session.repo
             items.append(QuickOpenItem(id: "repo \(repo)", icon: "folder", title: session.name, detail: "Repo, \(session.shortPath)") {

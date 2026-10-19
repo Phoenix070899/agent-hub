@@ -79,6 +79,54 @@ let snapshotLine = """
     #expect(issue.request == "Work on GitHub issue #12: Flaky bench\nhttps://github.com/o/r/issues/12\n\nIt fails 1 in 5.")
 }
 
+let workerDiff = """
+diff --git a/README.md b/README.md
+index 9daeafb..4f1c2e1 100644
+--- a/README.md
++++ b/README.md
+@@ -1,3 +1,3 @@
+ # test
+-old line
++worker line
+ end
+\\ No newline at end of file
+diff --git a/notes.txt b/notes.txt
+new file mode 100644
+index 0000000..3b18e51
+--- /dev/null
++++ b/notes.txt
+@@ -0,0 +1 @@
++new file
+diff --git a/logo.png b/logo.png
+deleted file mode 100644
+Binary files a/logo.png and /dev/null differ
+
+"""
+
+@Test func aDiffSplitsIntoFilesWithLineNumbers() {
+    let files = parseDiff(workerDiff)
+    #expect(files.map(\.path) == ["README.md", "notes.txt", "logo.png"])
+    #expect(files.map(\.change) == [.modified, .added, .deleted])
+    let readme = files[0]
+    #expect(readme.additions == 1 && readme.deletions == 1)
+    #expect(readme.lines[1] == DiffLine(kind: .context, text: "# test", old: 1, new: 1))
+    #expect(readme.lines[2] == DiffLine(kind: .removed, text: "old line", old: 2))
+    #expect(readme.lines[3] == DiffLine(kind: .added, text: "worker line", new: 2))
+    #expect(readme.lines[4] == DiffLine(kind: .context, text: "end", old: 3, new: 3))
+    #expect(readme.lines[5].kind == .note)
+    #expect(files[1].lines.last == DiffLine(kind: .added, text: "new file", new: 1))
+    #expect(files[2].binary && files[2].lines.isEmpty)
+}
+
+@Test func aReviewQuotesEachCommentedLine() {
+    let files = parseDiff(workerDiff)
+    let body = reviewBody([
+        ReviewComment(path: "README.md", line: files[0].lines[3], text: "Say why. "),
+        ReviewComment(path: "README.md", line: files[0].lines[2], text: "Keep this"),
+    ])
+    #expect(body == "README.md:2\n> worker line\nSay why.\n\nREADME.md:2 (removed)\n> old line\nKeep this")
+}
+
 @Test func oneWorkerIsSingular() {
     #expect(workers(1, "running") == "1 Worker running")
     #expect(workers(3, "at work") == "3 Workers at work")

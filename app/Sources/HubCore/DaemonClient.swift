@@ -128,6 +128,18 @@ public struct DaemonClient: Sendable {
         try call("worker.dismiss", ["id": id])
     }
 
+    /// What a Worker changed: its diff, and whether the daemon cut it short.
+    public func workerDiff(_ id: Int) throws -> (diff: String, truncated: Bool) {
+        let result = try call("worker.diff", ["id": id]) as? [String: Any]
+        guard let diff = result?["diff"] as? String else { throw HubError.badResponse }
+        return (diff, result?["truncated"] as? Bool ?? false)
+    }
+
+    /// Sends the human's review of a Worker's changes to the Worker itself or its Orchestrator.
+    public func reviewWorker(_ id: Int, toWorker: Bool, body: String) throws {
+        try call("worker.review", ["id": id, "to": toWorker ? "worker" : "orchestrator", "body": body])
+    }
+
     public func decide(worker: Int, approve: Bool, note: String? = nil) throws {
         var params: [String: Any] = ["worker": worker, "approve": approve]
         if let note, !note.isEmpty { params["note"] = note }

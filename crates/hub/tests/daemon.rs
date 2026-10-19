@@ -601,6 +601,65 @@ fn a_human_reply_in_the_app_is_reported() {
 }
 
 #[test]
+fn a_worker_diff_shows_its_branch_and_a_review_reaches_it() {
+    let hub = Hub::new("review");
+    hub.ok(&[
+        "worker",
+        "start",
+        "bash",
+        "--spec",
+        "echo",
+        "--worktree",
+        "new:feat/review",
+    ]);
+    let listed = hub.call("worker.list", serde_json::json!({ "repo": hub.repo_key() }));
+    let cwd = PathBuf::from(
+        listed["result"]["workers"][0]["cwd"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{listed}")),
+    );
+    let commit = ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam"];
+    // The Worker commits one change and leaves a new file uncommitted.
+    std::fs::write(cwd.join("README.md"), "# test\nworker line\n").unwrap();
+    git(&cwd, &[&commit[..], &["worker change"]].concat());
+    std::fs::write(cwd.join("notes.txt"), "new file\n").unwrap();
+    // Main moves on meanwhile; that is not the Worker's change.
+    std::fs::write(hub.repo.join("MAIN.md"), "main only\n").unwrap();
+    git(&hub.repo, &["add", "."]);
+    git(&hub.repo, &[&commit[..], &["main change"]].concat());
+
+    let diff = hub.call("worker.diff", serde_json::json!({ "id": 1 }));
+    let text = diff["result"]["diff"].as_str().unwrap_or_else(|| panic!("{diff}"));
+    assert!(text.contains("+worker line"), "{text}");
+    assert!(text.contains("+++ b/notes.txt") && text.contains("+new file"), "{text}");
+    assert!(!text.contains("MAIN.md"), "{text}");
+    assert_eq!(diff["result"]["truncated"], false);
+
+    let sent = hub.call(
+        "worker.review",
+        serde_json::json!({ "id": 1, "to": "worker", "body": "README.md:2 say why" }),
+    );
+    assert_eq!(sent["ok"], true, "{sent}");
+    hub.eventually("the review to be typed into the Worker", || {
+        hub.ok(&["worker", "read", "w1"]).contains("got: README.md:2 say why")
+    });
+    hub.call(
+        "worker.review",
+        serde_json::json!({ "id": 1, "to": "orchestrator", "body": "notes.txt:1 drop this file" }),
+    );
+    let messages = hub.wait();
+    assert!(
+        messages.contains("The human sent w1 a review of its changes in Echo:\nREADME.md:2 say why"),
+        "{messages}"
+    );
+    assert!(
+        messages
+            .contains("The human reviewed w1's changes in Echo and wants them addressed:\nnotes.txt:1 drop this file"),
+        "{messages}"
+    );
+}
+
+#[test]
 fn simultaneous_starts_leave_one_daemon() {
     let hub = Hub::new("race");
     let starts: Vec<_> = (0..10)

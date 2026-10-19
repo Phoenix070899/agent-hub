@@ -783,8 +783,11 @@ struct WorkerPanel: View {
     var body: some View {
         if let worker = model.snapshot(repo).workers.first(where: { $0.id == id }) {
             VStack(spacing: 0) {
-                WorkerHeader(worker: worker, confirmStop: $confirmStop.on)
-                if worker.isActive, worker.live, let number = worker.number {
+                WorkerHeader(worker: worker, confirmStop: $confirmStop.on, changes: changesBinding(worker),
+                             comments: model.reviews[AppModel.workerKey(repo, worker)]?.count ?? 0)
+                if model.changesShown.contains(AppModel.workerKey(repo, worker)) {
+                    ChangesView(repo: repo, worker: worker)
+                } else if worker.isActive, worker.live, let number = worker.number {
                     LiveTerminal(target: .worker(id: number), repo: repo)
                     HStack(spacing: 10) {
                         Image(systemName: "info.circle")
@@ -811,11 +814,23 @@ struct WorkerPanel: View {
                                    description: Text("Its row left the ledger. Pick another Worker or the Orchestrator."))
         }
     }
+
+    private func changesBinding(_ worker: WorkerRow) -> Binding<Bool> {
+        Binding {
+            model.changesShown.contains(AppModel.workerKey(repo, worker))
+        } set: { shown in
+            model.showChanges(shown, repo: repo, worker: worker)
+        }
+    }
 }
 
 struct WorkerHeader: View {
     let worker: WorkerRow
     @Binding var confirmStop: Bool
+    /// Showing the Worker's Changes rather than its terminal or Final Report.
+    @Binding var changes: Bool
+    /// Review comments not sent yet.
+    let comments: Int
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -830,6 +845,13 @@ struct WorkerHeader: View {
                 .foregroundStyle(worker.markColor)
                 .padding(.leading, 4)
                 Spacer(minLength: 8)
+                Picker("Show", selection: $changes) {
+                    Text(worker.isActive && worker.live ? "Terminal" : "Final Report").tag(false)
+                    Text(comments > 0 ? "Changes (\(comments))" : "Changes").tag(true)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .fixedSize()
                 if worker.isActive, worker.live {
                     Button("Stop Worker") { confirmStop = true }.buttonStyle(.ledger)
                 }
