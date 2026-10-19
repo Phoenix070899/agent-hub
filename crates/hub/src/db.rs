@@ -57,6 +57,8 @@ pub struct Worker {
     pub agent_id: Option<i64>,
     /// When the human cleared it from Echo's Done list; it stays in the database.
     pub dismissed_at: Option<i64>,
+    /// The fan-out it is one try of: Workers given the same Task, each in its own worktree.
+    pub fanout: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -146,6 +148,9 @@ pub fn open(path: &Path) -> Result<Connection> {
     if !has_column(&conn, "workers", "dismissed_at")? {
         conn.execute_batch("alter table workers add column dismissed_at integer")?;
     }
+    if !has_column(&conn, "workers", "fanout")? {
+        conn.execute_batch("alter table workers add column fanout text")?;
+    }
     // A repo's one Orchestrator from before agents becomes its first agent, Workers and all.
     conn.execute_batch(
         "insert into agents (repo, kind, model, session_id, created_at)
@@ -165,7 +170,7 @@ fn has_column(conn: &Connection, table: &str, column: &str) -> Result<bool> {
 }
 
 const WORKER_COLUMNS: &str = "id, repo, profile, title, cwd, branch, session_id, state, final_report, \
-                              created_at, settled_at, closed_at, last_message_at, agent_id, dismissed_at";
+                              created_at, settled_at, closed_at, last_message_at, agent_id, dismissed_at, fanout";
 
 fn worker_row(row: &Row) -> rusqlite::Result<Worker> {
     Ok(Worker {
@@ -184,6 +189,7 @@ fn worker_row(row: &Row) -> rusqlite::Result<Worker> {
         last_message_at: row.get(12)?,
         agent_id: row.get(13)?,
         dismissed_at: row.get(14)?,
+        fanout: row.get(15)?,
     })
 }
 
@@ -212,12 +218,13 @@ pub struct NewWorker<'a> {
     pub branch: Option<&'a str>,
     pub session_id: &'a str,
     pub agent: Option<i64>,
+    pub fanout: Option<&'a str>,
 }
 
 pub fn insert_worker(conn: &Connection, w: &NewWorker) -> Result<i64> {
     conn.execute(
-        "insert into workers (repo, profile, title, spec, cwd, branch, session_id, state, created_at, agent_id)
-         values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        "insert into workers (repo, profile, title, spec, cwd, branch, session_id, state, created_at, agent_id, fanout)
+         values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         params![
             w.repo,
             w.profile,
@@ -228,7 +235,8 @@ pub fn insert_worker(conn: &Connection, w: &NewWorker) -> Result<i64> {
             w.session_id,
             state::STARTING,
             now(),
-            w.agent
+            w.agent,
+            w.fanout
         ],
     )?;
     Ok(conn.last_insert_rowid())
@@ -514,6 +522,7 @@ mod tests {
                 branch: None,
                 session_id: "sid",
                 agent: None,
+                fanout: None,
             },
         )
         .unwrap();
@@ -566,6 +575,7 @@ mod tests {
                     branch: None,
                     session_id: "s",
                     agent: Some(agent),
+                    fanout: None,
                 },
             )
             .unwrap();

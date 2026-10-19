@@ -29,6 +29,9 @@ struct HubApp: App {
                     .keyboardShortcut("n")
                 Button("New Terminal…") { model.showNewSession(repo: model.selectedRepo, kind: .claude) }
                     .keyboardShortcut("n", modifiers: [.command, .shift])
+                Button("Fan Out a Task…") { model.showFanOut() }
+                    .keyboardShortcut("n", modifiers: [.command, .option])
+                    .disabled(model.selectedRepo == nil)
             }
             CommandMenu("Session") {
                 Button("Quick Open…") { model.quickOpenShown = true }

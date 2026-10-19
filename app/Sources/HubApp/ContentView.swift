@@ -44,6 +44,8 @@ struct ContentView: View {
                 RenameModal(agent: agent)
             } else if model.quickOpenShown {
                 QuickOpen()
+            } else if model.fanOutShown {
+                FanOutModal()
             }
         }
         .confirmationDialog(closeTitle, isPresented: closingShown, presenting: model.closing) { agent in
@@ -247,6 +249,12 @@ struct NewSessionMenu: View {
                 Text("Terminal")
                 Text("Claude Code on its own, in your multiplexer")
             }
+            Divider()
+            Button { model.showFanOut() } label: {
+                Text("Fan Out a Task")
+                Text("Several Workers try it; you keep one")
+            }
+            .disabled(model.selectedRepo == nil)
         } label: {
             Image(systemName: "plus")
                 .font(.system(size: 12, weight: .semibold))
@@ -783,10 +791,12 @@ struct WorkerPanel: View {
     var body: some View {
         if let worker = model.snapshot(repo).workers.first(where: { $0.id == id }) {
             VStack(spacing: 0) {
-                WorkerHeader(worker: worker, confirmStop: $confirmStop.on, changes: changesBinding(worker),
+                WorkerHeader(worker: worker, confirmStop: $confirmStop.on, view: viewBinding(worker),
                              comments: model.reviews[AppModel.workerKey(repo, worker)]?.count ?? 0)
-                if model.changesShown.contains(AppModel.workerKey(repo, worker)) {
+                if model.workerView(repo, worker) == .changes {
                     ChangesView(repo: repo, worker: worker)
+                } else if model.workerView(repo, worker) == .compare, let fanout = worker.fanout {
+                    CompareView(repo: repo, fanout: fanout)
                 } else if worker.isActive, worker.live, let number = worker.number {
                     LiveTerminal(target: .worker(id: number), repo: repo)
                     HStack(spacing: 10) {
@@ -815,11 +825,11 @@ struct WorkerPanel: View {
         }
     }
 
-    private func changesBinding(_ worker: WorkerRow) -> Binding<Bool> {
+    private func viewBinding(_ worker: WorkerRow) -> Binding<WorkerView> {
         Binding {
-            model.changesShown.contains(AppModel.workerKey(repo, worker))
-        } set: { shown in
-            model.showChanges(shown, repo: repo, worker: worker)
+            model.workerView(repo, worker)
+        } set: { view in
+            model.show(view, repo: repo, worker: worker)
         }
     }
 }
@@ -827,8 +837,8 @@ struct WorkerPanel: View {
 struct WorkerHeader: View {
     let worker: WorkerRow
     @Binding var confirmStop: Bool
-    /// Showing the Worker's Changes rather than its terminal or Final Report.
-    @Binding var changes: Bool
+    /// Its terminal or Final Report, its Changes, or its fan-out compared.
+    @Binding var view: WorkerView
     /// Review comments not sent yet.
     let comments: Int
 
@@ -845,9 +855,12 @@ struct WorkerHeader: View {
                 .foregroundStyle(worker.markColor)
                 .padding(.leading, 4)
                 Spacer(minLength: 8)
-                Picker("Show", selection: $changes) {
-                    Text(worker.isActive && worker.live ? "Terminal" : "Final Report").tag(false)
-                    Text(comments > 0 ? "Changes (\(comments))" : "Changes").tag(true)
+                Picker("Show", selection: $view) {
+                    Text(worker.isActive && worker.live ? "Terminal" : "Final Report").tag(WorkerView.main)
+                    Text(comments > 0 ? "Changes (\(comments))" : "Changes").tag(WorkerView.changes)
+                    if worker.fanout != nil {
+                        Text("Compare").tag(WorkerView.compare)
+                    }
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()

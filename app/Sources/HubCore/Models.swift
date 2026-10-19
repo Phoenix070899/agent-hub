@@ -177,6 +177,8 @@ public struct WorkerRow: Decodable, Equatable, Identifiable, Sendable {
     public let agent: Int?
     /// When it settled (Unix seconds); nil while it works.
     public let settledAt: Int?
+    /// The fan-out it is one try of: Workers given the same Task, each on its own branch.
+    public let fanout: String?
 
     /// The daemon's numeric id, as `decide` and `attach` take it.
     public var number: Int? { Int(id.dropFirst()) }
@@ -395,4 +397,28 @@ public func issueReference(_ typed: String) -> String? {
         return text
     }
     return nil
+}
+
+/// An Agent Profile a Worker can run as, from `profiles.list`.
+public struct WorkerProfile: Decodable, Equatable, Identifiable, Sendable {
+    public let name: String
+    public let description: String
+    public let model: String
+    /// It edits files, so tries of one Task by it differ and are worth comparing.
+    public let writes: Bool
+
+    public var id: String { name }
+}
+
+/// A fan-out's branch named after its Task: "Fix the flaky bench!" is `feat/fix-the-flaky-bench`.
+/// Each try then works on it with `-1`, `-2` and so on after it.
+public func fanoutBranch(_ title: String) -> String {
+    let words = title.lowercased()
+        .split { !($0.isASCII && ($0.isLetter || $0.isNumber)) }
+        .map(String.init)
+    var task = ""
+    for word in words where task.count + word.count < 40 {
+        task += (task.isEmpty ? "" : "-") + word
+    }
+    return "feat/" + (task.isEmpty ? "task" : task)
 }

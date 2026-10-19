@@ -89,6 +89,9 @@ struct QuickOpen: View {
             QuickOpenItem(id: "new-terminal", icon: "plus", title: "New Terminal", detail: "Command, Claude Code on its own") {
                 model.showNewSession(repo: model.selectedRepo, kind: .claude)
             },
+            QuickOpenItem(id: "fan-out", icon: "arrow.triangle.branch", title: "Fan Out a Task", detail: "Command, several Workers try it") {
+                model.showFanOut()
+            },
             QuickOpenItem(id: "ledger", icon: "sidebar.left", title: model.ledgerHidden ? "Show Ledger" : "Hide Ledger", detail: "Command") {
                 model.ledgerHidden.toggle()
             },
@@ -102,6 +105,12 @@ struct QuickOpen: View {
                                        detail: "Command, \(worker.id)'s diff") {
                 model.toggleChanges()
             }, at: 2)
+            if worker.fanout != nil, let (repo, _) = model.selectedWorker {
+                items.insert(QuickOpenItem(id: "compare", icon: "rectangle.split.3x1", title: "Compare Tries",
+                                           detail: "Command, every try of \(worker.id)'s Task") {
+                    model.show(.compare, repo: repo, worker: worker)
+                }, at: 3)
+            }
         }
         for session in model.sessions {
             let repo = session.repo

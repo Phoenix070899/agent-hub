@@ -115,6 +115,33 @@ pub fn diff(repo: &Path, cwd: &Path, worktree: bool) -> Result<(String, bool)> {
     Ok((out, cut))
 }
 
+/// Commits everything uncommitted in `dir`, new files included. Returns whether there was any.
+pub fn commit_all(dir: &Path, message: &str) -> Result<bool> {
+    if git(dir, &["status", "--porcelain"])?.trim().is_empty() {
+        return Ok(false);
+    }
+    git(dir, &["add", "-A"])?;
+    git(dir, &["commit", "-qm", message])?;
+    Ok(true)
+}
+
+/// Merges `branch` into the repo's checked-out branch with a merge commit, and returns that
+/// branch's name. A merge that stops on conflicts is undone, so the repo is left as it was.
+pub fn merge(repo: &Path, branch: &str) -> Result<String> {
+    let into = git(repo, &["rev-parse", "--abbrev-ref", "HEAD"])?.trim().to_string();
+    if let Err(error) = git(repo, &["merge", "--no-ff", "--no-edit", branch]) {
+        let _ = git(repo, &["merge", "--abort"]);
+        bail!("{branch} does not merge cleanly into {into}, so nothing was merged. {error:#}");
+    }
+    Ok(into)
+}
+
+/// Removes a Worker's worktree folder, uncommitted work and all; its branch stays.
+pub fn remove_worktree(repo: &Path, path: &Path) -> Result<()> {
+    git(repo, &["worktree", "remove", "--force", &path.display().to_string()])?;
+    Ok(())
+}
+
 /// Runs git in `dir` and returns what it printed; its error output when it fails.
 fn git(dir: &Path, args: &[&str]) -> Result<String> {
     let output = Command::new("git")

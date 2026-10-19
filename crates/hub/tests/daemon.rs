@@ -660,6 +660,84 @@ fn a_worker_diff_shows_its_branch_and_a_review_reaches_it() {
 }
 
 #[test]
+fn a_fan_out_runs_one_task_three_ways_and_the_pick_is_merged() {
+    let hub = Hub::new("fanout");
+    hub.ok(&["status"]);
+    let profiles = hub.call("profiles.list", serde_json::json!({}));
+    let naruto = profiles["result"]["profiles"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["name"] == "naruto")
+        .cloned();
+    assert_eq!(
+        naruto.map(|p| p["writes"].clone()),
+        Some(serde_json::json!(true)),
+        "{profiles}"
+    );
+    let fanned = hub.call(
+        "worker.fanout",
+        serde_json::json!({ "repo": hub.repo_key(), "profile": "bash", "spec": "done", "title": "Try it",
+                            "branch": "feat/try", "count": 3 }),
+    );
+    assert_eq!(
+        fanned["result"]["workers"],
+        serde_json::json!(["w1", "w2", "w3"]),
+        "{fanned}"
+    );
+    let workers =
+        || hub.call("worker.list", serde_json::json!({ "repo": hub.repo_key() }))["result"]["workers"].clone();
+    hub.eventually("every try to finish", || {
+        workers().as_array().unwrap().iter().all(|w| w["state"] == "done")
+    });
+    let tries = workers();
+    let by_branch = |branch: &str| {
+        let row = tries
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|w| w["branch"] == branch)
+            .unwrap();
+        (
+            row["id"].as_str().unwrap().to_string(),
+            PathBuf::from(row["cwd"].as_str().unwrap()),
+        )
+    };
+    let (winner_id, winner) = by_branch("feat/try-2");
+    let (_, loser) = by_branch("feat/try-1");
+    std::fs::write(winner.join("picked.txt"), "picked\n").unwrap();
+    hub.wait();
+
+    let number: i64 = winner_id[1..].parse().unwrap();
+    let picked = hub.call("worker.pick", serde_json::json!({ "id": number }));
+    assert_eq!(picked["result"]["into"], "main", "{picked}");
+    assert_eq!(picked["result"]["closed"].as_array().unwrap().len(), 2, "{picked}");
+    assert_eq!(
+        std::fs::read_to_string(hub.repo.join("picked.txt")).unwrap(),
+        "picked\n"
+    );
+    assert!(!loser.exists(), "the losing worktree is removed");
+    let ids: Vec<String> = snapshot(&hub)["workers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|w| w["id"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(ids, vec![winner_id.clone()], "only the kept try stays in Echo");
+    assert!(
+        git(&hub.repo, &["branch", "--list", "feat/try-1"]).contains("feat/try-1"),
+        "its branch stays"
+    );
+    let messages = hub.wait();
+    assert!(
+        messages.contains(&format!(
+            "The human picked {winner_id} of a fan-out in Echo and merged feat/try-2 into main."
+        )),
+        "{messages}"
+    );
+}
+
+#[test]
 fn simultaneous_starts_leave_one_daemon() {
     let hub = Hub::new("race");
     let starts: Vec<_> = (0..10)

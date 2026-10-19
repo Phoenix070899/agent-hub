@@ -127,6 +127,13 @@ Binary files a/logo.png and /dev/null differ
     #expect(body == "README.md:2\n> worker line\nSay why.\n\nREADME.md:2 (removed)\n> old line\nKeep this")
 }
 
+@Test func aFanoutBranchIsNamedAfterItsTask() {
+    #expect(fanoutBranch("Fix the flaky bench!") == "feat/fix-the-flaky-bench")
+    #expect(fanoutBranch("Ünïcode & spaces  ") == "feat/n-code-spaces")
+    #expect(fanoutBranch("???") == "feat/task")
+    #expect(fanoutBranch(String(repeating: "word ", count: 20)).count <= 45)
+}
+
 @Test func oneWorkerIsSingular() {
     #expect(workers(1, "running") == "1 Worker running")
     #expect(workers(3, "at work") == "3 Workers at work")

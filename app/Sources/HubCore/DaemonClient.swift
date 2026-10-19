@@ -135,6 +135,30 @@ public struct DaemonClient: Sendable {
         return (diff, result?["truncated"] as? Bool ?? false)
     }
 
+    public func profiles() throws -> [WorkerProfile] {
+        let result = try call("profiles.list") as? [String: Any]
+        let data = try JSONSerialization.data(withJSONObject: result?["profiles"] ?? [])
+        return try JSONDecoder().decode([WorkerProfile].self, from: data)
+    }
+
+    /// Starts `count` Workers on one Task, each in its own worktree on `<branch>-<n>`. Returns
+    /// their ids, and why any of them could not start.
+    public func fanOut(repo: String, agent: Int?, profile: String, title: String, spec: String,
+                       branch: String, count: Int) throws -> (workers: [String], failed: [String]) {
+        var params: [String: Any] = ["repo": repo, "profile": profile, "title": title, "spec": spec,
+                                     "branch": branch, "count": count]
+        if let agent { params["agent"] = agent }
+        let result = try call("worker.fanout", params) as? [String: Any]
+        return (result?["workers"] as? [String] ?? [], result?["failed"] as? [String] ?? [])
+    }
+
+    /// Keeps one try of a fan-out: merges its branch, closes the others. Returns the branch and
+    /// the branch it went into.
+    public func pickWorker(_ id: Int) throws -> (branch: String, into: String) {
+        let result = try call("worker.pick", ["id": id]) as? [String: Any]
+        return (result?["branch"] as? String ?? "", result?["into"] as? String ?? "")
+    }
+
     /// Sends the human's review of a Worker's changes to the Worker itself or its Orchestrator.
     public func reviewWorker(_ id: Int, toWorker: Bool, body: String) throws {
         try call("worker.review", ["id": id, "to": toWorker ? "worker" : "orchestrator", "body": body])

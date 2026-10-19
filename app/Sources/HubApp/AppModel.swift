@@ -132,7 +132,7 @@ final class AppModel: ObservableObject {
     /// Quick open (⌘K) is up.
     @Published var quickOpenShown = false
     /// While a modal is up, terminals hand it the keyboard.
-    var modalShown: Bool { newSession != nil || renaming != nil || closing != nil || quickOpenShown }
+    var modalShown: Bool { newSession != nil || renaming != nil || closing != nil || quickOpenShown || fanOutShown }
     /// Hides the ledger so the terminal takes the whole window.
     @Published var ledgerHidden = false
     /// Agent groups folded in the ledger.
@@ -694,16 +694,19 @@ final class AppModel: ObservableObject {
 
     // MARK: Changes: a Worker's diff and the human's review of it
 
-    /// Workers showing Changes instead of their terminal or Final Report, as "repo|w12".
-    @Published var changesShown: Set<String> = []
+    /// What each Worker's panel shows when not its terminal or Final Report, by "repo|w12".
+    @Published var workerViews: [String: WorkerView] = [:]
     /// Review comments not sent yet, per Worker ("repo|w12"), kept while the human looks elsewhere.
     @Published var reviews: [String: [ReviewComment]] = [:]
 
     static func workerKey(_ repo: String, _ worker: WorkerRow) -> String { "\(repo)|\(worker.id)" }
 
-    func showChanges(_ shown: Bool, repo: String, worker: WorkerRow) {
-        let key = Self.workerKey(repo, worker)
-        if shown { changesShown.insert(key) } else { changesShown.remove(key) }
+    func workerView(_ repo: String, _ worker: WorkerRow) -> WorkerView {
+        workerViews[Self.workerKey(repo, worker)] ?? .main
+    }
+
+    func show(_ view: WorkerView, repo: String, worker: WorkerRow) {
+        workerViews[Self.workerKey(repo, worker)] = view == .main ? nil : view
     }
 
     /// The Worker on screen, if a Worker is.
@@ -714,13 +717,71 @@ final class AppModel: ObservableObject {
     }
 
     var changesSelected: Bool {
-        selectedWorker.map { changesShown.contains(Self.workerKey($0.repo, $0.worker)) } ?? false
+        selectedWorker.map { workerView($0.repo, $0.worker) == .changes } ?? false
     }
 
     /// ⌥⌘D: the selected Worker's Changes, or back to its terminal or Final Report.
     func toggleChanges() {
         guard let (repo, worker) = selectedWorker else { return }
-        showChanges(!changesSelected, repo: repo, worker: worker)
+        show(changesSelected ? .main : .changes, repo: repo, worker: worker)
+    }
+
+    // MARK: Fan-outs: one Task, several Workers, one kept
+
+    @Published var fanOutShown = false
+    /// What keeping a try did, by fan-out, shown on the Compare view after the others close.
+    @Published var kept: [String: String] = [:]
+
+    func showFanOut() {
+        guard selectedRepo != nil else { return showNewSession() }
+        fanOutShown = true
+    }
+
+    /// The selected repo's Orchestrator a fan-out reports to: the one on screen, else the first live one.
+    var fanOutOrchestrator: Agent? {
+        guard let repo = selectedRepo else { return nil }
+        let orchestrators = agents(repo).filter(\.isOrchestrator)
+        let shown: Int? = switch selection {
+        case .agent(_, let id)?: id
+        case .worker(_, let id)?: snapshot(repo).workers.first { $0.id == id }?.agent
+        case nil: nil
+        }
+        return orchestrators.first { $0.id == shown } ?? orchestrators.first(where: \.live) ?? orchestrators.first
+    }
+
+    func loadProfiles(then done: @escaping @MainActor ([WorkerProfile]) -> Void) {
+        background(quiet: true) { client in try client.profiles() } then: { done($0) }
+    }
+
+    /// Starts the fan-out; `done` gets nil on success, else why it failed. The first try is shown.
+    func fanOut(repo: String, agent: Int?, profile: String, title: String, spec: String, branch: String,
+                count: Int, then done: @escaping @MainActor (String?) -> Void) {
+        let client = client
+        Thread.detachNewThread {
+            let result = Result {
+                try client.fanOut(repo: repo, agent: agent, profile: profile, title: title, spec: spec,
+                                  branch: branch, count: count)
+            }
+            DispatchQueue.main.async {
+                switch result {
+                case .success(let started):
+                    if let first = started.workers.first { self.select(.worker(repo: repo, id: first)) }
+                    done(started.failed.isEmpty ? nil : "Some tries did not start: " + started.failed.joined(separator: "; "))
+                case .failure(let error):
+                    done("\(error)")
+                }
+            }
+        }
+    }
+
+    /// Keeps `worker`: merges its branch and closes the other tries.
+    func keep(_ worker: WorkerRow, repo: String) {
+        guard let number = worker.number, let fanout = worker.fanout else { return }
+        background { client in try client.pickWorker(number) } then: { picked in
+            self.select(.worker(repo: repo, id: worker.id))
+            self.show(.compare, repo: repo, worker: worker)
+            self.kept[fanout] = "Kept \(worker.id): merged \(picked.branch) into \(picked.into). The other tries are closed; their branches stay."
+        }
     }
 
     func loadDiff(_ worker: WorkerRow, then done: @escaping @MainActor (Result<(diff: String, truncated: Bool), Error>) -> Void) {
@@ -810,4 +871,13 @@ final class AppModel: ObservableObject {
 extension Notification.Name {
     /// Keys for the multiplexer on screen; the terminal showing one types them into it.
     static let muxKeys = Notification.Name("EchoMuxKeys")
+}
+
+/// What a Worker's panel shows.
+enum WorkerView: Hashable {
+    /// Its terminal while it works, else its Final Report.
+    case main
+    case changes
+    /// Every try of its fan-out side by side.
+    case compare
 }

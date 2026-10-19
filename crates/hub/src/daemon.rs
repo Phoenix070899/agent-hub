@@ -699,6 +699,15 @@ impl Hub {
                 Ok(json!({ "diff": diff, "truncated": cut, "branch": worker.branch, "cwd": worker.cwd }))
             }
             "worker.review" => self.review_worker(p),
+            "worker.fanout" => self.fan_out(p),
+            "profiles.list" => {
+                let profiles: Vec<Value> = profile::all(&self.hub_dir)?
+                    .iter()
+                    .map(|p| json!({ "name": p.name, "description": p.description, "model": p.model, "writes": p.writes }))
+                    .collect();
+                Ok(json!({ "profiles": profiles }))
+            }
+            "worker.pick" => self.pick_worker(id_param(p, "id")?),
             "send" => {
                 let worker = db::worker(&self.db(), id_param(p, "worker")?)?;
                 let message_kind = str_param(p, "kind")?;
@@ -870,7 +879,8 @@ impl Hub {
     }
 
     fn start_worker(self: &Arc<Self>, p: &Value) -> Result<Value> {
-        let repo_root = PathBuf::from(str_param(p, "repo")?);
+        // The repo's main checkout, as every other method keys it, whatever path names it.
+        let repo_root = repo::root(Path::new(str_param(p, "repo")?))?;
         let profile_name = str_param(p, "profile")?;
         profile::load(&self.hub_dir, profile_name)?;
         let spec = str_param(p, "spec")?;
@@ -910,6 +920,7 @@ impl Hub {
                 branch: branch.as_deref(),
                 session_id: &session_id,
                 agent,
+                fanout: p.get("fanout").and_then(Value::as_str),
             },
         )?;
         let worker = db::worker(&self.db(), id)?;
@@ -984,6 +995,84 @@ impl Hub {
         }
         self.notify();
         Ok(json!({}))
+    }
+
+    /// Starts `count` Workers on the same Task, each in its own worktree on `<branch>-<n>`, so the
+    /// human can compare them and keep one.
+    fn fan_out(self: &Arc<Self>, p: &Value) -> Result<Value> {
+        let count = id_param(p, "count")?;
+        if !(2..=5).contains(&count) {
+            bail!("a fan-out is 2 to 5 Workers");
+        }
+        let branch = str_param(p, "branch")?;
+        repo::parse_branch(branch)?;
+        let fanout = uuid::Uuid::new_v4().to_string();
+        let starts: Vec<_> = (1..=count)
+            .map(|n| {
+                let mut params = p.clone();
+                params["worktree"] = json!(format!("new:{branch}-{n}"));
+                params["fanout"] = json!(fanout);
+                let hub = Arc::clone(self);
+                std::thread::spawn(move || hub.start_worker(&params))
+            })
+            .collect();
+        let mut started = Vec::new();
+        let mut failed = Vec::new();
+        for start in starts {
+            match start.join().map_err(|_| anyhow::anyhow!("a start panicked"))? {
+                Ok(view) => started.push(view["id"].clone()),
+                Err(error) => failed.push(format!("{error:#}")),
+            }
+        }
+        if started.is_empty() {
+            bail!("no Worker started: {}", failed.join("; "));
+        }
+        started.sort_by_key(|id| id.as_str().and_then(|id| id[1..].parse::<i64>().ok()));
+        Ok(json!({ "fanout": fanout, "workers": started, "failed": failed }))
+    }
+
+    /// Keeps one try of a fan-out: commits what it left uncommitted, merges its branch into the
+    /// repo's checked-out branch, and closes the other tries and removes their worktrees (their
+    /// branches stay). The Orchestrator is told.
+    fn pick_worker(&self, id: i64) -> Result<Value> {
+        let winner = db::worker(&self.db(), id)?;
+        let fanout = winner
+            .fanout
+            .clone()
+            .with_context(|| format!("w{id} is not part of a fan-out"))?;
+        let branch = winner
+            .branch
+            .clone()
+            .with_context(|| format!("w{id} has no branch to merge"))?;
+        if state::is_live(&winner.state) {
+            bail!("w{id} is still working; pick it once it sends its Final Report or stops");
+        }
+        let repo = PathBuf::from(&winner.repo);
+        repo::commit_all(Path::new(&winner.cwd), &format!("{} (w{id})", winner.title))?;
+        let into = repo::merge(&repo, &branch)?;
+        let others: Vec<db::Worker> = db::workers(&self.db(), &winner.repo)?
+            .into_iter()
+            .filter(|w| w.id != id && w.fanout.as_deref() == Some(fanout.as_str()))
+            .collect();
+        for other in &others {
+            self.close_worker(other.id)?;
+            // Gone from Echo's Done list too: the kept try speaks for the Task.
+            db::mark_dismissed(&self.db(), other.id)?;
+            if other.branch.is_some() && Path::new(&other.cwd).exists() {
+                repo::remove_worktree(&repo, Path::new(&other.cwd))?;
+            }
+        }
+        let closed: Vec<String> = others.iter().map(|w| format!("w{}", w.id)).collect();
+        let mut note = format!("The human picked w{id} of a fan-out in Echo and merged {branch} into {into}.");
+        if !closed.is_empty() {
+            note += &format!(
+                " {} closed; their worktrees are removed, their branches kept.",
+                closed.join(", ")
+            );
+        }
+        db::insert_message(&self.db(), &winner, kind::HUMAN, &note)?;
+        self.notify();
+        Ok(json!({ "branch": branch, "into": into, "closed": closed }))
     }
 
     fn close_worker(&self, id: i64) -> Result<Value> {
@@ -1255,6 +1344,7 @@ impl Hub {
                 "effort": profile.as_ref().and_then(|p| p.effort.clone()),
                 "progress": progress,
                 "settledAt": worker.settled_at,
+                "fanout": worker.fanout,
             }));
         }
         let order = |row: &Value| match row["state"].as_str() {
