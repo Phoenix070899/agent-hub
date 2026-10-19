@@ -143,6 +143,32 @@ final class AppModel: ObservableObject {
     @Published var error: String?
     /// A short note shown under the title bar for a few seconds; see `note(_:)`.
     @Published var notice: String?
+
+    /// The Files column beside the terminal (⇧⌘E); remembered, hidden until first shown.
+    @Published var filesShown = UserDefaults.standard.bool(forKey: "filesShown") {
+        didSet { UserDefaults.standard.set(filesShown, forKey: "filesShown") }
+    }
+    /// Files `.gitignore` covers, shown too.
+    @Published var showIgnoredFiles = UserDefaults.standard.bool(forKey: "showIgnoredFiles") {
+        didSet {
+            UserDefaults.standard.set(showIgnoredFiles, forKey: "showIgnoredFiles")
+            for files in checkouts.values { files.start(showIgnored: showIgnoredFiles) }
+        }
+    }
+    /// Each checkout's open folders, remembered across selections and relaunches.
+    @Published var openFolderMap: [String: Set<String>] =
+        (UserDefaults.standard.dictionary(forKey: "openFolders") as? [String: [String]] ?? [:]).mapValues(Set.init) {
+        didSet { UserDefaults.standard.set(openFolderMap.mapValues { Array($0) }, forKey: "openFolders") }
+    }
+    /// The file shown over the terminal; Esc goes back.
+    @Published var preview: FileRef?
+    /// The tree's cursor in each checkout.
+    @Published var fileCursor: [String: String] = [:]
+    /// The Files tree has the keyboard, so the terminal lets go of it.
+    @Published var treeFocused = false
+    /// Bumped to move the keyboard to the Files tree.
+    @Published var filesFocusRequest = 0
+    var checkouts: [String: CheckoutFiles] = [:]
     private var noticeHide: DispatchWorkItem?
 
     /// Says why a key did nothing, for 4 seconds.
@@ -917,6 +943,102 @@ final class AppModel: ObservableObject {
 extension Notification.Name {
     /// Keys for the multiplexer on screen; the terminal showing one types them into it.
     static let muxKeys = Notification.Name("EchoMuxKeys")
+    /// Text for the terminal on screen, whatever it shows: into the focused tmux pane, or the agent.
+    static let typeIntoTerminal = Notification.Name("EchoTypeIntoTerminal")
+}
+
+/// A file in a checkout, by the checkout's folder and its path inside it.
+struct FileRef: Hashable {
+    let root: String
+    let path: String
+
+    var url: URL { URL(fileURLWithPath: root).appendingPathComponent(path) }
+    var name: String { (path as NSString).lastPathComponent }
+}
+
+extension AppModel {
+    // MARK: Files: the selected checkout's files, and the one being previewed
+
+    /// The folder the selection works in: an agent's or Worker's worktree, else the repo's checkout.
+    var selectedCheckout: String? {
+        switch selection {
+        case .agent(let repo, let id)?:
+            return agents(repo).first { $0.id == id }?.cwd ?? repo
+        case .worker(let repo, let id)?:
+            return snapshot(repo).workers.first { $0.id == id }?.cwd ?? repo
+        case nil:
+            return nil
+        }
+    }
+
+    /// Whether the terminal on screen is live, so a path can be typed into it.
+    var terminalTypeable: Bool {
+        switch selection {
+        case .agent(let repo, let id)?: return agents(repo).first { $0.id == id }?.live ?? false
+        case .worker(let repo, let id)?:
+            return snapshot(repo).workers.first { $0.id == id }.map { $0.isActive && $0.live } ?? false
+        case nil: return false
+        }
+    }
+
+    /// The checkout's files, read and watched from the first time they are asked for.
+    func checkoutFiles(_ root: String) -> CheckoutFiles {
+        if let files = checkouts[root] {
+            files.start(showIgnored: showIgnoredFiles)
+            return files
+        }
+        let files = CheckoutFiles(root: root)
+        checkouts[root] = files
+        files.start(showIgnored: showIgnoredFiles)
+        return files
+    }
+
+    func openFolders(_ root: String) -> Set<String> { openFolderMap[root] ?? [] }
+
+    func setFolder(_ folder: String, open: Bool, in root: String) {
+        var folders = openFolderMap[root] ?? []
+        if open { folders.insert(folder) } else { folders.remove(folder) }
+        openFolderMap[root] = folders
+    }
+
+    /// The file the Files menu commands act on: the one previewed, else the tree's cursor.
+    var fileInFocus: FileRef? {
+        if let preview, preview.root == selectedCheckout { return preview }
+        guard let root = selectedCheckout, let path = fileCursor[root] else { return nil }
+        return FileRef(root: root, path: path)
+    }
+
+    /// Types `@path ` into the terminal on screen and shows it, so the human sees it land.
+    func insertMention(_ file: FileRef) {
+        guard terminalTypeable else { return }
+        preview = nil
+        let text = mentionText(file.path)
+        // After the terminal takes the screen back.
+        DispatchQueue.main.async {
+            NotificationCenter.default.post(name: .typeIntoTerminal, object: Data(text.utf8))
+        }
+    }
+
+    func openInEditor(_ file: FileRef) { NSWorkspace.shared.open(file.url) }
+
+    func revealInFinder(_ file: FileRef) { NSWorkspace.shared.activateFileViewerSelecting([file.url]) }
+
+    func copyPath(_ file: FileRef) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(file.url.path, forType: .string)
+        note("Copied \(file.url.path)")
+    }
+
+    /// ⇧⌘E: shows the Files column and gives it the keyboard; shown but elsewhere, gives it the
+    /// keyboard; already in it, hides it and the terminal takes the keyboard back.
+    func toggleFiles() {
+        if filesShown && !treeFocused {
+            filesFocusRequest += 1
+            return
+        }
+        if !filesShown { filesFocusRequest += 1 }
+        withAnimation(.easeOut(duration: 0.15)) { filesShown.toggle() }
+    }
 }
 
 /// What a Worker's panel shows.

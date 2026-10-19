@@ -132,6 +132,25 @@ struct QuickOpen: View {
                 })
             }
         }
+        if model.filesShown {
+            items.append(QuickOpenItem(id: "ignored", icon: model.showIgnoredFiles ? "eye.slash" : "eye",
+                                       title: model.showIgnoredFiles ? "Hide Ignored Files" : "Show Ignored Files",
+                                       detail: "Command, files .gitignore covers") {
+                model.showIgnoredFiles.toggle()
+            })
+        }
+        // The selected checkout's files, after everything else, so a command or agent of the
+        // same name still comes first.
+        if let root = model.selectedCheckout {
+            for path in model.checkoutFiles(root).tree.files {
+                let dir = (path as NSString).deletingLastPathComponent
+                items.append(QuickOpenItem(id: "file \(path)", icon: "doc", title: (path as NSString).lastPathComponent,
+                                           detail: dir.isEmpty ? "File" : "File in \(dir)") {
+                    model.fileCursor[root] = path
+                    model.preview = FileRef(root: root, path: path)
+                })
+            }
+        }
         return items
     }
 

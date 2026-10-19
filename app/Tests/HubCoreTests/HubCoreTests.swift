@@ -143,6 +143,47 @@ Binary files a/logo.png and /dev/null differ
     #expect(smartCreateFrom("Magic link login", branches: branches) == .name("Magic link login"))
 }
 
+@Test func aFileTreeListsFoldersFirstAndOpensOnDemand() {
+    let tree = FileTree(paths: ["README.md", "src/b.swift", "src/a.swift", "src/ui/View.swift", "Package.swift"])
+    #expect(tree.rows(open: []).map(\.path) == ["src", "Package.swift", "README.md"])
+    #expect(tree.rows(open: ["src"]).map(\.path) == ["src", "src/ui", "src/a.swift", "src/b.swift", "Package.swift", "README.md"])
+    #expect(tree.rows(open: ["src", "src/ui"]).first { $0.name == "View.swift" }?.depth == 2)
+    var ignored = FileTree(paths: ["a.txt"], folders: ["node_modules/"])
+    #expect(ignored.rows(open: ["node_modules"]).map(\.path) == ["node_modules", "a.txt"])
+    ignored.fill("node_modules", with: [("left-pad", true), ("x.js", false)])
+    #expect(ignored.rows(open: ["node_modules"]).map(\.path) == ["node_modules", "node_modules/left-pad", "node_modules/x.js", "a.txt"])
+}
+
+@Test func gitStatusMarksEachPath() {
+    let marks = parseGitStatus(" M src/a.swift\0A  src/new.swift\0?? notes.txt\0 D gone.txt\0R  b.swift\0old.swift\0")
+    #expect(marks == ["src/a.swift": .modified, "src/new.swift": .added, "notes.txt": .untracked, "gone.txt": .deleted, "b.swift": .renamed])
+    #expect(folderHasChanges("src", in: marks))
+    #expect(!folderHasChanges("docs", in: marks))
+}
+
+@Test func filesAreToldApartForPreview() {
+    #expect(fileKind(path: "a.png", head: Data()) == .image)
+    #expect(fileKind(path: "a.pdf", head: Data()) == .pdf)
+    #expect(fileKind(path: "a.bin", head: Data([0x41, 0x00, 0x42])) == .binary)
+    #expect(fileKind(path: "README.md", head: Data("# hi".utf8)) == .markdown)
+    #expect(fileKind(path: "main.rs", head: Data("fn main() {}".utf8)) == .text)
+}
+
+@Test func aMentionIsEscapedLikeADroppedPath() {
+    #expect(mentionText("src/auth.ts") == "@src/auth.ts ")
+    #expect(mentionText("docs/My Notes.md") == "@docs/My\\ Notes.md ")
+}
+
+@Test func markdownSplitsIntoBlocks() {
+    let blocks = parseMarkdown("# Title\n\nOne\ntwo\n\n- a\n2. b\n> q\n---\n```sh\nls -la\n```")
+    #expect(blocks == [.heading(level: 1, text: "Title"), .paragraph("One two"), .bullet("a", ordered: nil),
+                       .bullet("b", ordered: 2), .quote("q"), .rule, .code("ls -la", language: "sh")])
+}
+
+@Test func changedLinesAreFoundByPosition() {
+    #expect(changedLines(old: ["a", "b", "c"], new: ["a", "B", "c", "d"]) == [1, 3])
+}
+
 @Test func oneWorkerIsSingular() {
     #expect(workers(1, "running") == "1 Worker running")
     #expect(workers(3, "at work") == "3 Workers at work")

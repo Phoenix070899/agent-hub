@@ -1386,6 +1386,8 @@ impl Hub {
                 "quietSeconds": (now - worker.last_message_at.unwrap_or(worker.created_at)).max(0),
                 "place": place(Path::new(repo), Path::new(&worker.cwd)),
                 "branch": worker.branch,
+                // Where it works, for Echo's Files column.
+                "cwd": worker.cwd,
                 "live": live.is_some(),
                 "blocker": blocker,
                 "openQuestions": open,

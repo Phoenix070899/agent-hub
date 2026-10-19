@@ -186,6 +186,8 @@ public struct WorkerRow: Decodable, Equatable, Identifiable, Sendable {
     public let settledAt: Int?
     /// The fan-out it is one try of: Workers given the same Task, each on its own branch.
     public let fanout: String?
+    /// The folder it works in; nil from a daemon older than the Files column.
+    public let cwd: String?
 
     /// The daemon's numeric id, as `decide` and `attach` take it.
     public var number: Int? { Int(id.dropFirst()) }

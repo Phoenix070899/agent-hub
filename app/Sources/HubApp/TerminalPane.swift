@@ -103,6 +103,15 @@ struct TerminalPane: NSViewRepresentable {
             self.client = client
             super.init()
             NotificationCenter.default.addObserver(self, selector: #selector(typeMuxKeys(_:)), name: .muxKeys, object: nil)
+            NotificationCenter.default.addObserver(self, selector: #selector(typeText(_:)), name: .typeIntoTerminal, object: nil)
+        }
+
+        /// Types text from the Files column into whatever this terminal shows: the agent, or the
+        /// multiplexer, which hands it to its focused pane.
+        @objc private func typeText(_ note: Notification) {
+            // Echo has one terminal on screen at a time; one not in a window is being torn down.
+            guard let text = note.object as? Data, let socket, view?.window != nil else { return }
+            DispatchQueue.global(qos: .userInteractive).async { try? socket.write(text) }
         }
 
         /// Types ⌘D's keys into this terminal when it shows a multiplexer in the key window.

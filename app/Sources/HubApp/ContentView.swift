@@ -33,6 +33,13 @@ struct ContentView: View {
                 }
                 MainPanel()
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
+                if model.filesShown, let root = model.selectedCheckout {
+                    FilesColumn(root: root)
+                        .frame(width: 280)
+                        .frame(maxHeight: .infinity)
+                        .ledgerSheet()
+                        .transition(.move(edge: .trailing).combined(with: .opacity))
+                }
             }
             .padding(.horizontal, 12)
             .padding(.bottom, 12)
@@ -594,6 +601,13 @@ struct MainPanel: View {
                 FirstLaunch()
             }
         }
+        // A previewed file covers the panel; the terminal stays attached underneath.
+        .overlay {
+            if let file = model.preview, file.root == model.selectedCheckout {
+                FilePreviewPanel(file: file, files: model.checkoutFiles(file.root))
+                    .background(Ledger.paper)
+            }
+        }
         .ledgerSheet()
     }
 }
@@ -657,7 +671,8 @@ struct LiveTerminal: View {
         Group {
             if let shown {
                 TerminalPane(target: shown, client: model.client, appearance: model.appearance,
-                             keyboard: !model.modalShown, gpu: model.gpuRendering)
+                             keyboard: !model.modalShown && model.preview == nil && !model.treeFocused,
+                             gpu: model.gpuRendering)
             } else {
                 Text("Starting the multiplexer…")
                     .font(.system(size: 12.5))

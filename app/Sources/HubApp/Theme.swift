@@ -36,6 +36,10 @@ enum Ledger {
     static let run = dynamic(0x2F5BE0, 0x7C9BFF)
     static let done = dynamic(0x23804B, 0x5BC48C)
     static let fail = dynamic(0xC63A2E, 0xF07A6F)
+    /// A file changed but not committed, in the Files column; amber, apart from added green.
+    static let changed = dynamic(0x9A6700, 0xE3B341)
+    /// Lines an agent just changed in an open preview, for a moment.
+    static let justChanged = dynamic(0xFFF4C2, 0x3A3418)
     static let okWash = dynamic(0xEAF5EE, 0x1C2E24)
     static let okInk = dynamic(0x1D5C38, 0x95DAB3)
     static let failWash = dynamic(0xFBECEB, 0x3A1F1D)

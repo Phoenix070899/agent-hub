@@ -42,6 +42,8 @@ struct HubApp: App {
                     .disabled(model.selectedRepo == nil)
                 Button(model.ledgerHidden ? "Show Ledger" : "Hide Ledger") { model.ledgerHidden.toggle() }
                     .keyboardShortcut("l")
+                Button(model.filesShown ? "Hide Files" : "Show Files") { model.toggleFiles() }
+                    .keyboardShortcut("e", modifiers: [.command, .shift])
                 Button(model.changesSelected ? "Hide Changes" : "Show Changes") { model.toggleChanges() }
                     .keyboardShortcut("d", modifiers: [.command, .option])
                     .disabled(model.selectedWorker == nil)
@@ -49,6 +51,16 @@ struct HubApp: App {
                     .keyboardShortcut("]", modifiers: [.command, .shift])
                 Button("Previous Repo") { model.cycleSession(forward: false) }
                     .keyboardShortcut("[", modifiers: [.command, .shift])
+                Divider()
+                Button("Open in Editor") { model.fileInFocus.map(model.openInEditor) }
+                    .keyboardShortcut("o")
+                    .disabled(model.fileInFocus == nil)
+                Button("Reveal in Finder") { model.fileInFocus.map(model.revealInFinder) }
+                    .keyboardShortcut("r", modifiers: [.command, .shift])
+                    .disabled(model.fileInFocus == nil)
+                Button("Copy Path") { model.fileInFocus.map(model.copyPath) }
+                    .keyboardShortcut("c", modifiers: [.command, .option])
+                    .disabled(model.fileInFocus == nil)
                 Divider()
                 Button("Split Pane Right") { model.splitPane(down: false) }
                     .keyboardShortcut("d")
