@@ -396,6 +396,7 @@ struct AgentGroupView: View {
                             SubHeader(title: "Running", count: group.running.count)
                             ForEach(showAllRunning.on ? group.running : Array(group.running.prefix(Self.runningShown))) { worker in
                                 LedgerRow(worker: worker, repo: repo)
+                                    .transition(.opacity)
                             }
                             if group.running.count > Self.runningShown {
                                 Button(showAllRunning.on ? "Show fewer" : "Show \(group.running.count - Self.runningShown) more") {
@@ -427,12 +428,15 @@ struct AgentGroupView: View {
                             }
                             ForEach(showAllDone.on ? group.settled : Array(group.settled.prefix(Self.doneShown))) { worker in
                                 LedgerRow(worker: worker, repo: repo)
+                                    .transition(.opacity)
                             }
                         }
                     }
     }
                 .padding(.top, 6)
                 .padding(.bottom, 4)
+                // A Worker starting, settling, or leaving slides the rows below it instead of jumping.
+                .animation(.easeInOut(duration: 0.2), value: (group.running + group.settled).map(\.id))
             }
         }
         .padding(.bottom, model.showsContent(group) ? 8 : 0)
@@ -1019,12 +1023,27 @@ struct LedgerRow: View {
                         .monospacedDigit()
                         .foregroundStyle(Ledger.ink3)
                 }
-                if selected || hovering.on, let line = detailLine {
-                    Text(line)
-                        .font(.system(size: 12.5))
-                        .foregroundStyle(Ledger.ink2)
-                        .lineLimit(1)
-                        .padding(.leading, 8 + 8 + 32 + 8)
+                // Always drawn when there is something to say, never only on hover or selection,
+                // so a row keeps its height and the list below it never jumps.
+                if worker.branch != nil || detailLine != nil {
+                    HStack(spacing: 8) {
+                        if let branch = worker.branch {
+                            Text(branch)
+                                .font(.system(size: 11.5, design: .monospaced))
+                                .foregroundStyle(Ledger.ink3)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                                .layoutPriority(1)
+                        }
+                        if let line = detailLine {
+                            Text(line)
+                                .font(.system(size: 12))
+                                .foregroundStyle(Ledger.ink2)
+                                .lineLimit(1)
+                                .contentTransition(.opacity)
+                        }
+                    }
+                    .padding(.leading, 8 + 8)
                 }
             }
             .padding(.leading, 34)
@@ -1036,6 +1055,9 @@ struct LedgerRow: View {
                 if selected { Rectangle().fill(Ledger.run).frame(width: 3) }
             }
             .contentShape(Rectangle())
+            .animation(.easeOut(duration: 0.15), value: selected)
+            .animation(.easeOut(duration: 0.12), value: hovering.on)
+            .animation(.easeInOut(duration: 0.2), value: detailLine)
         }
         .buttonStyle(.plain)
         .onHover { hovering.on = $0 }
@@ -1050,7 +1072,8 @@ struct LedgerRow: View {
 
     private var detailLine: String? {
         if let progress = worker.progress { return progress }
-        if !worker.isActive { return worker.phaseLabel }
+        // Under Done, "Done" says nothing; Failed or Blocked does.
+        if !worker.isActive && worker.isTrouble { return worker.phaseLabel }
         return nil
     }
 }
