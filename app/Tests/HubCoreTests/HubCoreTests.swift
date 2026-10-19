@@ -355,3 +355,21 @@ func row(_ id: String, phase: String, quiet: Int, model: String? = nil, effort: 
     #expect(TerminalTarget.worker(id: 21).label == "w21")
     #expect(TerminalTarget.shell(id: 7).params["shell"] as? Int == 7)
 }
+
+@Test(.timeLimit(.minutes(1))) func readsALineThatArrivesInTwoReads() throws {
+    var fds: [Int32] = [0, 0]
+    #expect(socketpair(AF_UNIX, SOCK_STREAM, 0, &fds) == 0)
+    let socket = HubSocket(fd: fds[0])
+    defer { close(fds[1]) }
+    let line = Data(repeating: UInt8(ascii: "x"), count: 40 * 1024)
+    let writer = Thread {
+        _ = line.withUnsafeBytes { Darwin.write(fds[1], $0.baseAddress!, 1000) }
+        usleep(100_000)
+        var rest = line.dropFirst(1000)
+        rest.append(contentsOf: "\nnext\n".utf8)
+        _ = rest.withUnsafeBytes { Darwin.write(fds[1], $0.baseAddress!, $0.count) }
+    }
+    writer.start()
+    #expect(try socket.readLine() == line)
+    #expect(try socket.readLine() == Data("next".utf8))
+}
