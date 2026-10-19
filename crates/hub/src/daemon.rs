@@ -487,6 +487,7 @@ impl Hub {
             "live": self.agent_is_live(agent.id),
             "branch": agent.branch,
             "cwd": agent.cwd,
+            "head": repo::head_branch(Path::new(agent.home())),
         })
     }
 

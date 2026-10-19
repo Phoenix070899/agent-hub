@@ -222,6 +222,21 @@ pub fn remove_worktree(repo: &Path, path: &Path) -> Result<()> {
 }
 
 /// Runs git in `dir` and returns what it printed; its error output when it fails.
+/// The branch checked out in `dir` (a repo's checkout or one of its worktrees); None when HEAD
+/// is detached or `dir` is not a checkout. Reads `.git` directly: Echo asks every few seconds.
+pub fn head_branch(dir: &Path) -> Option<String> {
+    let dot_git = dir.join(".git");
+    let git_dir = if dot_git.is_dir() {
+        dot_git
+    } else {
+        // A worktree's `.git` is a file: "gitdir: <path>".
+        let link = std::fs::read_to_string(&dot_git).ok()?;
+        dir.join(link.strip_prefix("gitdir:")?.trim())
+    };
+    let head = std::fs::read_to_string(git_dir.join("HEAD")).ok()?;
+    head.trim().strip_prefix("ref: refs/heads/").map(String::from)
+}
+
 fn git(dir: &Path, args: &[&str]) -> Result<String> {
     let output = Command::new("git")
         .arg("-C")
@@ -250,5 +265,24 @@ mod tests {
         assert!(parse_branch("feat/").is_err());
         assert!(parse_branch("feat/a/b").is_err());
         assert!(parse_branch("login").is_err());
+    }
+
+    #[test]
+    fn head_branch_reads_a_checkout_and_its_worktrees() {
+        let dir = std::env::temp_dir().join(format!("hub-head-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let main = dir.join("main");
+        std::fs::create_dir_all(&main).unwrap();
+        let run = |args: &[&str]| git(&main, args).unwrap();
+        run(&["init", "-q", "-b", "plan/rag"]);
+        run(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "init"]);
+        let tree = dir.join("tree");
+        run(&["worktree", "add", "-q", "-b", "feat/x", tree.to_str().unwrap()]);
+        assert_eq!(head_branch(&main).as_deref(), Some("plan/rag"));
+        assert_eq!(head_branch(&tree).as_deref(), Some("feat/x"));
+        run(&["checkout", "-q", "--detach"]);
+        assert_eq!(head_branch(&main), None, "a detached HEAD has no branch");
+        assert_eq!(head_branch(&dir), None, "not a checkout");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
