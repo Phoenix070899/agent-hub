@@ -361,9 +361,22 @@ public func parseMarkdownLines(_ source: String) -> (blocks: [MarkdownBlock], li
         paragraph = join(paragraph, raw)
     }
     flush()
+    // An ordered list counts up from its first number, however its items are numbered ("1." each).
+    var counts: [Int: Int] = [:]
     let unmarked = blocks.map { block in
-        guard case .bullet(let text, let number, let depth, let checked) = block else { return block }
-        return MarkdownBlock.bullet(unmark(text), ordered: number, depth: depth, checked: checked)
+        guard case .bullet(let text, let number, let depth, let checked) = block else {
+            counts = [:]
+            return block
+        }
+        counts = counts.filter { $0.key <= depth }
+        var shown = number
+        if let number {
+            shown = counts[depth].map { $0 + 1 } ?? number
+            counts[depth] = shown
+        } else {
+            counts[depth] = nil
+        }
+        return MarkdownBlock.bullet(unmark(text), ordered: shown, depth: depth, checked: checked)
     }
     return (unmarked, spans)
 }

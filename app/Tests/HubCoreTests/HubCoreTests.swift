@@ -516,3 +516,11 @@ func row(_ id: String, phase: String, quiet: Int, model: String? = nil, effort: 
     Shorter
     """)
 }
+
+@Test func anOrderedListCountsUpHoweverItIsNumbered() {
+    let numbers = parseMarkdown("1. a\n1. b\n   - x\n   1. y\n   1. z\n1. c\n\nText\n\n3. d\n3. e").compactMap { block -> Int? in
+        if case .bullet(_, let number, _, _) = block { return number }
+        return nil
+    }
+    #expect(numbers == [1, 2, 1, 2, 3, 3, 4])
+}

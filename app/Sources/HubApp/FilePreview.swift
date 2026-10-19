@@ -474,7 +474,6 @@ private struct MarkdownView: View {
             .foregroundStyle(Ledger.ink)
             .fixedSize(horizontal: false, vertical: true)
             .textSelection(.enabled)
-            .frame(maxWidth: 760, alignment: .leading)
             .padding(.horizontal, 40)
             .padding(.vertical, 28)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -622,52 +621,102 @@ private struct NoteableBlock<Content: View>: View {
 }
 
 /// A Markdown table: a header band, ruled rows, each column aligned as its delimiter says.
-/// Long cells wrap; a table wider than the page scrolls sideways.
+/// Columns take the width their text needs; when that is more than the page, long cells wrap.
 private struct MarkdownTable: View {
     let header: [String]
     let rows: [[String]]
     let alignments: [TableAlignment]
 
     var body: some View {
-        ScrollView(.horizontal) {
-            Grid(alignment: .topLeading, horizontalSpacing: 0, verticalSpacing: 0) {
-                GridRow {
-                    ForEach(header.indices, id: \.self) { column in
-                        cell(header[column], column: column).fontWeight(.semibold)
-                    }
-                }
-                .background(Ledger.wash)
-                ForEach(rows.indices, id: \.self) { row in
-                    Rectangle().fill(Ledger.rule).frame(height: 1).gridCellUnsizedAxes(.horizontal)
-                    GridRow {
-                        ForEach(header.indices, id: \.self) { column in
-                            cell(rows[row][column], column: column)
-                        }
-                    }
+        TableLayout(columns: header.count) {
+            ForEach(header.indices, id: \.self) { column in
+                cell(header[column], row: -1, column: column).fontWeight(.semibold)
+            }
+            ForEach(rows.indices, id: \.self) { row in
+                ForEach(header.indices, id: \.self) { column in
+                    cell(rows[row][column], row: row, column: column)
                 }
             }
-            .fixedSize(horizontal: false, vertical: true)
-            .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).strokeBorder(Ledger.rule))
-            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
         }
-        .scrollIndicators(.hidden)
+        .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).strokeBorder(Ledger.rule))
+        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
     }
 
-    private func cell(_ text: String, column: Int) -> some View {
+    private func cell(_ text: String, row: Int, column: Int) -> some View {
         let alignment: Alignment = switch alignments[column] {
-        case .leading: .leading
-        case .center: .center
-        case .trailing: .trailing
+        case .leading: .topLeading
+        case .center: .top
+        case .trailing: .topTrailing
         }
         return Text(inlineMarkdown(text))
             .font(.system(size: 13))
             .lineSpacing(2)
-            .multilineTextAlignment(alignment == .trailing ? .trailing : alignment == .center ? .center : .leading)
-            .frame(maxWidth: 340, alignment: alignment)
+            .multilineTextAlignment(alignment == .topTrailing ? .trailing : alignment == .top ? .center : .leading)
             .fixedSize(horizontal: false, vertical: true)
             .padding(.horizontal, 10)
             .padding(.vertical, 6)
-            .gridColumnAlignment(alignment.horizontal)
+            // Every cell fills its row, so the header band and the rules run edge to edge.
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: alignment)
+            .background(row < 0 ? Ledger.wash : Color.clear)
+            .overlay(alignment: .top) {
+                if row >= 0 { Rectangle().fill(Ledger.rule).frame(height: 1) }
+            }
+    }
+}
+
+/// Cells in rows of `columns`: each column as wide as its widest cell, up to 420 pt. When the
+/// columns need more than the width offered, narrow columns keep their width and the rest share
+/// what is left evenly, so short labels never break mid-word; rows grow to fit wrapped text.
+private struct TableLayout: Layout {
+    let columns: Int
+
+    private func widths(_ cells: Subviews, offered: CGFloat?) -> [CGFloat] {
+        var ideal = Array(repeating: CGFloat(0), count: columns)
+        for (index, cell) in cells.enumerated() {
+            ideal[index % columns] = max(ideal[index % columns], ceil(cell.sizeThatFits(.unspecified).width))
+        }
+        ideal = ideal.map { min($0, 420) }
+        guard let offered, ideal.reduce(0, +) > offered else { return ideal }
+        var widths = ideal
+        var left = offered
+        var open = Array(ideal.indices).sorted { ideal[$0] < ideal[$1] }
+        while let narrowest = open.first, ideal[narrowest] <= left / CGFloat(open.count) {
+            left -= ideal[narrowest]
+            open.removeFirst()
+        }
+        for column in open { widths[column] = max(60, floor(left / CGFloat(open.count))) }
+        return widths
+    }
+
+    private func heights(_ cells: Subviews, widths: [CGFloat]) -> [CGFloat] {
+        var heights = Array(repeating: CGFloat(0), count: (cells.count + columns - 1) / columns)
+        for (index, cell) in cells.enumerated() {
+            let size = cell.sizeThatFits(ProposedViewSize(width: widths[index % columns], height: nil))
+            heights[index / columns] = max(heights[index / columns], ceil(size.height))
+        }
+        return heights
+    }
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        guard columns > 0 else { return .zero }
+        let widths = widths(subviews, offered: proposal.width)
+        return CGSize(width: widths.reduce(0, +), height: heights(subviews, widths: widths).reduce(0, +))
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        guard columns > 0 else { return }
+        let widths = widths(subviews, offered: bounds.width)
+        let heights = heights(subviews, widths: widths)
+        var y = bounds.minY
+        for row in heights.indices {
+            var x = bounds.minX
+            for column in 0..<columns where row * columns + column < subviews.count {
+                subviews[row * columns + column].place(at: CGPoint(x: x, y: y), anchor: .topLeading,
+                                                       proposal: ProposedViewSize(width: widths[column], height: heights[row]))
+                x += widths[column]
+            }
+            y += heights[row]
+        }
     }
 }
 
