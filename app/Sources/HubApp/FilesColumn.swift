@@ -22,6 +22,7 @@ private struct FilesTree: View {
     @StateObject private var typed = TypeSelect()
     /// The last ⇧⌘E this tree took the keyboard for, so a relaunch or reselect does not steal it.
     @StateObject private var handledFocus = FocusRequest()
+    @StateObject private var search = Draft()
 
     private var rows: [FileEntry] { files.tree.rows(open: model.openFolders(root)) }
     private var cursor: String? { model.fileCursor[root] }
@@ -30,7 +31,10 @@ private struct FilesTree: View {
         let rows = rows
         VStack(spacing: 0) {
             header
-            if let problem = files.problem {
+            FilesSearchField(query: $search.text)
+            if !search.text.trimmingCharacters(in: .whitespaces).isEmpty {
+                FileSearchResults(files: files, root: root, query: search.text)
+            } else if let problem = files.problem {
                 Text(problem)
                     .font(.system(size: 12.5))
                     .foregroundStyle(Ledger.failInk)
@@ -47,7 +51,7 @@ private struct FilesTree: View {
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: 0) {
                             ForEach(rows) { entry in
-                                FileRow(entry: entry, root: root, mark: mark(entry),
+                                FileRow(entry: entry, root: root, mark: mark(entry), ignored: files.tree.isIgnored(entry.path),
                                         open: model.openFolders(root).contains(entry.path),
                                         picked: cursor == entry.path) {
                                     focused = true
@@ -234,6 +238,8 @@ private struct FileRow: View {
     let entry: FileEntry
     let root: String
     let mark: RowMark?
+    /// Covered by .gitignore: drawn dim.
+    let ignored: Bool
     let open: Bool
     let picked: Bool
     let click: () -> Void
@@ -309,7 +315,7 @@ private struct FileRow: View {
         case .file(.modified)?, .file(.renamed)?: Ledger.changed
         case .file(.added)?, .file(.untracked)?: Ledger.done
         case .file(.deleted)?: Ledger.fail
-        default: Ledger.ink
+        default: ignored ? Ledger.ink3 : Ledger.ink
         }
     }
 
@@ -329,5 +335,185 @@ private struct FileRow: View {
         case .deleted: "Deleted"
         case .renamed: "Renamed"
         }
+    }
+}
+
+/// Filters the Files column: file names, and text inside files.
+private struct FilesSearchField: View {
+    @Binding var query: String
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "magnifyingglass").font(.system(size: 11.5)).foregroundStyle(Ledger.ink3)
+            TextField("Search files and text", text: $query)
+                .textFieldStyle(.plain)
+                .focused($focused)
+                .onKeyPress(.escape) {
+                    guard !query.isEmpty else { return .ignored }
+                    query = ""
+                    return .handled
+                }
+            if !query.isEmpty {
+                Button { query = "" } label: {
+                    Image(systemName: "xmark.circle.fill").font(.system(size: 12))
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(Ledger.ink3)
+                .accessibilityLabel("Clear search")
+            }
+        }
+        .font(.system(size: 12.5))
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+        .background(Ledger.field, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+    }
+}
+
+/// What a search found: files whose path matches, then lines holding the text, by file.
+/// A file opens its preview; a line opens it at that line.
+private struct FileSearchResults: View {
+    @EnvironmentObject private var model: AppModel
+    @ObservedObject var files: CheckoutFiles
+    let root: String
+    let query: String
+    @StateObject private var found = SearchHits()
+
+    private static let hitLimit = 300
+
+    var body: some View {
+        let named = searchFiles(query, in: files.tree.files)
+        let hits = found.hits
+        let byFile = Dictionary(grouping: hits, by: \.path)
+        let order = hits.map(\.path).reduce(into: [String]()) { if $0.last != $1 { $0.append($1) } }
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 0) {
+                section("Files", count: named.count)
+                if named.isEmpty { note("No file names match.") }
+                ForEach(named, id: \.self) { path in
+                    ResultFile(path: path, ignored: files.tree.isIgnored(path)) {
+                        model.preview = FileRef(root: root, path: path)
+                    }
+                }
+                section("Text", count: hits.count)
+                if query.trimmingCharacters(in: .whitespaces).count < 2 {
+                    note("Type 2 or more characters to search inside files.")
+                } else if hits.isEmpty {
+                    note(found.searching ? "Searching…" : "No lines match.")
+                }
+                ForEach(order, id: \.self) { path in
+                    ResultFile(path: path, ignored: files.tree.isIgnored(path)) {
+                        model.preview = FileRef(root: root, path: path)
+                    }
+                    ForEach(byFile[path] ?? []) { hit in
+                        ResultLine(hit: hit) { model.showPreview(FileRef(root: root, path: path), line: hit.line) }
+                    }
+                }
+                if hits.count >= Self.hitLimit {
+                    note("Showing the first \(Self.hitLimit) lines. Narrow the search to see more.")
+                }
+            }
+            .padding(.bottom, 8)
+        }
+        // Waits for a pause in typing, and searches again when the checkout changes.
+        .task(id: "\(query)|\(files.generation)|\(model.showIgnoredFiles)") {
+            let text = query.trimmingCharacters(in: .whitespaces)
+            guard text.count >= 2 else {
+                found.hits = []
+                return
+            }
+            found.searching = true
+            try? await Task.sleep(for: .milliseconds(250))
+            guard !Task.isCancelled else { return }
+            let root = root
+            let ignored = model.showIgnoredFiles
+            let lines = await Task.detached(priority: .userInitiated) {
+                CheckoutFiles.grep(root, text, ignored: ignored)
+            }.value
+            guard !Task.isCancelled else { return }
+            found.hits = Array(lines.prefix(Self.hitLimit))
+            found.searching = false
+        }
+    }
+
+    private func section(_ title: String, count: Int) -> some View {
+        HStack(spacing: 6) {
+            Text(title).fontWeight(.semibold)
+            Text("\(count)").foregroundStyle(Ledger.ink3).monospacedDigit()
+        }
+        .font(.system(size: 12))
+        .padding(.horizontal, 14)
+        .padding(.top, 10)
+        .padding(.bottom, 4)
+    }
+
+    private func note(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 12))
+            .foregroundStyle(Ledger.ink3)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 4)
+    }
+}
+
+final class SearchHits: ObservableObject {
+    @Published var hits: [GrepHit] = []
+    @Published var searching = false
+}
+
+private struct ResultFile: View {
+    let path: String
+    let ignored: Bool
+    let click: () -> Void
+    @StateObject private var hover = Flag()
+
+    var body: some View {
+        let name = (path as NSString).lastPathComponent
+        let folder = (path as NSString).deletingLastPathComponent
+        HStack(spacing: 6) {
+            Image(systemName: "doc").font(.system(size: 11.5)).foregroundStyle(Ledger.ink3)
+            Text(name).foregroundStyle(ignored ? Ledger.ink3 : Ledger.ink).lineLimit(1)
+            Text(folder)
+                .font(.system(size: 12))
+                .foregroundStyle(Ledger.ink3)
+                .lineLimit(1)
+                .truncationMode(.head)
+            Spacer(minLength: 0)
+        }
+        .font(.system(size: 13))
+        .padding(.horizontal, 14)
+        .frame(height: 24)
+        .background(hover.on ? Ledger.wash : Color.clear)
+        .contentShape(Rectangle())
+        .onTapGesture(perform: click)
+        .onHover { hover.on = $0 }
+        .help(path)
+    }
+}
+
+private struct ResultLine: View {
+    let hit: GrepHit
+    let click: () -> Void
+    @StateObject private var hover = Flag()
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Text("\(hit.line)")
+                .foregroundStyle(Ledger.ink3)
+                .frame(minWidth: 28, alignment: .trailing)
+            Text(hit.text).foregroundStyle(Ledger.ink2).lineLimit(1)
+            Spacer(minLength: 0)
+        }
+        .font(.system(size: 12, design: .monospaced))
+        .padding(.leading, 20)
+        .padding(.trailing, 14)
+        .frame(height: 22)
+        .background(hover.on ? Ledger.wash : Color.clear)
+        .contentShape(Rectangle())
+        .onTapGesture(perform: click)
+        .onHover { hover.on = $0 }
+        .help("\(hit.path):\(hit.line)")
     }
 }

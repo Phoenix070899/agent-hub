@@ -22,9 +22,11 @@ public struct Agent: Decodable, Equatable, Identifiable, Sendable {
     public let branch: String?
     /// Its own worktree; nil when it works in the repo's checkout.
     public let cwd: String?
+    /// The branch checked out where it works, now; nil when HEAD is detached.
+    public let head: String?
 
     public init(id: Int, kind: Kind, name: String? = nil, model: String? = nil, live: Bool = false,
-                branch: String? = nil, cwd: String? = nil) {
+                branch: String? = nil, cwd: String? = nil, head: String? = nil) {
         self.id = id
         self.kind = kind
         self.name = name
@@ -32,6 +34,7 @@ public struct Agent: Decodable, Equatable, Identifiable, Sendable {
         self.live = live
         self.branch = branch
         self.cwd = cwd
+        self.head = head
     }
 
     public var isOrchestrator: Bool { kind == .orchestrator }
@@ -145,6 +148,32 @@ public struct Usage: Decodable, Equatable, Sendable {
         public let resets: String?
 
         public var id: String { name }
+
+        /// Time left until `resets`, e.g. "3h 40m" or "4d 11h"; nil when it does not read as a date.
+        /// `/usage` prints it in this Mac's time zone without a year, so a date already past is next year's.
+        public func resetsIn(now: Date = Date(), calendar: Calendar = .current) -> String? {
+            guard let resets else { return nil }
+            let parser = DateFormatter()
+            parser.locale = Locale(identifier: "en_US_POSIX")
+            parser.calendar = calendar
+            parser.timeZone = calendar.timeZone
+            let formats = ["MMM d 'at' h:mma", "MMM d 'at' ha"]
+            guard let parsed = formats.lazy.compactMap({ format -> Date? in
+                parser.dateFormat = format
+                return parser.date(from: resets)
+            }).first else { return nil }
+            var parts = calendar.dateComponents([.month, .day, .hour, .minute], from: parsed)
+            parts.year = calendar.component(.year, from: now)
+            guard var date = calendar.date(from: parts) else { return nil }
+            // A day of slack, so a reset that has just passed is not read as next year's.
+            if date < now.addingTimeInterval(-86_400) {
+                date = calendar.date(byAdding: .year, value: 1, to: date) ?? date
+            }
+            let minutes = max(0, Int(date.timeIntervalSince(now)) / 60)
+            if minutes < 60 { return "\(minutes)m" }
+            if minutes < 24 * 60 { return "\(minutes / 60)h \(minutes % 60)m" }
+            return "\(minutes / (24 * 60))d \(minutes / 60 % 24)h"
+        }
     }
 
     public let limits: [Limit]

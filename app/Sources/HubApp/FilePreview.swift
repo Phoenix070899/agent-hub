@@ -34,6 +34,8 @@ struct FilePreviewPanel: View {
         // From the tree, the tree keeps the keyboard (Space, arrows, Esc); from Quick Open, Esc
         // needs the preview to hold it.
         .onAppear { if !model.treeFocused { focused = true } }
+        // A search hit points at a line, which only the source shows.
+        .onChange(of: model.previewLine, initial: true) { if model.previewLine != nil { content.rendered = false } }
         .task(id: "\(file.root)|\(file.path)|\(files.generation)|\(scheme == .dark)") {
             await content.load(file, dark: scheme == .dark)
         }
@@ -140,12 +142,12 @@ struct FilePreviewPanel: View {
         case .pdf(let document):
             PDFPreview(document: document)
         case .text(let lines, let cut):
-            CodeLines(lines: lines, changed: content.changed, cut: cut)
+            CodeLines(lines: lines, changed: content.changed, cut: cut, focus: model.previewLine)
         case .markdown(let blocks, let lines, let cut):
             if content.rendered {
                 MarkdownView(blocks: blocks)
             } else {
-                CodeLines(lines: lines, changed: content.changed, cut: cut)
+                CodeLines(lines: lines, changed: content.changed, cut: cut, focus: model.previewLine)
             }
         }
     }
@@ -281,10 +283,13 @@ private struct CodeLines: View {
     let lines: [AttributedString]
     let changed: Set<Int>
     let cut: Bool
+    /// The 1-based line to scroll to and mark.
+    var focus: Int?
 
     var body: some View {
         let digits = max(3, String(lines.count).count)
         GeometryReader { geometry in
+        ScrollViewReader { proxy in
         ScrollView([.vertical, .horizontal]) {
             LazyVStack(alignment: .leading, spacing: 0) {
                 ForEach(Array(lines.enumerated()), id: \.offset) { index, line in
@@ -299,7 +304,8 @@ private struct CodeLines: View {
                     .font(.system(size: 12.5, design: .monospaced))
                     .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
                     .padding(.vertical, 1)
-                    .background(changed.contains(index) ? Ledger.justChanged : Color.clear)
+                    .background(changed.contains(index) ? Ledger.justChanged
+                                : focus == index + 1 ? Ledger.selected : Color.clear)
                 }
                 if cut {
                     Text("Only the first 1 MB is shown. Open the file to read the rest.")
@@ -312,6 +318,10 @@ private struct CodeLines: View {
             .textSelection(.enabled)
             // Short files start at the top left, not the middle of the scroll view.
             .frame(minWidth: geometry.size.width, minHeight: geometry.size.height, alignment: .topLeading)
+        }
+        .onChange(of: focus, initial: true) {
+            if let focus { proxy.scrollTo(focus - 1, anchor: .center) }
+        }
         }
         }
     }

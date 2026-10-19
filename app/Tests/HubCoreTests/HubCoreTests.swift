@@ -373,3 +373,52 @@ func row(_ id: String, phase: String, quiet: Int, model: String? = nil, effort: 
     #expect(try socket.readLine() == line)
     #expect(try socket.readLine() == Data("next".utf8))
 }
+
+@Test func usageResetsReadAsATimeLeft() throws {
+    var calendar = Calendar(identifier: .gregorian)
+    calendar.timeZone = TimeZone(identifier: "Asia/Saigon")!
+    let now = calendar.date(from: DateComponents(year: 2026, month: 10, day: 19, hour: 11, minute: 50))!
+    func left(_ resets: String?) -> String? {
+        Usage.Limit(name: "Session", percent: 41, resets: resets).resetsIn(now: now, calendar: calendar)
+    }
+    #expect(left("Oct 19 at 3:30pm") == "3h 40m")
+    #expect(left("Oct 23 at 11pm") == "4d 11h")
+    #expect(left("Oct 19 at 12pm") == "10m")
+    #expect(left("Jan 2 at 9am") == "74d 21h", "a date earlier in the year is next year's")
+    #expect(left("soon") == nil)
+    #expect(left(nil) == nil)
+}
+
+@Test func agentsCarryTheBranchCheckedOutWhereTheyWork() throws {
+    let json = #"[{"id":6,"kind":"orchestrator","live":true,"head":"plan/enterprise-rag"},{"id":7,"kind":"claude","live":false}]"#
+    let agents = try JSONDecoder().decode([Agent].self, from: Data(json.utf8))
+    #expect(agents[0].head == "plan/enterprise-rag")
+    #expect(agents[1].head == nil, "older daemons send no head")
+}
+
+@Test func ignoredFilesAndWhatIsInsideIgnoredFoldersReadAsIgnored() {
+    var tree = FileTree(paths: ["src/a.swift", ".env"], folders: ["build/"], ignored: [".env", "build/"])
+    tree.fill("build", with: [(name: "out.o", isFolder: false)])
+    #expect(tree.isIgnored(".env"))
+    #expect(tree.isIgnored("build"))
+    #expect(tree.isIgnored("build/out.o"))
+    #expect(!tree.isIgnored("src/a.swift"))
+    #expect(!tree.isIgnored("buildings.txt"))
+}
+
+@Test func fileSearchRanksNameMatchesFirst() {
+    let paths = ["docs/readme.md", "src/Search.swift", "src/search/index.ts", "app/research.txt", "Tests/x.swift"]
+    #expect(searchFiles("search", in: paths) == ["src/Search.swift", "app/research.txt", "src/search/index.ts"])
+    #expect(searchFiles("src swift", in: paths) == ["src/Search.swift"], "every word must match")
+    #expect(searchFiles("  ", in: paths).isEmpty)
+    #expect(searchFiles("s", in: paths, limit: 2).count == 2)
+}
+
+@Test func grepOutputReadsAsHitsPerFile() {
+    let output = "src/a.swift\u{0}12\u{0}    let search = 1\nsrc/a.swift\u{0}40\u{0}search()\nREADME.md\u{0}3\u{0}Search here\n"
+    let hits = parseGrep(output)
+    #expect(hits.map(\.path) == ["src/a.swift", "src/a.swift", "README.md"])
+    #expect(hits[0].line == 12)
+    #expect(hits[0].text == "let search = 1", "leading space is trimmed")
+    #expect(parseGrep("").isEmpty)
+}

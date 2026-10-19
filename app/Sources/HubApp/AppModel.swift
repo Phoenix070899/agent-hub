@@ -133,8 +133,12 @@ final class AppModel: ObservableObject {
     @Published var quickOpenShown = false
     /// While a modal is up, terminals hand it the keyboard.
     var modalShown: Bool { newSession != nil || renaming != nil || closing != nil || quickOpenShown || fanOutShown }
-    /// Hides the ledger so the terminal takes the whole window.
-    @Published var ledgerHidden = false
+    /// Shrinks the ledger to a strip of status marks so the terminal takes almost the whole window.
+    @Published var ledgerCollapsed = false
+
+    func toggleLedger() {
+        withAnimation(.easeInOut(duration: 0.2)) { ledgerCollapsed.toggle() }
+    }
     /// Agent groups folded in the ledger.
     @Published var collapsed: Set<Int> = []
     @Published private(set) var connected = false
@@ -161,7 +165,28 @@ final class AppModel: ObservableObject {
         didSet { UserDefaults.standard.set(openFolderMap.mapValues { Array($0) }, forKey: "openFolders") }
     }
     /// The file shown over the terminal; Esc goes back.
-    @Published var preview: FileRef?
+    @Published var preview: FileRef? {
+        didSet { previewLine = nil }
+    }
+    /// The line a text search hit opened the preview at, 1-based.
+    @Published private(set) var previewLine: Int?
+    /// The ledger's and the Files column's widths, as the human dragged them.
+    @Published var ledgerWidth = AppModel.width("ledgerWidth", or: 392) {
+        didSet { UserDefaults.standard.set(Double(ledgerWidth), forKey: "ledgerWidth") }
+    }
+    @Published var filesWidth = AppModel.width("filesWidth", or: 280) {
+        didSet { UserDefaults.standard.set(Double(filesWidth), forKey: "filesWidth") }
+    }
+
+    private static func width(_ key: String, or fallback: CGFloat) -> CGFloat {
+        let saved = UserDefaults.standard.double(forKey: key)
+        return saved > 0 ? CGFloat(saved) : fallback
+    }
+
+    func showPreview(_ file: FileRef, line: Int) {
+        preview = file
+        previewLine = line
+    }
     /// The tree's cursor in each checkout.
     @Published var fileCursor: [String: String] = [:]
     /// The Files tree has the keyboard, so the terminal lets go of it.

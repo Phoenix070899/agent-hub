@@ -93,8 +93,8 @@ struct QuickOpen: View {
             QuickOpenItem(id: "fan-out", icon: "arrow.triangle.branch", title: "Fan Out a Task", detail: "Command, several Workers try it") {
                 model.showFanOut()
             },
-            QuickOpenItem(id: "ledger", icon: "sidebar.left", title: model.ledgerHidden ? "Show Ledger" : "Hide Ledger", detail: "Command") {
-                model.ledgerHidden.toggle()
+            QuickOpenItem(id: "ledger", icon: "sidebar.left", title: model.ledgerCollapsed ? "Expand Ledger" : "Collapse Ledger", detail: "Command") {
+                model.toggleLedger()
             },
             QuickOpenItem(id: "settings", icon: "gearshape", title: "Settings", detail: "Command") {
                 openSettings()

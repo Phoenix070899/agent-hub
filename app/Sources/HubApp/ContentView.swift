@@ -26,16 +26,24 @@ struct ContentView: View {
                     .padding(.bottom, 10)
                     .transition(.opacity)
             }
-            HStack(alignment: .top, spacing: 12) {
-                if !model.ledgerHidden {
+            HStack(alignment: .top, spacing: 0) {
+                if model.ledgerCollapsed {
+                    LedgerRail()
+                        .frame(width: 48)
+                        .transition(.move(edge: .leading).combined(with: .opacity))
+                    Color.clear.frame(width: 12)
+                } else {
                     LedgerColumn()
-                        .frame(width: 392)
+                        .frame(width: model.ledgerWidth)
+                        .transition(.move(edge: .leading).combined(with: .opacity))
+                    ColumnResizer(width: $model.ledgerWidth, range: 300...640, grows: .right, fallback: 392)
                 }
                 MainPanel()
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 if model.filesShown, let root = model.selectedCheckout {
+                    ColumnResizer(width: $model.filesWidth, range: 220...600, grows: .left, fallback: 280)
                     FilesColumn(root: root)
-                        .frame(width: 280)
+                        .frame(width: model.filesWidth)
                         .frame(maxHeight: .infinity)
                         .ledgerSheet()
                         .transition(.move(edge: .trailing).combined(with: .opacity))
@@ -329,9 +337,129 @@ struct LedgerColumn: View {
             } else {
                 EmptyLedger()
             }
+            Spacer(minLength: 0)
+            Rectangle().fill(Ledger.rule).frame(height: 1)
+            HStack {
+                LedgerToggle()
+                Spacer()
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 6)
         }
         .frame(maxHeight: .infinity, alignment: .top)
         .ledgerSheet()
+    }
+}
+
+/// Collapses or expands the ledger; it sits at the ledger's foot in both shapes.
+struct LedgerToggle: View {
+    @EnvironmentObject private var model: AppModel
+
+    var body: some View {
+        let title = model.ledgerCollapsed ? "Expand ledger" : "Collapse ledger"
+        Button { model.toggleLedger() } label: {
+            Image(systemName: "sidebar.left")
+                .font(.system(size: 14))
+                .foregroundStyle(Ledger.ink2)
+                .frame(width: 32, height: 28)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(title)
+        .help("\(title) (⌘L)")
+    }
+}
+
+/// The collapsed ledger: the repo's needs-you count, then each agent and a mark per Worker in its
+/// state colour. Clicking one shows it, as its row in the full ledger would.
+struct LedgerRail: View {
+    @EnvironmentObject private var model: AppModel
+
+    var body: some View {
+        VStack(spacing: 0) {
+            if let repo = model.selectedRepo {
+                let snapshot = model.snapshot(repo)
+                ScrollView {
+                    VStack(spacing: 2) {
+                        if snapshot.needsYouCount > 0 {
+                            Text("\(snapshot.needsYouCount)")
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundStyle(Ledger.markerInk)
+                                .padding(.horizontal, 5)
+                                .padding(.vertical, 1)
+                                .background(Ledger.marker, in: RoundedRectangle(cornerRadius: 4, style: .continuous))
+                                .help("\(snapshot.needsYouCount) need you")
+                                .padding(.bottom, 6)
+                        }
+                        ForEach(Array(snapshot.groups.enumerated()), id: \.element.id) { index, group in
+                            if index > 0 {
+                                Rectangle().fill(Ledger.rule).frame(width: 20, height: 1).padding(.vertical, 6)
+                            }
+                            RailAgent(agent: group.agent, repo: repo)
+                            ForEach(workers(group, in: snapshot)) { worker in
+                                RailWorker(worker: worker, repo: repo)
+                            }
+                        }
+                    }
+                    .padding(.vertical, 10)
+                    .frame(maxWidth: .infinity)
+                }
+            }
+            Spacer(minLength: 0)
+            Rectangle().fill(Ledger.rule).frame(height: 1)
+            LedgerToggle().padding(.vertical, 6)
+        }
+        .frame(maxHeight: .infinity, alignment: .top)
+        .ledgerSheet()
+    }
+
+    /// In the full ledger's order: waiting on you, running, done.
+    private func workers(_ group: AgentGroup, in snapshot: Snapshot) -> [WorkerRow] {
+        let waiting = group.needs.compactMap(\.worker).compactMap { id in snapshot.workers.first { $0.id == id } }
+        var seen = Set<String>()
+        return (waiting + group.running + group.settled).filter { seen.insert($0.id).inserted }
+    }
+}
+
+struct RailAgent: View {
+    @EnvironmentObject private var model: AppModel
+    let agent: Agent
+    let repo: String
+
+    var body: some View {
+        let selected = model.selection == .agent(repo: repo, id: agent.id)
+        Button { model.select(.agent(repo: repo, id: agent.id)) } label: {
+            AgentGlyph(kind: agent.kind)
+                .foregroundStyle(agent.live ? Ledger.ink : Ledger.ink3)
+                .frame(width: 32, height: 28)
+                .background(selected ? Ledger.selected : Color.clear, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("\(agent.displayName), \(agent.live ? "live" : agent.isOrchestrator ? "stopped" : "ended")")
+    }
+}
+
+struct RailWorker: View {
+    @EnvironmentObject private var model: AppModel
+    let worker: WorkerRow
+    let repo: String
+
+    var body: some View {
+        let selected = model.selection == .worker(repo: repo, id: worker.id)
+        Button { model.select(.worker(repo: repo, id: worker.id)) } label: {
+            StateMark(color: worker.markColor)
+                .frame(width: 32, height: 22)
+                .background(selected ? Ledger.selected : Color.clear, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                .overlay(alignment: .topTrailing) {
+                    if model.isUnread(worker, repo: repo) {
+                        Circle().fill(Ledger.run).frame(width: 5, height: 5).padding(4)
+                    }
+                }
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("\(worker.id) \(worker.profile): \(worker.title)\n\(worker.phaseLabel), quiet for \(formatAge(worker.quietSeconds))")
     }
 }
 
@@ -628,17 +756,17 @@ struct AgentPanel: View {
                     .foregroundStyle(Ledger.ink3)
                     .lineLimit(1)
                 Spacer(minLength: 8)
-                Button(model.ledgerHidden ? "Show ledger" : "Hide ledger") { model.ledgerHidden.toggle() }
-                    .buttonStyle(.plain)
-                    .font(.system(size: 12.5))
-                    .foregroundStyle(Ledger.ink2)
-                    .help("⌘L")
                 if agent.live {
-                    Button(agent.isOrchestrator ? "Stop Orchestrator" : "End session") { model.stopAgent(agent.id) }
-                        .buttonStyle(.plain)
-                        .font(.system(size: 12.5))
-                        .foregroundStyle(Ledger.ink2)
-                        .help(agent.isOrchestrator ? "Stop the Orchestrator. Its Workers keep running." : "End this Claude Code session. You can resume it.")
+                    Button { model.stopAgent(agent.id) } label: {
+                        Image(systemName: "stop.circle")
+                            .font(.system(size: 14))
+                            .foregroundStyle(Ledger.ink2)
+                            .frame(width: 26, height: 26)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(agent.isOrchestrator ? "Stop Orchestrator" : "End session")
+                    .help(agent.isOrchestrator ? "Stop the Orchestrator. Its Workers keep running." : "End this Claude Code session. You can resume it.")
                 }
             }
             if agent.live {
@@ -654,7 +782,7 @@ struct AgentPanel: View {
     private var meta: String {
         let name = URL(fileURLWithPath: repo).lastPathComponent
         let model = agent.model ?? "default model"
-        let place = agent.branch.map { "\(name) on \($0)" } ?? name
+        let place = (agent.head ?? agent.branch).map { "\(name) on \($0)" } ?? name
         return agent.isOrchestrator ? "Orchestrator in \(place), \(model)" : "Claude Code in \(place), \(model)"
     }
 }
@@ -1177,6 +1305,12 @@ struct UsageInline: View {
                                 .fontWeight(.semibold)
                                 .monospacedDigit()
                                 .foregroundStyle(limit.percent >= 90 ? Ledger.fail : Ledger.ink)
+                            // Counts down between snapshots, which repeat an unchanged `resets`.
+                            TimelineView(.everyMinute) { context in
+                                if let left = limit.resetsIn(now: context.date) {
+                                    Text(left).monospacedDigit().foregroundStyle(Ledger.ink3)
+                                }
+                            }
                         }
                     }
                 } else if usage?.error != nil {
@@ -1269,5 +1403,51 @@ extension TerminalTheme {
     static func color(_ hex: String) -> Color {
         guard let c = rgb(hex) else { return .clear }
         return Color(.sRGB, red: c.red, green: c.green, blue: c.blue)
+    }
+}
+
+/// The column's width when a resize drag began; nil between drags.
+final class DragStart: ObservableObject {
+    @Published var width: CGFloat?
+}
+
+/// The 12pt gap between two columns, dragged to resize the column beside it; a double click
+/// puts it back to its first width.
+struct ColumnResizer: View {
+    enum Side { case left, right }
+    @Binding var width: CGFloat
+    let range: ClosedRange<CGFloat>
+    /// Which way dragging makes the column wider: right for the ledger, left for Files.
+    let grows: Side
+    let fallback: CGFloat
+    @StateObject private var drag = DragStart()
+    @StateObject private var hover = Flag()
+
+    var body: some View {
+        Rectangle()
+            .fill(Color.clear)
+            .frame(width: 12)
+            .frame(maxHeight: .infinity)
+            .overlay {
+                Capsule()
+                    .fill(Ledger.rule)
+                    .frame(width: 3, height: 36)
+                    .opacity(hover.on || drag.width != nil ? 1 : 0)
+            }
+            .contentShape(Rectangle())
+            .pointerStyle(.columnResize)
+            .onHover { hover.on = $0 }
+            .gesture(
+                DragGesture(minimumDistance: 1, coordinateSpace: .global)
+                    .onChanged { value in
+                        let from = drag.width ?? width
+                        drag.width = from
+                        let delta = grows == .right ? value.translation.width : -value.translation.width
+                        width = min(max(from + delta, range.lowerBound), range.upperBound).rounded()
+                    }
+                    .onEnded { _ in drag.width = nil }
+            )
+            .onTapGesture(count: 2) { width = fallback }
+            .accessibilityLabel("Resize column")
     }
 }

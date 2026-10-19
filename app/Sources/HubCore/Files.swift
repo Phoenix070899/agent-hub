@@ -22,8 +22,11 @@ public struct FileEntry: Equatable, Identifiable, Sendable {
 public struct FileTree: Equatable, Sendable {
     public private(set) var children: [String: [FileEntry]] = [:]
     public private(set) var files: [String] = []
+    /// Paths git ignores; a folder's contents are ignored with it.
+    public private(set) var ignored: Set<String> = []
 
-    public init(paths: [String], folders: [String] = []) {
+    public init(paths: [String], folders: [String] = [], ignored: [String] = []) {
+        self.ignored = Set(ignored.map { $0.hasSuffix("/") ? String($0.dropLast()) : $0 })
         var seen = Set<String>()
         var entries: [String: [FileEntry]] = [:]
         func add(_ path: String, folder: Bool) {
@@ -43,6 +46,16 @@ public struct FileTree: Equatable, Sendable {
         }
         children = entries
         files = paths.filter { !$0.hasSuffix("/") }.sorted()
+    }
+
+    /// Whether git ignores `path`, itself or through a folder above it.
+    public func isIgnored(_ path: String) -> Bool {
+        var path = Substring(path)
+        while true {
+            if ignored.contains(String(path)) { return true }
+            guard let slash = path.lastIndex(of: "/") else { return false }
+            path = path[..<slash]
+        }
     }
 
     /// The rows on screen: each open folder's contents under it, depth first.
@@ -68,6 +81,41 @@ public struct FileTree: Equatable, Sendable {
             if a.isFolder != b.isFolder { return a.isFolder }
             return a.name.localizedStandardCompare(b.name) == .orderedAscending
         }
+    }
+}
+
+/// Paths holding every word of `query`, case-insensitively: those whose name starts with the
+/// last word first, then whose name holds it, then the rest; shorter paths first within each.
+public func searchFiles(_ query: String, in paths: [String], limit: Int = 50) -> [String] {
+    let words = query.lowercased().split(whereSeparator: \.isWhitespace).map(String.init)
+    guard let last = words.last else { return [] }
+    let ranked: [(rank: Int, path: String)] = paths.compactMap { path in
+        let lower = path.lowercased()
+        guard words.allSatisfy(lower.contains) else { return nil }
+        let name = lower.split(separator: "/").last.map(String.init) ?? lower
+        return (name.hasPrefix(last) ? 0 : name.contains(last) ? 1 : 2, path)
+    }
+    return ranked
+        .sorted { ($0.rank, $0.path.count, $0.path) < ($1.rank, $1.path.count, $1.path) }
+        .prefix(limit)
+        .map(\.path)
+}
+
+/// One line `git grep` found.
+public struct GrepHit: Equatable, Identifiable, Sendable {
+    public let path: String
+    public let line: Int
+    public let text: String
+
+    public var id: String { "\(path):\(line)" }
+}
+
+/// `git grep -n --null` output: "path NUL line NUL text" per line.
+public func parseGrep(_ output: String) -> [GrepHit] {
+    output.split(separator: "\n").compactMap { record in
+        let parts = record.split(separator: "\0", maxSplits: 2, omittingEmptySubsequences: false)
+        guard parts.count == 3, let line = Int(parts[1]) else { return nil }
+        return GrepHit(path: String(parts[0]), line: line, text: parts[2].trimmingCharacters(in: .whitespaces))
     }
 }
 

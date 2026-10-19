@@ -40,7 +40,7 @@ struct HubApp: App {
                 Button("Show First Agent") { model.showFirstAgent() }
                     .keyboardShortcut("0")
                     .disabled(model.selectedRepo == nil)
-                Button(model.ledgerHidden ? "Show Ledger" : "Hide Ledger") { model.ledgerHidden.toggle() }
+                Button(model.ledgerCollapsed ? "Expand Ledger" : "Collapse Ledger") { model.toggleLedger() }
                     .keyboardShortcut("l")
                 Button(model.filesShown ? "Hide Files" : "Show Files") { model.toggleFiles() }
                     .keyboardShortcut("e", modifiers: [.command, .shift])

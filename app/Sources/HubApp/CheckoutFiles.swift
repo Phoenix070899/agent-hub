@@ -49,13 +49,15 @@ final class CheckoutFiles: ObservableObject {
             let branch = Git.run(root, ["branch", "--show-current"])
             var paths = (listed.output ?? "").split(separator: "\0").map(String.init)
             var folders: [String] = []
+            var ignoredPaths: [String] = []
             if ignored {
                 let extra = (Git.run(root, ["ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z"]).output ?? "")
                     .split(separator: "\0").map(String.init)
                 folders = extra.filter { $0.hasSuffix("/") }
                 paths += extra.filter { !$0.hasSuffix("/") }
+                ignoredPaths = extra
             }
-            let tree = FileTree(paths: paths, folders: folders)
+            let tree = FileTree(paths: paths, folders: folders, ignored: ignoredPaths)
             let marks = parseGitStatus(status.output ?? "")
             let problem = listed.output == nil ? (listed.error ?? "git could not list \(root)") : nil
             let name = branch.output?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -118,6 +120,18 @@ final class CheckoutFiles: ObservableObject {
         FSEventStreamInvalidate(stream)
         FSEventStreamRelease(stream)
         self.stream = nil
+    }
+}
+
+extension CheckoutFiles {
+    /// Lines holding `text`, case-insensitively, in tracked and untracked text files; ignored
+    /// files too when they are shown. At most 20 per file.
+    nonisolated static func grep(_ root: String, _ text: String, ignored: Bool) -> [GrepHit] {
+        var args = ["grep", "-n", "--null", "-I", "-i", "-F", "--untracked", "--max-count", "20"]
+        if ignored { args.append("--no-exclude-standard") }
+        args += ["-e", text, "--"]
+        // git grep exits 1 when nothing matches, which reads as no output.
+        return parseGrep(Git.run(root, args).output ?? "")
     }
 }
 
