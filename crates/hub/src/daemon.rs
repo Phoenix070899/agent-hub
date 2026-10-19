@@ -777,7 +777,11 @@ impl Hub {
             }
             "notify" => {
                 let live = self.live(id_param(p, "worker")?)?;
-                self.report_blocker(&live, str_param(p, "kind")?, p["message"].as_str().unwrap_or(""))?;
+                let kind = str_param(p, "kind")?;
+                // Idle only because a background shell still runs: nothing for the human to do.
+                if !(kind == "idle_prompt" && screen::look(&live.screen()) == Look::Waiting) {
+                    self.report_blocker(&live, kind, p["message"].as_str().unwrap_or(""))?;
+                }
                 Ok(json!({}))
             }
             "wait" => self.wait(
@@ -1217,7 +1221,7 @@ impl Hub {
                     Look::PermissionPrompt => {
                         self.report_blocker(&live, "permission_prompt", "A permission prompt is waiting on screen.")?
                     }
-                    Look::Working => {
+                    Look::Working | Look::Waiting => {
                         if live.blocker.lock().unwrap().take().is_some() {
                             self.notify();
                         }
@@ -1234,7 +1238,7 @@ impl Hub {
                     }
                 }
                 // A permission prompt also means a turn is under way.
-                let started = matches!(look, Look::Working | Look::PermissionPrompt)
+                let started = matches!(look, Look::Working | Look::Waiting | Look::PermissionPrompt)
                     || paths::transcript_exists(&worker.session_id);
                 if worker.state == state::STARTING && started {
                     db::set_state(&self.db(), live.id, state::RUNNING)?;
