@@ -58,15 +58,17 @@ struct NewSessionModal: View {
                         .padding(.horizontal, 24)
                 } else {
                     ScrollView {
-                        VStack(spacing: 0) {
+                        // Inset like every other field, so a picked row's fill stops short of the edges.
+                        VStack(spacing: 2) {
                             ForEach(repos, id: \.self) { repo in
                                 RepoChoice(repo: repo, status: status(repo), picked: form.picked == repo) {
                                     form.picked = repo
                                 }
                             }
                         }
+                        .padding(.horizontal, 24)
                     }
-                    .frame(height: min(CGFloat(repos.count) * 53, 212))
+                    .frame(height: min(CGFloat(repos.count) * 55, 220))
                 }
                 Button("Choose another folder…", action: choose)
                     .buttonStyle(.ledgerLink)
@@ -320,10 +322,10 @@ struct RepoChoice: View {
                         .foregroundStyle(Ledger.ink2)
                 }
             }
-            .padding(.horizontal, 24)
+            .padding(.horizontal, 12)
             .padding(.vertical, 9)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(picked ? Ledger.selected : Color.clear)
+            .background(picked ? Ledger.chosen : Color.clear, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)

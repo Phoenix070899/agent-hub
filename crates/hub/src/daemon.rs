@@ -535,16 +535,17 @@ impl Hub {
             let worker = db::worker(&self.db(), id)?;
             (format!("w{id}"), worker.repo, worker.cwd)
         };
-        if let Some(&shell) = self.muxes.lock().unwrap().get(&label) {
-            if self.shells.lock().unwrap().contains_key(&shell) {
-                return Ok(json!({ "shell": shell }));
-            }
-        }
         let name = Path::new(&repo)
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
         let session = mux_session(&name, &label);
+        // A client that reconnects (Echo relaunched) gets the session too: ⌘W needs it.
+        if let Some(&shell) = self.muxes.lock().unwrap().get(&label) {
+            if self.shells.lock().unwrap().contains_key(&shell) {
+                return Ok(json!({ "shell": shell, "session": session }));
+            }
+        }
         let mut attach = vec![
             std::env::current_exe()?.display().to_string(),
             "attach".into(),

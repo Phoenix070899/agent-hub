@@ -141,6 +141,20 @@ final class AppModel: ObservableObject {
     /// True once the daemon could not be reached; the window says so until it is back.
     @Published private(set) var daemonDown = false
     @Published var error: String?
+    /// A short note shown under the title bar for a few seconds; see `note(_:)`.
+    @Published var notice: String?
+    private var noticeHide: DispatchWorkItem?
+
+    /// Says why a key did nothing, for 4 seconds.
+    func note(_ text: String) {
+        noticeHide?.cancel()
+        withAnimation(.easeOut(duration: 0.15)) { notice = text }
+        let hide = DispatchWorkItem { [weak self] in
+            withAnimation(.easeOut(duration: 0.2)) { self?.notice = nil }
+        }
+        noticeHide = hide
+        DispatchQueue.main.asyncAfter(deadline: .now() + 4, execute: hide)
+    }
     /// The latest confirmation per agent.
     @Published private(set) var confirmations: [Int: Confirmation] = [:]
 
@@ -299,7 +313,11 @@ final class AppModel: ObservableObject {
             shell.standardError = FileHandle.nullDevice
             guard (try? shell.run()) != nil else { return }
             shell.waitUntilExit()
-            if shell.terminationStatus == 3 { await MainActor.run { NSSound.beep() } }
+            if shell.terminationStatus == 3 {
+                await MainActor.run {
+                    AppModel.shared.note("⌘W closes panes you added. This one is the agent's own, so it stays; click a pane you added first.")
+                }
+            }
         }
     }
 

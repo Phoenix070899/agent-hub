@@ -27,4 +27,5 @@ When a change makes a new choice a later session could undo by accident, record 
 - Never test against the human's daemon, repos, or tmux sessions: use `HUB_STATE=/tmp/hubui` (short, for the socket path limit), `HUB_TEST_AGENT=crates/hub/tests/fake-agent.sh`, and a throwaway repo whose folder name differs from any real one.
 - Run a copy of the app with its own bundle id (`dev.agenthub.Echo.test`), so it shares no defaults or saved windows with the human's Echo.
 - Do not steal focus while the human uses the Mac: capture the window with `screencapture -l <window id>` and post keys to the app's process instead of clicking.
-- Afterwards stop the test daemon (`hub shutdown --force` with the test env), kill only tmux sessions whose start command contains the test state folder, and remove the test folders.
+- Afterwards kill the tmux sessions whose start command contains the test state folder first, then stop the test daemon (`hub shutdown --force` with the test env), then remove the test folders.
+  In the other order, a test pane's `hub attach --follow` restarts the daemon without `HUB_TEST_AGENT`, and it starts a real Claude Code.

@@ -738,6 +738,22 @@ fn a_fan_out_runs_one_task_three_ways_and_the_pick_is_merged() {
 }
 
 #[test]
+fn a_reopened_multiplexer_shell_still_names_its_session() {
+    let hub = Hub::new("muxagain");
+    hub.ok(&["status"]);
+    let opened = hub.call(
+        "agent.open",
+        serde_json::json!({ "repo": hub.repo_key(), "kind": "claude", "name": "sleeper" }),
+    );
+    let agent = opened["result"]["agent"].as_i64().unwrap();
+    let params = serde_json::json!({ "agent": agent, "command": "sleep 30 # {session} {dir} {command}" });
+    let first = hub.call("mux.open", params.clone());
+    let again = hub.call("mux.open", params);
+    assert_eq!(again["result"]["shell"], first["result"]["shell"], "{again}");
+    assert_eq!(again["result"]["session"], format!("echo-repo-a{agent}"), "{again}");
+}
+
+#[test]
 fn simultaneous_starts_leave_one_daemon() {
     let hub = Hub::new("race");
     let starts: Vec<_> = (0..10)

@@ -20,6 +20,11 @@ struct ContentView: View {
                 ErrorBanner(text: error)
                     .padding(.horizontal, 12)
                     .padding(.bottom, 10)
+            } else if let notice = model.notice {
+                NoticeBanner(text: notice)
+                    .padding(.horizontal, 12)
+                    .padding(.bottom, 10)
+                    .transition(.opacity)
             }
             HStack(alignment: .top, spacing: 12) {
                 if !model.ledgerHidden {
@@ -1222,6 +1227,24 @@ struct ErrorBanner: View {
         .padding(.horizontal, 14)
         .padding(.vertical, 8)
         .background(Ledger.failWash, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+    }
+}
+
+/// A passing word about something the human just did, like a key that did nothing; it hides itself.
+struct NoticeBanner: View {
+    let text: String
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "info.circle")
+            Text(text).lineLimit(2)
+            Spacer(minLength: 8)
+        }
+        .font(.system(size: 12.5))
+        .foregroundStyle(Ledger.ink2)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
+        .background(Ledger.wash, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
     }
 }
 
