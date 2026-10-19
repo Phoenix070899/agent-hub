@@ -181,72 +181,238 @@ public func mentionText(_ relativePath: String) -> String {
     "@" + droppedPaths([relativePath])
 }
 
-/// A Markdown document as blocks, enough to render notes, reports, and READMEs: headings,
-/// paragraphs, lists, quotes, code blocks, and rules. Inline styling stays in each block's text.
+/// A Markdown document as blocks, enough to render notes, plans, reports, and READMEs: front
+/// matter, headings, paragraphs, nested and task lists, quotes, tables, code blocks, and rules.
+/// Inline styling stays in each block's text.
 public enum MarkdownBlock: Equatable, Sendable {
+    /// The YAML between the opening `---` lines, as written.
+    case frontMatter(String)
     case heading(level: Int, text: String)
     case paragraph(String)
-    case bullet(String, ordered: Int?)
+    /// `depth` 0 is the outermost list; `checked` is set for a task item (`- [x]`).
+    case bullet(String, ordered: Int?, depth: Int = 0, checked: Bool? = nil)
     case quote(String)
     case code(String, language: String)
+    case table(header: [String], rows: [[String]], alignments: [TableAlignment])
     case rule
 }
 
+public enum TableAlignment: Equatable, Sendable {
+    case leading, center, trailing
+}
+
 public func parseMarkdown(_ source: String) -> [MarkdownBlock] {
+    let lines = source.replacingOccurrences(of: "\r\n", with: "\n").components(separatedBy: "\n")
     var blocks: [MarkdownBlock] = []
-    var paragraph: [String] = []
-    var code: [String]?
-    var language = ""
-    func flush() {
-        if !paragraph.isEmpty { blocks.append(.paragraph(paragraph.joined(separator: " "))) }
-        paragraph = []
+    var index = 0
+    if lines.first?.trimmingCharacters(in: .whitespaces) == "---",
+       let close = lines.indices.dropFirst().first(where: { ["---", "..."].contains(lines[$0].trimmingCharacters(in: .whitespaces)) }) {
+        blocks.append(.frontMatter(lines[1..<close].joined(separator: "\n")))
+        index = close + 1
     }
-    for raw in source.components(separatedBy: "\n") {
+
+    var paragraph = ""
+    var quote: [String] = []
+    /// The indents of the lists open around the current item, outermost first.
+    var listIndents: [Int] = []
+    var afterBlank = false
+    func flush() {
+        if !paragraph.isEmpty { blocks.append(.paragraph(unmark(paragraph))) }
+        paragraph = ""
+        if !quote.isEmpty {
+            blocks.append(.quote(quote.joined(separator: " ").replacingOccurrences(of: " \n\n ", with: "\n\n")))
+        }
+        quote = []
+    }
+    /// Joins a line onto running text: a line ending in a backslash or two spaces breaks there.
+    func join(_ text: String, _ raw: String) -> String {
+        var line = raw.trimmingCharacters(in: .whitespaces)
+        if raw.hasSuffix("  ") && !line.hasSuffix("\\") { line += "\\" }
+        guard !text.isEmpty else { return line }
+        if text.hasSuffix("\\") { return String(text.dropLast()) + "\n" + line }
+        return text + " " + line
+    }
+    /// A break marked on the last line has nothing to break before.
+    func unmark(_ text: String) -> String { text.hasSuffix("\\") ? String(text.dropLast()) : text }
+
+    while index < lines.count {
+        let raw = lines[index]
         let line = raw.trimmingCharacters(in: .whitespaces)
-        if code != nil {
-            if line.hasPrefix("```") {
-                blocks.append(.code(code!.joined(separator: "\n"), language: language))
-                code = nil
-            } else {
-                code!.append(raw)
-            }
+        let indent = raw.prefix { $0 == " " || $0 == "\t" }.reduce(0) { $0 + ($1 == "\t" ? 4 : 1) }
+        defer { index += 1 }
+
+        if line.isEmpty {
+            flush()
+            afterBlank = true
             continue
         }
-        if line.hasPrefix("```") {
+        let blank = afterBlank
+        afterBlank = false
+
+        if line.hasPrefix("<!--") {
             flush()
-            code = []
-            language = String(line.dropFirst(3)).trimmingCharacters(in: .whitespaces)
-        } else if line.isEmpty {
+            while index < lines.count, !lines[index].contains("-->") { index += 1 }
+            continue
+        }
+        if line.hasPrefix("```") || line.hasPrefix("~~~") {
             flush()
-        } else if let level = headingLevel(line) {
+            let fence = String(line.prefix(3))
+            let language = String(line.dropFirst(3)).trimmingCharacters(in: .whitespaces)
+            var code: [String] = []
+            index += 1
+            while index < lines.count, !lines[index].trimmingCharacters(in: .whitespaces).hasPrefix(fence) {
+                // Lines keep their own indentation, less the fence's.
+                code.append(String(lines[index].dropFirst(min(indent, lines[index].prefix { $0 == " " }.count))))
+                index += 1
+            }
+            blocks.append(.code(code.joined(separator: "\n"), language: language))
+            continue
+        }
+        if line.contains("|"), index + 1 < lines.count, let alignments = tableAlignments(lines[index + 1]) {
             flush()
-            blocks.append(.heading(level: level, text: String(line.dropFirst(level + 1))))
-        } else if line == "---" || line == "***" || line == "___" {
+            let header = tableCells(line)
+            let width = header.count
+            var rows: [[String]] = []
+            index += 2
+            while index < lines.count {
+                let row = lines[index].trimmingCharacters(in: .whitespaces)
+                guard !row.isEmpty, row.contains("|") else { break }
+                let cells = tableCells(row)
+                rows.append(Array(cells.prefix(width)) + Array(repeating: "", count: max(0, width - cells.count)))
+                index += 1
+            }
+            index -= 1
+            let aligned = Array(alignments.prefix(width)) + Array(repeating: .leading, count: max(0, width - alignments.count))
+            blocks.append(.table(header: header, rows: rows, alignments: aligned))
+            listIndents = []
+            continue
+        }
+        // "Title" over "=====" or "-----" is a heading.
+        if !paragraph.isEmpty, quote.isEmpty, !line.isEmpty, line.allSatisfy({ $0 == "=" }) || line.allSatisfy({ $0 == "-" }) {
+            blocks.append(.heading(level: line.first == "=" ? 1 : 2, text: paragraph))
+            paragraph = ""
+            continue
+        }
+        if let level = headingLevel(line) {
+            flush()
+            var text = String(line.dropFirst(level + 1))
+            while text.hasSuffix("#") { text.removeLast() }
+            blocks.append(.heading(level: level, text: text.trimmingCharacters(in: .whitespaces)))
+            listIndents = []
+            continue
+        }
+        if isRule(line) {
             flush()
             blocks.append(.rule)
-        } else if line.hasPrefix("- ") || line.hasPrefix("* ") || line.hasPrefix("+ ") {
-            flush()
-            blocks.append(.bullet(String(line.dropFirst(2)), ordered: nil))
-        } else if let dot = line.firstIndex(of: "."), let number = Int(line[..<dot]),
-                  line[line.index(after: dot)...].hasPrefix(" ") {
-            flush()
-            blocks.append(.bullet(String(line[line.index(dot, offsetBy: 2)...]), ordered: number))
-        } else if line.hasPrefix(">") {
-            flush()
-            blocks.append(.quote(String(line.dropFirst()).trimmingCharacters(in: .whitespaces)))
-        } else {
-            paragraph.append(line)
+            listIndents = []
+            continue
         }
+        if line.hasPrefix(">") {
+            if !paragraph.isEmpty { flush() }
+            var text = line.dropFirst()
+            if text.hasPrefix(" ") { text = text.dropFirst() }
+            quote.append(text.isEmpty ? "\n\n" : String(text))
+            continue
+        }
+        if let item = listItem(line) {
+            flush()
+            while let last = listIndents.last, last > indent { listIndents.removeLast() }
+            if listIndents.last.map({ indent > $0 }) ?? true { listIndents.append(indent) }
+            var text = item.text
+            var checked: Bool?
+            for (box, value) in [("[ ] ", false), ("[x] ", true), ("[X] ", true)] where text.hasPrefix(box) {
+                checked = value
+                text = String(text.dropFirst(box.count))
+            }
+            blocks.append(.bullet(text, ordered: item.number, depth: listIndents.count - 1, checked: checked))
+            continue
+        }
+        // A list item's next lines: indented under it, or straight after it.
+        if quote.isEmpty, paragraph.isEmpty, case .bullet(let text, let number, let depth, let checked)? = blocks.last,
+           !blank || indent >= 2 {
+            blocks[blocks.count - 1] = .bullet(join(text, raw), ordered: number, depth: depth, checked: checked)
+            continue
+        }
+        if !quote.isEmpty { flush() }
+        if indent < 2 || paragraph.isEmpty && blank { listIndents = [] }
+        paragraph = join(paragraph, raw)
     }
-    if let code { blocks.append(.code(code.joined(separator: "\n"), language: language)) }
     flush()
-    return blocks
+    return blocks.map { block in
+        guard case .bullet(let text, let number, let depth, let checked) = block else { return block }
+        return .bullet(unmark(text), ordered: number, depth: depth, checked: checked)
+    }
 }
 
 private func headingLevel(_ line: String) -> Int? {
     let hashes = line.prefix { $0 == "#" }.count
     guard (1...6).contains(hashes), line.dropFirst(hashes).hasPrefix(" ") else { return nil }
     return hashes
+}
+
+/// "---", "***", "___", or the same with spaces between.
+private func isRule(_ line: String) -> Bool {
+    let marks = line.filter { $0 != " " }
+    guard marks.count >= 3, let first = marks.first, "-*_".contains(first) else { return false }
+    return marks.allSatisfy { $0 == first }
+}
+
+/// "- text", "* text", "+ text", "3. text", or "3) text".
+private func listItem(_ line: String) -> (text: String, number: Int?)? {
+    if let first = line.first, "-*+".contains(first), line.dropFirst().hasPrefix(" ") {
+        return (String(line.dropFirst(2)).trimmingCharacters(in: .whitespaces), nil)
+    }
+    let digits = line.prefix { $0.isNumber }
+    guard !digits.isEmpty, digits.count <= 9, let number = Int(digits) else { return nil }
+    let rest = line.dropFirst(digits.count)
+    guard let mark = rest.first, mark == "." || mark == ")", rest.dropFirst().hasPrefix(" ") else { return nil }
+    return (String(rest.dropFirst(2)).trimmingCharacters(in: .whitespaces), number)
+}
+
+/// A table's delimiter row, "|:---|---:|", read as each column's alignment; nil for any other line.
+private func tableAlignments(_ line: String) -> [TableAlignment]? {
+    let cells = tableCells(line.trimmingCharacters(in: .whitespaces))
+    guard !cells.isEmpty, line.contains("-") else { return nil }
+    var out: [TableAlignment] = []
+    for cell in cells {
+        guard cell.count >= 1, cell.allSatisfy({ $0 == "-" || $0 == ":" }), cell.contains("-") else { return nil }
+        switch (cell.hasPrefix(":"), cell.hasSuffix(":")) {
+        case (true, true): out.append(.center)
+        case (false, true): out.append(.trailing)
+        default: out.append(.leading)
+        }
+    }
+    return out
+}
+
+/// A table row's cells: split on "|" outside code spans, "\|" kept as a literal bar.
+private func tableCells(_ row: String) -> [String] {
+    var line = Substring(row)
+    if line.hasPrefix("|") { line = line.dropFirst() }
+    if line.hasSuffix("|") && !line.hasSuffix("\\|") { line = line.dropLast() }
+    var cells: [String] = []
+    var cell = ""
+    var inCode = false
+    var escaped = false
+    for char in line {
+        if escaped {
+            cell.append(char == "|" ? "|" : "\\\(char)")
+            escaped = false
+        } else if char == "\\" {
+            escaped = true
+        } else if char == "`" {
+            inCode.toggle()
+            cell.append(char)
+        } else if char == "|" && !inCode {
+            cells.append(cell.trimmingCharacters(in: .whitespaces))
+            cell = ""
+        } else {
+            cell.append(char)
+        }
+    }
+    if escaped { cell.append("\\") }
+    cells.append(cell.trimmingCharacters(in: .whitespaces))
+    return cells
 }
 
 /// Lines that differ between two versions of a file, by position, for the brief highlight when

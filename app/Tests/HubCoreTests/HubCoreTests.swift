@@ -422,3 +422,67 @@ func row(_ id: String, phase: String, quiet: Int, model: String? = nil, effort: 
     #expect(hits[0].text == "let search = 1", "leading space is trimmed")
     #expect(parseGrep("").isEmpty)
 }
+
+@Test func markdownFrontMatterIsMetadataNotARule() {
+    let blocks = parseMarkdown("---\ntitle: Plan\nstatus: draft\n---\n# Plan\n")
+    #expect(blocks == [.frontMatter("title: Plan\nstatus: draft"), .heading(level: 1, text: "Plan")])
+}
+
+@Test func markdownTables() {
+    let source = """
+    | Name | Count | Note |
+    |:-----|------:|:----:|
+    | a \\| b | `x|y` | **ok** |
+    | short |
+    """
+    #expect(parseMarkdown(source) == [.table(
+        header: ["Name", "Count", "Note"],
+        rows: [["a | b", "`x|y`", "**ok**"], ["short", "", ""]],
+        alignments: [.leading, .trailing, .center]
+    )])
+    #expect(parseMarkdown("a | b\n--- | ---\n1 | 2") == [.table(header: ["a", "b"], rows: [["1", "2"]], alignments: [.leading, .leading])])
+}
+
+@Test func markdownNestedTaskAndContinuedLists() {
+    let source = """
+    - top
+      continued here
+      - [x] done
+        - deep
+      - [ ] todo
+    1. first
+       - inside
+    """
+    #expect(parseMarkdown(source) == [
+        .bullet("top continued here", ordered: nil),
+        .bullet("done", ordered: nil, depth: 1, checked: true),
+        .bullet("deep", ordered: nil, depth: 2),
+        .bullet("todo", ordered: nil, depth: 1, checked: false),
+        .bullet("first", ordered: 1),
+        .bullet("inside", ordered: nil, depth: 1),
+    ])
+}
+
+@Test func markdownQuotesCommentsFencesAndBreaks() {
+    let source = """
+    <!-- hidden
+    still hidden -->
+    > one
+    > two
+    >
+    > three
+    Title
+    =====
+    line one\\
+    line two
+    ~~~js
+      let x = 1
+    ~~~
+    """
+    #expect(parseMarkdown(source) == [
+        .quote("one two\n\nthree"),
+        .heading(level: 1, text: "Title"),
+        .paragraph("line one\nline two"),
+        .code("  let x = 1", language: "js"),
+    ])
+}

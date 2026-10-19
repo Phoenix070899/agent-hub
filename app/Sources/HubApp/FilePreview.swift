@@ -327,57 +327,199 @@ private struct CodeLines: View {
     }
 }
 
-/// Markdown as a document: headings, paragraphs, lists, quotes, and code blocks.
+/// Markdown as a document: front matter, headings, paragraphs, lists, quotes, tables, and code.
 private struct MarkdownView: View {
     let blocks: [MarkdownBlock]
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 10) {
-                ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
-                    switch block {
-                    case .heading(let level, let text):
-                        Text(inline(text))
-                            .font(.system(size: [26, 19, 16, 14.5, 14, 13.5][min(level, 6) - 1], weight: .semibold))
-                            .padding(.top, level <= 2 ? 10 : 4)
-                    case .paragraph(let text):
-                        Text(inline(text)).lineSpacing(3)
-                    case .bullet(let text, let ordered):
-                        HStack(alignment: .firstTextBaseline, spacing: 8) {
-                            Text(ordered.map { "\($0)." } ?? "•").foregroundStyle(Ledger.ink2)
-                            Text(inline(text)).lineSpacing(3)
-                        }
-                        .padding(.leading, 6)
-                    case .quote(let text):
-                        Text(inline(text))
-                            .italic()
-                            .foregroundStyle(Ledger.ink2)
-                            .padding(.leading, 14)
-                    case .code(let code, _):
-                        Text(code)
-                            .font(.system(size: 12.5, design: .monospaced))
-                            .padding(12)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(Ledger.wash, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
-                    case .rule:
-                        Divider().overlay(Ledger.rule).padding(.vertical, 4)
-                    }
+            VStack(alignment: .leading, spacing: 0) {
+                ForEach(Array(blocks.enumerated()), id: \.offset) { index, block in
+                    view(block)
+                        .padding(.top, index == 0 ? 0 : gap(blocks[index - 1], block))
                 }
             }
             .font(.system(size: 14))
+            .foregroundStyle(Ledger.ink)
             .fixedSize(horizontal: false, vertical: true)
             .textSelection(.enabled)
-            .frame(maxWidth: 720, alignment: .leading)
+            .frame(maxWidth: 760, alignment: .leading)
             .padding(.horizontal, 40)
-            .padding(.vertical, 24)
+            .padding(.vertical, 28)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 
-    private func inline(_ text: String) -> AttributedString {
-        (try? AttributedString(markdown: text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)))
-            ?? AttributedString(text)
+    /// Items of one list sit close; other blocks get room, headings the most.
+    private func gap(_ previous: MarkdownBlock, _ block: MarkdownBlock) -> CGFloat {
+        switch (previous, block) {
+        case (.bullet, .bullet): 5
+        case (_, .heading(let level, _)): level <= 2 ? 28 : 20
+        case (.heading, _): 10
+        default: 14
+        }
     }
+
+    @ViewBuilder
+    private func view(_ block: MarkdownBlock) -> some View {
+        switch block {
+        case .frontMatter(let yaml):
+            Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: 14, verticalSpacing: 4) {
+                ForEach(Array(frontMatterFields(yaml).enumerated()), id: \.offset) { _, field in
+                    GridRow {
+                        Text(field.key).foregroundStyle(Ledger.ink3)
+                        Text(field.value).foregroundStyle(Ledger.ink2).fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
+            .font(.system(size: 12.5))
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Ledger.wash, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+        case .heading(let level, let text):
+            VStack(alignment: .leading, spacing: 8) {
+                Text(inline(text))
+                    .font(.system(size: [26, 20, 16.5, 15, 14, 13.5][min(level, 6) - 1], weight: .semibold))
+                    .foregroundStyle(level == 6 ? Ledger.ink2 : Ledger.ink)
+                if level <= 2 { Rectangle().fill(Ledger.rule).frame(height: 1) }
+            }
+        case .paragraph(let text):
+            Text(inline(text)).lineSpacing(4)
+        case .bullet(let text, let ordered, let depth, let checked):
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                marker(ordered: ordered, depth: depth, checked: checked)
+                Text(inline(text))
+                    .lineSpacing(4)
+                    .foregroundStyle(checked == true ? Ledger.ink2 : Ledger.ink)
+            }
+            .padding(.leading, 4 + CGFloat(depth) * 22)
+        case .quote(let text):
+            HStack(spacing: 12) {
+                Rectangle().fill(Ledger.rule).frame(width: 3)
+                Text(inline(text)).lineSpacing(4).foregroundStyle(Ledger.ink2)
+            }
+            .fixedSize(horizontal: false, vertical: true)
+        case .code(let code, let language):
+            VStack(alignment: .leading, spacing: 6) {
+                if !language.isEmpty {
+                    Text(language).font(.system(size: 11)).foregroundStyle(Ledger.ink3)
+                }
+                ScrollView(.horizontal) {
+                    Text(code)
+                        .font(.system(size: 12.5, design: .monospaced))
+                        .lineSpacing(2)
+                        .fixedSize()
+                }
+                .scrollIndicators(.hidden)
+            }
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Ledger.wash, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+        case .table(let header, let rows, let alignments):
+            MarkdownTable(header: header, rows: rows, alignments: alignments)
+        case .rule:
+            Rectangle().fill(Ledger.rule).frame(height: 1).padding(.vertical, 6)
+        }
+    }
+
+    @ViewBuilder
+    private func marker(ordered: Int?, depth: Int, checked: Bool?) -> some View {
+        if let checked {
+            Image(systemName: checked ? "checkmark.square.fill" : "square")
+                .font(.system(size: 12.5))
+                .foregroundStyle(checked ? Ledger.done : Ledger.ink3)
+        } else if let ordered {
+            Text("\(ordered).").monospacedDigit().foregroundStyle(Ledger.ink2)
+        } else {
+            Text(["•", "◦", "▪"][depth % 3]).foregroundStyle(Ledger.ink2)
+        }
+    }
+}
+
+/// A Markdown table: a header band, ruled rows, each column aligned as its delimiter says.
+/// Long cells wrap; a table wider than the page scrolls sideways.
+private struct MarkdownTable: View {
+    let header: [String]
+    let rows: [[String]]
+    let alignments: [TableAlignment]
+
+    var body: some View {
+        ScrollView(.horizontal) {
+            Grid(alignment: .topLeading, horizontalSpacing: 0, verticalSpacing: 0) {
+                GridRow {
+                    ForEach(header.indices, id: \.self) { column in
+                        cell(header[column], column: column).fontWeight(.semibold)
+                    }
+                }
+                .background(Ledger.wash)
+                ForEach(rows.indices, id: \.self) { row in
+                    Rectangle().fill(Ledger.rule).frame(height: 1).gridCellUnsizedAxes(.horizontal)
+                    GridRow {
+                        ForEach(header.indices, id: \.self) { column in
+                            cell(rows[row][column], column: column)
+                        }
+                    }
+                }
+            }
+            .fixedSize(horizontal: false, vertical: true)
+            .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).strokeBorder(Ledger.rule))
+            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+        }
+        .scrollIndicators(.hidden)
+    }
+
+    private func cell(_ text: String, column: Int) -> some View {
+        let alignment: Alignment = switch alignments[column] {
+        case .leading: .leading
+        case .center: .center
+        case .trailing: .trailing
+        }
+        return Text(inlineMarkdown(text))
+            .font(.system(size: 13))
+            .lineSpacing(2)
+            .multilineTextAlignment(alignment == .trailing ? .trailing : alignment == .center ? .center : .leading)
+            .frame(maxWidth: 340, alignment: alignment)
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .gridColumnAlignment(alignment.horizontal)
+    }
+}
+
+private func inline(_ text: String) -> AttributedString { inlineMarkdown(text) }
+
+/// Front matter as "key: value" rows; an indented line or "- item" carries on the field above.
+private func frontMatterFields(_ yaml: String) -> [(key: String, value: String)] {
+    var fields: [(key: String, value: String)] = []
+    for line in yaml.components(separatedBy: "\n") where !line.trimmingCharacters(in: .whitespaces).isEmpty {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        if !line.hasPrefix(" "), !trimmed.hasPrefix("- "), let colon = trimmed.firstIndex(of: ":") {
+            let value = trimmed[trimmed.index(after: colon)...].trimmingCharacters(in: .whitespaces)
+            fields.append((String(trimmed[..<colon]), value.trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))))
+        } else if !fields.isEmpty {
+            let item = trimmed.hasPrefix("- ") ? String(trimmed.dropFirst(2)) : trimmed
+            let last = fields[fields.count - 1]
+            fields[fields.count - 1].value = last.value.isEmpty ? item : last.value + ", " + item
+        } else {
+            fields.append(("", trimmed))
+        }
+    }
+    return fields
+}
+
+/// Inline Markdown (bold, italics, code, links, strikethrough) with code spans set in mono on a
+/// tint, and `<br>` as a line break.
+private func inlineMarkdown(_ text: String) -> AttributedString {
+    var source = text
+    for tag in ["<br>", "<br/>", "<br />"] { source = source.replacingOccurrences(of: tag, with: "\n") }
+    guard var out = try? AttributedString(markdown: source, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))
+    else { return AttributedString(source) }
+    for run in out.runs where run.inlinePresentationIntent?.contains(.code) == true {
+        out[run.range].font = .system(size: 12.5, design: .monospaced)
+        out[run.range].backgroundColor = Ledger.wash
+    }
+    return out
 }
 
 private struct PDFPreview: NSViewRepresentable {
