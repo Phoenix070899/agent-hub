@@ -307,15 +307,29 @@ impl Hub {
         self.agents.lock().unwrap().contains_key(&id)
     }
 
-    /// `session.open`, as `hub` and older clients call it: starts the repo's first Orchestrator, or
-    /// a new one when the repo has none.
+    /// `session.open`, as `hub` and older clients call it: starts the Orchestrator working in
+    /// `checkout` (a worktree, or the repo's own folder), else the repo's first, or a new one when
+    /// the repo has none.
     fn open_session(self: &Arc<Self>, p: &Value) -> Result<Value> {
         let repo = repo::root(Path::new(str_param(p, "repo")?))?.display().to_string();
-        let first = db::first_orchestrator(&self.db(), &repo)?;
         let mut params = p.clone();
         params["repo"] = json!(repo);
         params["kind"] = json!(db::agent_kind::ORCHESTRATOR);
-        if let Some(agent) = first {
+        let orchestrators: Vec<db::Agent> = db::agents(&self.db(), Some(&repo))?
+            .into_iter()
+            .filter(|agent| agent.kind == db::agent_kind::ORCHESTRATOR)
+            .collect();
+        let real = |path: &Path| path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        let checkout = p
+            .get("checkout")
+            .and_then(Value::as_str)
+            .map(|path| real(Path::new(path)));
+        let here = checkout.and_then(|checkout| {
+            orchestrators
+                .iter()
+                .find(|agent| real(Path::new(agent.home())) == checkout)
+        });
+        if let Some(agent) = here.or(orchestrators.first()) {
             params["agent"] = json!(agent.id);
         }
         self.open_agent(&params)

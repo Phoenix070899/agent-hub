@@ -181,9 +181,10 @@ enum DoneState {
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let launches = args
-        .first()
-        .is_none_or(|first| first.starts_with('-') && !["-h", "--help", "-V", "--version"].contains(&first.as_str()));
+    let launches = args.first().is_none_or(|first| {
+        first.starts_with('-') && !["-h", "--help", "-V", "--version"].contains(&first.as_str())
+            || launch::agent_id(first).is_some()
+    });
     let result = if launches {
         launch::run(args).map(|_| ExitCode::SUCCESS)
     } else {

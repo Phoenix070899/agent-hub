@@ -1034,3 +1034,40 @@ fn tmux_runs_the_agent_in_its_first_pane() {
     let _ = Command::new("tmux").args(["-L", &socket, "kill-server"]).output();
     assert!(panes.status.success(), "{}", String::from_utf8_lossy(&panes.stderr));
 }
+
+#[test]
+fn hub_opens_the_orchestrator_working_in_this_checkout() {
+    let hub = Hub::new("which");
+    hub.ok(&["status"]);
+    let open = |params: serde_json::Value| {
+        let opened = hub.call("agent.open", params);
+        assert_eq!(opened["ok"], true, "{opened}");
+        opened["result"]["agent"].as_i64().unwrap()
+    };
+    let first = open(serde_json::json!({ "repo": hub.repo_key(), "kind": "orchestrator" }));
+    let login = open(
+        serde_json::json!({ "repo": hub.repo_key(), "kind": "orchestrator", "new_branch": "feat/login", "base": "main" }),
+    );
+    let agents = hub.call("sessions.list", serde_json::json!({}))["result"]["sessions"][0]["agents"].clone();
+    let home = agents.as_array().unwrap().iter().find(|a| a["id"] == login).unwrap()["cwd"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let session = |extra: serde_json::Value| {
+        let mut params = serde_json::json!({ "repo": hub.repo_key() });
+        params
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        let opened = hub.call("session.open", params);
+        assert_eq!(opened["ok"], true, "{opened}");
+        opened["result"]["agent"].as_i64().unwrap()
+    };
+    assert_eq!(session(serde_json::json!({ "checkout": home })), login, "its worktree");
+    assert_eq!(
+        session(serde_json::json!({ "checkout": hub.repo_key() })),
+        first,
+        "the repo's own checkout"
+    );
+    assert_eq!(session(serde_json::json!({})), first, "an older client");
+}

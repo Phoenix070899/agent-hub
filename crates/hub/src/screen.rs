@@ -29,7 +29,10 @@ pub fn look(screen: &str) -> Look {
         return Look::Working;
     }
     // Only the footer below the input box counts: the transcript keeps "1 shell still running" after it ends.
-    let footer = lines.iter().rposition(|line| line.starts_with('❯')).map_or(&lines[..0], |at| &lines[at..]);
+    let footer = lines
+        .iter()
+        .rposition(|line| line.starts_with('❯'))
+        .map_or(&lines[..0], |at| &lines[at..]);
     if footer.iter().any(|line| line.split('·').any(is_shell_count)) {
         return Look::Waiting;
     }
@@ -118,7 +121,8 @@ mod tests {
 
     #[test]
     fn a_finished_background_shell_in_the_transcript_is_idle() {
-        let screen = "✻ Baked for 12s · done 11:00 AM · 1 shell still running\n────\n❯ \n────\n  ⏵⏵ auto mode on · ← 1 agent";
+        let screen =
+            "✻ Baked for 12s · done 11:00 AM · 1 shell still running\n────\n❯ \n────\n  ⏵⏵ auto mode on · ← 1 agent";
         assert_eq!(look(screen), Look::Idle);
     }
 

@@ -86,11 +86,27 @@ fn first_request(request: Option<&str>) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Starts this repo's first Orchestrator in the Hub Daemon, or finds it running, then attaches to it.
-pub fn run(extra: Vec<String>) -> Result<()> {
-    let repo = repo::root(&std::env::current_dir()?)?;
-    let repo = repo.display().to_string();
-    let opened =
-        proto::call("session.open", json!({ "repo": repo, "args": extra })).context("starting the Orchestrator")?;
+/// Starts an Orchestrator in the Hub Daemon, or finds it running, then attaches to it: the agent
+/// named first (`hub a10`), else the Orchestrator working in this checkout, else the repo's first.
+pub fn run(mut extra: Vec<String>) -> Result<()> {
+    if let Some(id) = extra.first().and_then(|first| agent_id(first)) {
+        extra.remove(0);
+        let opened = proto::call("agent.open", json!({ "agent": id, "args": extra }))
+            .with_context(|| format!("starting a{id}"))?;
+        return attach::run(json!({ "agent": opened["agent"] }), &format!("a{id}"));
+    }
+    let here = std::env::current_dir()?;
+    let repo = repo::root(&here)?.display().to_string();
+    let checkout = repo::toplevel(&here)?.display().to_string();
+    let opened = proto::call(
+        "session.open",
+        json!({ "repo": repo, "checkout": checkout, "args": extra }),
+    )
+    .context("starting the Orchestrator")?;
     attach::run(json!({ "agent": opened["agent"] }), "the Orchestrator")
+}
+
+/// `a10` as 10.
+pub fn agent_id(text: &str) -> Option<i64> {
+    text.strip_prefix('a')?.parse().ok()
 }

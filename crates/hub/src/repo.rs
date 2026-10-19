@@ -25,6 +25,21 @@ pub fn root(start: &Path) -> Result<PathBuf> {
     Ok(root.canonicalize().unwrap_or_else(|_| root.to_path_buf()))
 }
 
+/// The top of the checkout `start` is in: the repo's own folder, or a worktree's.
+pub fn toplevel(start: &Path) -> Result<PathBuf> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(start)
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .context("running git")?;
+    if !output.status.success() {
+        bail!("{} is not inside a git checkout", start.display());
+    }
+    let top = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+    Ok(top.canonicalize().unwrap_or(top))
+}
+
 /// Parses `<type>/<task>`, e.g. `feat/magic-link-login`.
 pub fn parse_branch(branch: &str) -> Result<(&str, &str)> {
     let (kind, task) = branch.split_once('/').unwrap_or((branch, ""));
@@ -275,7 +290,17 @@ mod tests {
         std::fs::create_dir_all(&main).unwrap();
         let run = |args: &[&str]| git(&main, args).unwrap();
         run(&["init", "-q", "-b", "plan/rag"]);
-        run(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "init"]);
+        run(&[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "init",
+        ]);
         let tree = dir.join("tree");
         run(&["worktree", "add", "-q", "-b", "feat/x", tree.to_str().unwrap()]);
         assert_eq!(head_branch(&main).as_deref(), Some("plan/rag"));
