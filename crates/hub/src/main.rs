@@ -25,7 +25,7 @@ use serde_json::{json, Value};
     about = "Agent Hub. Run `hub` with no command in a repo to start its Orchestrator.",
     after_help = "Orchestrator: hub worker start|list|read|send|key|close|resume, hub wait, hub reply, hub inbox, hub status\n\
                   Worker:       hub ask, hub send, hub done\n\
-                  Human:        hub attach <w>, hub open <w>"
+                  Human:        hub attach <w12|a3> [--follow], hub open <w>"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -42,7 +42,7 @@ enum Command {
         #[arg(long)]
         force: bool,
     },
-    /// Hub Sessions the daemon knows, and whether each Orchestrator is live.
+    /// Repos the daemon knows, each with its agents (Orchestrators and Normal sessions).
     Sessions,
     /// Dashboard rows for this repo's Workers.
     Status {
@@ -103,8 +103,14 @@ enum Command {
     },
     /// Claude Code Notification hook for Workers (reads the hook JSON on stdin).
     Notify,
-    /// Make this terminal the Worker's terminal; Ctrl-] detaches.
-    Attach { worker: String },
+    /// Make this terminal a Worker's (w12) or an agent's (a3) terminal; Ctrl-] detaches.
+    Attach {
+        target: String,
+        /// Stay and attach again whenever it restarts, until it is closed (Echo's multiplexer
+        /// panes run this).
+        #[arg(long)]
+        follow: bool,
+    },
     /// Open the Worker's terminal in a new Ghostty window.
     Open { worker: String },
 }
@@ -175,9 +181,10 @@ enum DoneState {
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let launches = args
-        .first()
-        .is_none_or(|first| first.starts_with('-') && !["-h", "--help", "-V", "--version"].contains(&first.as_str()));
+    let launches = args.first().is_none_or(|first| {
+        first.starts_with('-') && !["-h", "--help", "-V", "--version"].contains(&first.as_str())
+            || launch::agent_id(first).is_some()
+    });
     let result = if launches {
         launch::run(args).map(|_| ExitCode::SUCCESS)
     } else {
@@ -209,6 +216,11 @@ fn text_arg(text: &str) -> Result<String> {
     }
 }
 
+/// The Orchestrator this `hub` runs in (`HUB_AGENT`, set by the daemon), if any.
+fn agent_env() -> Option<i64> {
+    std::env::var("HUB_AGENT").ok().and_then(|id| id.parse().ok())
+}
+
 fn repo_arg(repo: Option<PathBuf>) -> Result<String> {
     let start = match repo {
         Some(path) => path,
@@ -236,12 +248,24 @@ fn run(cli: Cli) -> Result<ExitCode> {
         Command::Sessions => {
             let result = proto::call("sessions.list", json!({}))?;
             for session in result["sessions"].as_array().into_iter().flatten() {
-                let live = if session["live"].as_bool() == Some(true) {
-                    "live"
-                } else {
-                    "stopped"
-                };
-                println!("{live:<8} {}", session["repo"].as_str().unwrap_or(""));
+                println!("{}", session["repo"].as_str().unwrap_or(""));
+                for agent in session["agents"].as_array().into_iter().flatten() {
+                    let live = if agent["live"].as_bool() == Some(true) {
+                        "live"
+                    } else {
+                        "stopped"
+                    };
+                    let kind = if agent["kind"] == "claude" {
+                        "Normal"
+                    } else {
+                        "Orchestrator"
+                    };
+                    println!(
+                        "  a{:<4} {live:<8} {kind:<13} {}",
+                        agent["id"],
+                        agent["name"].as_str().unwrap_or("(unnamed)")
+                    );
+                }
             }
         }
         Command::Shutdown { force } => {
@@ -265,7 +289,10 @@ fn run(cli: Cli) -> Result<ExitCode> {
         }
         Command::Worker(command) => return worker(command),
         Command::Wait { timeout, json, repo } => {
-            let result = proto::call("wait", json!({ "repo": repo_arg(repo)?, "timeout_ms": timeout * 1000 }))?;
+            let result = proto::call(
+                "wait",
+                json!({ "repo": repo_arg(repo)?, "agent": agent_env(), "timeout_ms": timeout * 1000 }),
+            )?;
             if json {
                 return print_json(&result).map(|_| ExitCode::SUCCESS);
             }
@@ -339,7 +366,18 @@ fn run(cli: Cli) -> Result<ExitCode> {
             println!("Final Report sent. Stop here and stay idle.");
         }
         Command::Notify => notify(),
-        Command::Attach { worker } => attach::run(json!({ "id": parse_id(&worker)? }), &worker)?,
+        Command::Attach { target, follow } => {
+            let parsed = attach::Target::parse(&target)?;
+            if follow {
+                attach::follow(parsed)?;
+            } else {
+                let params = match parsed {
+                    attach::Target::Worker(id) => json!({ "id": id }),
+                    attach::Target::Agent(id) => json!({ "agent": id }),
+                };
+                attach::run(params, &target)?;
+            }
+        }
         Command::Open { worker } => open(parse_id(&worker)?)?,
     }
     Ok(ExitCode::SUCCESS)
@@ -395,7 +433,8 @@ fn worker(command: WorkerCommand) -> Result<ExitCode> {
             };
             let result = proto::call(
                 "worker.start",
-                json!({ "repo": repo_arg(repo)?, "profile": profile, "spec": spec, "worktree": worktree, "title": title }),
+                json!({ "repo": repo_arg(repo)?, "profile": profile, "spec": spec, "worktree": worktree, "title": title,
+                        "agent": agent_env() }),
             )?;
             if json {
                 print_json(&result)?;
@@ -413,7 +452,7 @@ fn worker(command: WorkerCommand) -> Result<ExitCode> {
             }
         }
         WorkerCommand::List { json, repo } => {
-            let result = proto::call("worker.list", json!({ "repo": repo_arg(repo)? }))?;
+            let result = proto::call("worker.list", json!({ "repo": repo_arg(repo)?, "agent": agent_env() }))?;
             if json {
                 return print_json(&result).map(|_| ExitCode::SUCCESS);
             }

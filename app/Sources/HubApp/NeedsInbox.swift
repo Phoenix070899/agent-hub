@@ -1,134 +1,169 @@
 import HubCore
 import SwiftUI
 
-/// Everything waiting on the human, above the terminal, oldest first.
-struct NeedsInbox: View {
-    let needs: [Need]
-
-    var body: some View {
-        ScrollView {
-            VStack(spacing: 10) {
-                ForEach(needs) { need in
-                    NeedCard(need: need)
-                }
-            }
-            .padding(14)
-        }
-        .frame(maxHeight: 300)
-        .fixedSize(horizontal: false, vertical: true)
-    }
-}
-
-struct NeedCard: View {
+/// One thing waiting on the human, in the ledger's Needs you section: who and what on one line,
+/// then the command and its buttons, or the question and a reply field.
+struct NeedItem: View {
     @EnvironmentObject private var model: AppModel
     let need: Need
+    let repo: String
     /// Local state as an ObservableObject: the command-line tools lack the plugin `@State` needs.
     @StateObject private var draft = Draft()
+    @FocusState private var replyFocused: Bool
 
     var body: some View {
-        HStack(alignment: .top, spacing: 12) {
-            Image(systemName: icon)
-                .font(.title3)
-                .foregroundStyle(.yellow)
-                .frame(width: 22)
-            VStack(alignment: .leading, spacing: 8) {
-                HStack(spacing: 6) {
-                    Text(heading).fontWeight(.semibold)
-                    Text("·").foregroundStyle(.secondary)
-                    Text("\(need.worker) \(need.profile): \(need.title)")
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                    Spacer()
-                    Button("Open") {
-                        if let repo = model.selectedRepo { model.select(.worker(repo: repo, id: need.worker)) }
-                    }
-                    .buttonStyle(.glass)
-                    .controlSize(.small)
-                }
-                content
+        VStack(alignment: .leading, spacing: 6) {
+            // The whole line opens what asked, not just the highlighted words.
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Marked(need.headline)
+                    .lineLimit(1)
+                Spacer(minLength: 6)
+                Text(age).font(.system(size: 12)).foregroundStyle(Ledger.ink3).monospacedDigit()
             }
+            .contentShape(Rectangle())
+            .onTapGesture(perform: open)
+            .help("Open \(need.worker ?? need.title)")
+            content
         }
-        .padding(14)
-        .glassEffect(.regular.tint(Color.yellow.opacity(0.12)), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-        .disabled(draft.sent)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 9)
+        .background(Ledger.needCard, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+        .disabled(draft.sent || !model.connected)
         .opacity(draft.sent ? 0.55 : 1)
+        .contextMenu {
+            Button("Open \(need.worker ?? need.title)", action: open)
+        }
+        .onAppear(perform: takeReplyFocus)
+        .onChange(of: model.replyFocus) { takeReplyFocus() }
     }
 
-    private var icon: String {
-        switch need.kind {
-        case .question: return "questionmark.bubble.fill"
-        case .permissionPrompt: return "hand.raised.fill"
-        case .idlePrompt: return "pause.circle.fill"
-        case .other: return "exclamationmark.circle.fill"
+    /// Answer in the menu bar asked for this question's reply field. It waits a beat so the
+    /// terminal that Answer just showed has taken the keyboard first.
+    private func takeReplyFocus() {
+        guard model.replyFocus == need.id else { return }
+        model.replyFocus = nil
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { replyFocused = true }
+    }
+
+    /// Shows the terminal the Need is about: the Worker's, or the agent's own.
+    private func open() {
+        if let worker = need.worker {
+            model.select(.worker(repo: repo, id: worker))
+        } else if let agent = need.agent {
+            model.select(.agent(repo: repo, id: agent))
         }
     }
 
-    private var heading: String {
-        switch need.kind {
-        case .question: return "Question"
-        case .permissionPrompt: return "Permission"
-        case .idlePrompt: return "Idle"
-        case .other: return "Needs you"
-        }
+    private var age: String {
+        formatAge(max(Int(Date().timeIntervalSince1970) - need.at, 0))
     }
 
     @ViewBuilder private var content: some View {
         switch need.kind {
         case .permissionPrompt:
-            Text(promptLines)
-                .font(.system(.callout, design: .monospaced))
-                .textSelection(.enabled)
-                .padding(8)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 6))
-            HStack {
-                TextField("Reason if you deny (optional)", text: $draft.text)
-                    .textFieldStyle(.roundedBorder)
-                Button("Deny") {
-                    draft.sent = true
-                    model.decide(need, approve: false, note: draft.text)
-                }
-                .buttonStyle(.glass)
+            HStack(spacing: 8) {
+                Text(need.command ?? need.body)
+                    .font(Ledger.mono)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .textSelection(.enabled)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 5)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Ledger.wash, in: RoundedRectangle(cornerRadius: 5, style: .continuous))
+                    .help(need.promptLines.joined(separator: "\n"))
                 Button("Approve") {
                     draft.sent = true
-                    model.decide(need, approve: true, note: "")
+                    model.decide(need, repo: repo, approve: true, note: "")
                 }
-                .buttonStyle(.glassProminent)
-                .tint(.green)
+                .buttonStyle(.ledgerPrimary)
+                Button("Deny") {
+                    // A Normal session's prompt has only the human to tell: deny it outright.
+                    if need.worker == nil {
+                        draft.sent = true
+                        model.decide(need, repo: repo, approve: false, note: "")
+                    } else {
+                        draft.denying.toggle()
+                    }
+                }
+                .buttonStyle(.ledger)
+            }
+            if draft.denying {
+                HStack(spacing: 8) {
+                    TextField("Why, for \(need.worker ?? "it") (optional)", text: $draft.text)
+                        .textFieldStyle(.plain)
+                    .ledgerField()
+                        .onSubmit(deny)
+                    Button("Deny", action: deny).buttonStyle(.ledgerPrimary)
+                }
             }
         case .question:
-            Text(need.body).textSelection(.enabled)
-            HStack {
-                TextField("Answer", text: $draft.text)
-                    .textFieldStyle(.roundedBorder)
+            Text(need.body)
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack(alignment: .bottom, spacing: 8) {
+                TextField("Reply to \(need.worker ?? "it")", text: $draft.text, axis: .vertical)
+                    .lineLimit(1...5)
+                    .textFieldStyle(.plain)
+                    .ledgerField()
+                    .focused($replyFocused)
                     .onSubmit(send)
                 Button("Send", action: send)
-                    .buttonStyle(.glassProminent)
-                    .disabled(draft.text.trimmingCharacters(in: .whitespaces).isEmpty)
+                    .buttonStyle(.ledger)
+                    .disabled(draft.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
         case .idlePrompt:
-            Text("Idle at its input with no Final Report. The Orchestrator nudges it; open the terminal to step in.")
-                .foregroundStyle(.secondary)
+            HStack(spacing: 8) {
+                Text("Idle at its prompt with no Final Report. The Orchestrator nudges it.")
+                    .font(.system(size: 12.5))
+                    .foregroundStyle(Ledger.ink2)
+                Spacer(minLength: 4)
+                Button("Open", action: open).buttonStyle(.ledger)
+            }
         case .other:
-            Text(need.body.split(separator: "\n").prefix(3).joined(separator: "\n"))
+            HStack(alignment: .top, spacing: 8) {
+                Text(need.body.split(separator: "\n").prefix(3).joined(separator: "\n"))
+                    .font(.system(size: 12.5))
+                    .foregroundStyle(Ledger.ink2)
+                Spacer(minLength: 4)
+                Button("Open", action: open).buttonStyle(.ledger)
+            }
         }
     }
 
-    /// The prompt without its closing question, which the buttons answer.
-    private var promptLines: String {
-        let lines = (need.prompt ?? need.body).split(separator: "\n", omittingEmptySubsequences: false)
-        return lines.filter { !$0.hasPrefix("Do you want") }.joined(separator: "\n")
+    private func deny() {
+        draft.sent = true
+        model.decide(need, repo: repo, approve: false, note: draft.text)
     }
 
     private func send() {
         let answer = draft.text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !answer.isEmpty else { return }
         draft.sent = true
-        model.reply(need, text: answer)
+        model.reply(need, repo: repo, text: answer)
     }
+}
+
+/// One on/off bit of view state, for views that would otherwise need `@State`.
+final class Flag: ObservableObject {
+    @Published var on = false
 }
 
 final class Draft: ObservableObject {
     @Published var text = ""
     @Published var sent = false
+    @Published var denying = false
+}
+
+extension Need {
+    /// Who wants what, for the highlighter: "w21 sasuke wants to run".
+    var headline: String {
+        let who = worker.map { "\($0) \(profile)" } ?? (profile == "orchestrator" ? "The Orchestrator" : "Claude Code")
+        switch kind {
+        case .question: return "\(who) asks"
+        case .permissionPrompt: return "\(who) wants to run"
+        case .idlePrompt: return "\(who) is idle"
+        case .other: return "\(who) needs you"
+        }
+    }
 }

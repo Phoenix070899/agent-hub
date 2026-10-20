@@ -15,10 +15,15 @@ if [ "$1" = "-p" ] && [ "$2" = "/usage" ]; then
   exit 0
 fi
 echo "· Working… (1s · fake agent)"
+# An Orchestrator gets "orchestrator" first; opened with the request "prompt me", it shows a prompt.
+if [ "$1" = "orchestrator" ] && [ "$2" = "prompt me" ]; then shift; fi
 case "$1" in
   ask*) answer=$(hub ask "Which color?") && hub done --state done "answer was $answer" ;;
   done*) hub done --state done "finished" ;;
+  status*) hub send --type status "41 of 44 tests passing
+details the ledger leaves out" ;;
   exit*) sleep 2; echo "fake agent giving up"; sleep 1; exit 1 ;;
+  request*) echo "first request: $2" ;;
   echo*) while IFS= read -r line; do echo "got: $line"; done ;;
   prompt*)
     printf '────────\nBash command\n rm -rf junk\nDo you want to proceed?\n> 1. Yes\n  2. No\n'

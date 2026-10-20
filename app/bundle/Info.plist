@@ -2,13 +2,14 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>CFBundleName</key><string>Hub</string>
-    <key>CFBundleDisplayName</key><string>Hub</string>
-    <key>CFBundleIdentifier</key><string>dev.agenthub.Hub</string>
+    <key>CFBundleName</key><string>Echo</string>
+    <key>CFBundleDisplayName</key><string>Echo</string>
+    <key>CFBundleIdentifier</key><string>dev.agenthub.Echo</string>
     <key>CFBundleExecutable</key><string>HubApp</string>
+    <key>CFBundleIconFile</key><string>AppIcon</string>
     <key>CFBundlePackageType</key><string>APPL</string>
-    <key>CFBundleShortVersionString</key><string>0.1.0</string>
-    <key>CFBundleVersion</key><string>1</string>
+    <key>CFBundleShortVersionString</key><string>0.2.0</string>
+    <key>CFBundleVersion</key><string>2</string>
     <key>LSMinimumSystemVersion</key><string>26.0</string>
     <key>NSHighResolutionCapable</key><true/>
     <key>NSPrincipalClass</key><string>NSApplication</string>

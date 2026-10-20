@@ -22,6 +22,12 @@ public struct TerminalTheme: Codable, Equatable, Sendable, Identifiable {
         self.ansi = ansi
     }
 
+    /// Whether its background is dark, so the window around it should be too.
+    public var isDark: Bool {
+        guard let c = Self.rgb(background) else { return true }
+        return 0.2126 * c.red + 0.7152 * c.green + 0.0722 * c.blue < 0.5
+    }
+
     /// Orca's "Ayu Dark", the theme the human's Orca terminal uses.
     public static let ayuDark = TerminalTheme(
         name: "Ayu Dark", background: "#0a0e14", foreground: "#b3b1ad", cursor: "#e6b450", selection: "#273747",
@@ -59,18 +65,43 @@ public struct TerminalTheme: Codable, Equatable, Sendable, Identifiable {
     }
 }
 
-/// The terminal look the human chose: a preset, their colour overrides, and the font.
+/// The terminal look the human chose: a preset, their colour overrides, the font, and an
+/// optional image behind every terminal.
 public struct TerminalAppearance: Codable, Equatable, Sendable {
     public var theme: TerminalTheme
     public var fontName: String
     public var fontSize: Double
+    /// The image file drawn behind every terminal; nil for the plain theme background.
+    public var backgroundImage: String?
+    /// How much of the theme background covers the image, 0...1, so text stays readable.
+    public var backgroundImageDim: Double
+    /// Blur radius for the image in points; 0 keeps it sharp.
+    public var backgroundImageBlur: Double
+
+    public static let defaultImageDim = 0.7
 
     /// Matches the human's Orca terminal: Ayu Dark in JetBrainsMono Nerd Font 14.
     public static let orca = TerminalAppearance(theme: .ayuDark, fontName: "JetBrainsMono Nerd Font", fontSize: 14)
 
-    public init(theme: TerminalTheme, fontName: String, fontSize: Double) {
+    public init(theme: TerminalTheme, fontName: String, fontSize: Double,
+                backgroundImage: String? = nil, backgroundImageDim: Double = defaultImageDim,
+                backgroundImageBlur: Double = 0) {
         self.theme = theme
         self.fontName = fontName
         self.fontSize = fontSize
+        self.backgroundImage = backgroundImage
+        self.backgroundImageDim = backgroundImageDim
+        self.backgroundImageBlur = backgroundImageBlur
+    }
+
+    /// A look saved before background images still loads, without one.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(theme: try c.decode(TerminalTheme.self, forKey: .theme),
+                  fontName: try c.decode(String.self, forKey: .fontName),
+                  fontSize: try c.decode(Double.self, forKey: .fontSize),
+                  backgroundImage: try c.decodeIfPresent(String.self, forKey: .backgroundImage),
+                  backgroundImageDim: try c.decodeIfPresent(Double.self, forKey: .backgroundImageDim) ?? Self.defaultImageDim,
+                  backgroundImageBlur: try c.decodeIfPresent(Double.self, forKey: .backgroundImageBlur) ?? 0)
     }
 }

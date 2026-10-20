@@ -292,6 +292,253 @@ fn the_daemon_owns_one_orchestrator_per_repo() {
 }
 
 #[test]
+fn a_picked_orchestrator_model_is_kept_for_the_session() {
+    let hub = Hub::new("model");
+    hub.ok(&["status"]);
+    let repo = hub.repo_key();
+    let opened = hub.call(
+        "session.open",
+        serde_json::json!({ "repo": repo, "model": "claude-opus-5-5" }),
+    );
+    assert_eq!(opened["result"]["model"], "claude-opus-5-5", "{opened}");
+    let sessions = hub.call("sessions.list", serde_json::json!({}));
+    assert_eq!(sessions["result"]["sessions"][0]["model"], "claude-opus-5-5");
+    hub.call("session.close", serde_json::json!({ "repo": repo }));
+    hub.eventually("the Orchestrator to stop", || {
+        hub.call("sessions.list", serde_json::json!({}))["result"]["sessions"][0]["live"] == false
+    });
+    let reopened = hub.call("session.open", serde_json::json!({ "repo": repo }));
+    assert_eq!(
+        reopened["result"]["model"], "claude-opus-5-5",
+        "a start without a model keeps the saved one"
+    );
+    let mut stream = UnixStream::connect(hub.state.join("hubd.sock")).unwrap();
+    let request = serde_json::json!({ "method": "events", "params": { "repo": repo } });
+    stream.write_all(format!("{request}\n").as_bytes()).unwrap();
+    stream.set_read_timeout(Some(Duration::from_secs(15))).unwrap();
+    let mut lines = BufReader::new(stream).lines();
+    lines.next();
+    let snapshot: serde_json::Value = serde_json::from_str(&lines.next().unwrap().unwrap()).unwrap();
+    assert_eq!(snapshot["orchestrator"]["model"], "claude-opus-5-5");
+}
+
+#[test]
+fn worker_rows_carry_model_effort_and_progress() {
+    let hub = Hub::new("progress");
+    hub.ok(&["status"]);
+    let mut stream = UnixStream::connect(hub.state.join("hubd.sock")).unwrap();
+    let request = serde_json::json!({ "method": "events", "params": { "repo": hub.repo_key() } });
+    stream.write_all(format!("{request}\n").as_bytes()).unwrap();
+    stream.set_read_timeout(Some(Duration::from_secs(15))).unwrap();
+    let mut lines = BufReader::new(stream).lines();
+    lines.next();
+    hub.ok(&["worker", "start", "bash", "--spec", "status then wait"]);
+    loop {
+        let snapshot: serde_json::Value = serde_json::from_str(&lines.next().unwrap().unwrap()).unwrap();
+        let Some(row) = snapshot["workers"].as_array().and_then(|rows| rows.first()) else {
+            continue;
+        };
+        assert_eq!(row["model"], "claude-haiku-5-5");
+        assert_eq!(row["effort"], "low");
+        assert_eq!(snapshot["orchestrator"]["model"], serde_json::Value::Null);
+        if row["progress"] == "41 of 44 tests passing" {
+            break;
+        }
+    }
+}
+
+/// The repo's first snapshot from the events stream.
+fn snapshot(hub: &Hub) -> serde_json::Value {
+    let mut stream = UnixStream::connect(hub.state.join("hubd.sock")).unwrap();
+    let request = serde_json::json!({ "method": "events", "params": { "repo": hub.repo_key() } });
+    stream.write_all(format!("{request}\n").as_bytes()).unwrap();
+    stream.set_read_timeout(Some(Duration::from_secs(15))).unwrap();
+    let mut lines = BufReader::new(stream).lines();
+    lines.next();
+    serde_json::from_str(&lines.next().unwrap().unwrap()).unwrap()
+}
+
+#[test]
+fn a_final_report_stays_in_echo_until_dismissed() {
+    let hub = Hub::new("dismiss");
+    hub.ok(&["worker", "start", "bash", "--spec", "done quickly"]);
+    hub.eventually("w1 to finish", || snapshot(&hub)["workers"][0]["phase"] == "done");
+    let row = snapshot(&hub)["workers"][0].clone();
+    assert!(row["settledAt"].is_i64(), "{row}");
+    // The Orchestrator tidying up does not take the report off Echo's Done list.
+    hub.ok(&["worker", "close", "w1"]);
+    assert_eq!(snapshot(&hub)["workers"][0]["id"], "w1");
+    hub.call("worker.dismiss", serde_json::json!({ "id": 1 }));
+    assert_eq!(snapshot(&hub)["workers"], serde_json::json!([]));
+}
+
+#[test]
+fn a_repo_runs_several_orchestrators_and_each_hears_only_its_workers() {
+    let hub = Hub::new("agents");
+    hub.ok(&["status"]);
+    let repo = hub.repo_key();
+    let a = hub.call(
+        "agent.open",
+        serde_json::json!({ "repo": repo, "kind": "orchestrator", "name": "Rerank" }),
+    );
+    let b = hub.call(
+        "agent.open",
+        serde_json::json!({ "repo": repo, "kind": "orchestrator" }),
+    );
+    let (a, b) = (
+        a["result"]["agent"].as_i64().unwrap(),
+        b["result"]["agent"].as_i64().unwrap(),
+    );
+    assert_ne!(a, b);
+    let sessions = hub.call("sessions.list", serde_json::json!({}));
+    let agents = sessions["result"]["sessions"][0]["agents"].as_array().unwrap().clone();
+    assert_eq!(agents.len(), 2);
+    assert_eq!(agents[0]["name"], "Rerank");
+    assert!(agents.iter().all(|agent| agent["live"] == true));
+
+    // `hub worker start` in b's terminal carries HUB_AGENT=b.
+    let started = hub.run_with(
+        &["worker", "start", "bash", "--spec", "done quickly"],
+        &[("HUB_AGENT", &b.to_string())],
+    );
+    assert!(started.status.success(), "{}", String::from_utf8_lossy(&started.stderr));
+    hub.eventually("w1 to finish", || snapshot(&hub)["workers"][0]["phase"] == "done");
+    assert_eq!(snapshot(&hub)["workers"][0]["agent"], b);
+    let listed = |agent: i64| {
+        let out = hub.run_with(&["worker", "list", "--json"], &[("HUB_AGENT", &agent.to_string())]);
+        serde_json::from_slice::<serde_json::Value>(&out.stdout).unwrap()["workers"]
+            .as_array()
+            .unwrap()
+            .len()
+    };
+    assert_eq!(
+        (listed(a), listed(b)),
+        (0, 1),
+        "each Orchestrator lists only its own Workers"
+    );
+    let for_a = hub.call(
+        "wait",
+        serde_json::json!({ "repo": repo, "agent": a, "timeout_ms": 500 }),
+    );
+    assert_eq!(for_a["result"]["messages"].as_array().map(Vec::len), Some(0), "{for_a}");
+    let for_b = hub.call(
+        "wait",
+        serde_json::json!({ "repo": repo, "agent": b, "timeout_ms": 5000 }),
+    );
+    assert_eq!(for_b["result"]["messages"][0]["kind"], "done", "{for_b}");
+
+    hub.call("agent.forget", serde_json::json!({ "agent": a }));
+    let sessions = hub.call("sessions.list", serde_json::json!({}));
+    assert_eq!(sessions["result"]["sessions"][0]["agents"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn a_normal_session_puts_its_permission_prompt_under_needs_you() {
+    let hub = Hub::new("normal");
+    hub.ok(&["status"]);
+    let repo = hub.repo_key();
+    // The fake agent runs the script its Normal session is named after.
+    let opened = hub.call(
+        "agent.open",
+        serde_json::json!({ "repo": repo, "kind": "claude", "name": "prompt me" }),
+    );
+    let agent = opened["result"]["agent"].as_i64().unwrap();
+    assert_eq!(opened["result"]["kind"], "claude");
+    hub.eventually("the prompt to reach Needs you", || {
+        snapshot(&hub)["needs"]
+            .as_array()
+            .is_some_and(|needs| !needs.is_empty())
+    });
+    let need = snapshot(&hub)["needs"][0].clone();
+    assert_eq!(need["agent"], agent);
+    assert_eq!(need["worker"], serde_json::Value::Null);
+    assert_eq!(need["prompt"], "Bash command\nrm -rf junk\nDo you want to proceed?");
+    let decided = hub.call("decide", serde_json::json!({ "agent": agent, "approve": true }));
+    assert_eq!(decided["ok"], true, "{decided}");
+    hub.eventually("the prompt to clear", || {
+        snapshot(&hub)["needs"].as_array().is_some_and(|needs| needs.is_empty())
+    });
+}
+
+#[test]
+fn an_orchestrator_puts_its_own_permission_prompt_under_needs_you() {
+    let hub = Hub::new("orchprompt");
+    hub.ok(&["status"]);
+    let opened = hub.call(
+        "agent.open",
+        serde_json::json!({ "repo": hub.repo_key(), "kind": "orchestrator", "request": "prompt me" }),
+    );
+    let agent = opened["result"]["agent"].as_i64().unwrap();
+    hub.eventually("the prompt to reach Needs you", || {
+        snapshot(&hub)["needs"]
+            .as_array()
+            .is_some_and(|needs| !needs.is_empty())
+    });
+    let need = snapshot(&hub)["needs"][0].clone();
+    assert_eq!(need["agent"], agent);
+    assert_eq!(need["worker"], serde_json::Value::Null);
+    assert_eq!(need["profile"], "orchestrator");
+    assert_eq!(need["title"], "Orchestrator");
+    assert_eq!(need["prompt"], "Bash command\nrm -rf junk\nDo you want to proceed?");
+    let decided = hub.call("decide", serde_json::json!({ "agent": agent, "approve": true }));
+    assert_eq!(decided["ok"], true, "{decided}");
+    hub.eventually("the prompt to clear", || {
+        snapshot(&hub)["needs"].as_array().is_some_and(|needs| needs.is_empty())
+    });
+}
+
+#[test]
+fn an_unnamed_agent_is_named_after_the_first_request() {
+    let hub = Hub::new("naming");
+    hub.ok(&["status"]);
+    let repo = hub.repo_key();
+    let opened = hub.call(
+        "agent.open",
+        serde_json::json!({ "repo": repo, "kind": "orchestrator" }),
+    );
+    let agent = opened["result"]["agent"].as_i64().unwrap();
+    let mut stream = UnixStream::connect(hub.state.join("hubd.sock")).unwrap();
+    let request = serde_json::json!({ "method": "attach", "params": { "agent": agent, "rows": 30, "cols": 100 } });
+    stream.write_all(format!("{request}\n").as_bytes()).unwrap();
+    stream.write_all(b"/model opus\r").unwrap();
+    stream.write_all(b"fix the flaky bench, then rerun it\r").unwrap();
+    let name =
+        || hub.call("sessions.list", serde_json::json!({}))["result"]["sessions"][0]["agents"][0]["name"].clone();
+    hub.eventually("the agent to be named", || name() != serde_json::Value::Null);
+    assert_eq!(name(), "Fix the flaky bench, then rerun");
+    stream.write_all(b"something else entirely\r").unwrap();
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(
+        name(),
+        "Fix the flaky bench, then rerun",
+        "only the first request names it"
+    );
+    hub.call("agent.rename", serde_json::json!({ "agent": agent, "name": "Bench" }));
+    assert_eq!(name(), "Bench");
+}
+
+#[test]
+fn a_new_agent_starts_on_the_request_it_was_opened_with() {
+    let hub = Hub::new("request");
+    hub.ok(&["status"]);
+    let opened = hub.call(
+        "agent.open",
+        serde_json::json!({ "repo": hub.repo_key(), "kind": "claude", "name": "request",
+                            "request": "Fix issue #12: the bench is flaky" }),
+    );
+    let agent = opened["result"]["agent"].as_i64().unwrap();
+    let mut stream = UnixStream::connect(hub.state.join("hubd.sock")).unwrap();
+    let attach = serde_json::json!({ "method": "attach", "params": { "agent": agent, "rows": 30, "cols": 100 } });
+    stream.write_all(format!("{attach}\n").as_bytes()).unwrap();
+    stream.set_read_timeout(Some(Duration::from_secs(15))).unwrap();
+    read_until(
+        &mut stream,
+        &mut Vec::new(),
+        "first request: Fix issue #12: the bench is flaky",
+    );
+}
+
+#[test]
 fn events_stream_a_snapshot_on_every_change() {
     let hub = Hub::new("events");
     hub.ok(&["status"]);
@@ -378,6 +625,226 @@ fn a_human_reply_in_the_app_is_reported() {
         "{messages}"
     );
     assert!(messages.contains("answer was green"));
+}
+
+#[test]
+fn a_worker_diff_shows_its_branch_and_a_review_reaches_it() {
+    let hub = Hub::new("review");
+    hub.ok(&[
+        "worker",
+        "start",
+        "bash",
+        "--spec",
+        "echo",
+        "--worktree",
+        "new:feat/review",
+    ]);
+    let listed = hub.call("worker.list", serde_json::json!({ "repo": hub.repo_key() }));
+    let cwd = PathBuf::from(
+        listed["result"]["workers"][0]["cwd"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{listed}")),
+    );
+    let commit = ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam"];
+    // The Worker commits one change and leaves a new file uncommitted.
+    std::fs::write(cwd.join("README.md"), "# test\nworker line\n").unwrap();
+    git(&cwd, &[&commit[..], &["worker change"]].concat());
+    std::fs::write(cwd.join("notes.txt"), "new file\n").unwrap();
+    // Main moves on meanwhile; that is not the Worker's change.
+    std::fs::write(hub.repo.join("MAIN.md"), "main only\n").unwrap();
+    git(&hub.repo, &["add", "."]);
+    git(&hub.repo, &[&commit[..], &["main change"]].concat());
+
+    let diff = hub.call("worker.diff", serde_json::json!({ "id": 1 }));
+    let text = diff["result"]["diff"].as_str().unwrap_or_else(|| panic!("{diff}"));
+    assert!(text.contains("+worker line"), "{text}");
+    assert!(text.contains("+++ b/notes.txt") && text.contains("+new file"), "{text}");
+    assert!(!text.contains("MAIN.md"), "{text}");
+    assert_eq!(diff["result"]["truncated"], false);
+
+    let sent = hub.call(
+        "worker.review",
+        serde_json::json!({ "id": 1, "to": "worker", "body": "README.md:2 say why" }),
+    );
+    assert_eq!(sent["ok"], true, "{sent}");
+    hub.eventually("the review to be typed into the Worker", || {
+        hub.ok(&["worker", "read", "w1"]).contains("got: README.md:2 say why")
+    });
+    hub.call(
+        "worker.review",
+        serde_json::json!({ "id": 1, "to": "orchestrator", "body": "notes.txt:1 drop this file" }),
+    );
+    let messages = hub.wait();
+    assert!(
+        messages.contains("The human sent w1 a review of its changes in Echo:\nREADME.md:2 say why"),
+        "{messages}"
+    );
+    assert!(
+        messages
+            .contains("The human reviewed w1's changes in Echo and wants them addressed:\nnotes.txt:1 drop this file"),
+        "{messages}"
+    );
+}
+
+#[test]
+fn a_fan_out_runs_one_task_three_ways_and_the_pick_is_merged() {
+    let hub = Hub::new("fanout");
+    hub.ok(&["status"]);
+    let profiles = hub.call("profiles.list", serde_json::json!({}));
+    let naruto = profiles["result"]["profiles"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["name"] == "naruto")
+        .cloned();
+    assert_eq!(
+        naruto.map(|p| p["writes"].clone()),
+        Some(serde_json::json!(true)),
+        "{profiles}"
+    );
+    let fanned = hub.call(
+        "worker.fanout",
+        serde_json::json!({ "repo": hub.repo_key(), "profile": "bash", "spec": "done", "title": "Try it",
+                            "branch": "feat/try", "count": 3 }),
+    );
+    assert_eq!(
+        fanned["result"]["workers"],
+        serde_json::json!(["w1", "w2", "w3"]),
+        "{fanned}"
+    );
+    let workers =
+        || hub.call("worker.list", serde_json::json!({ "repo": hub.repo_key() }))["result"]["workers"].clone();
+    hub.eventually("every try to finish", || {
+        workers().as_array().unwrap().iter().all(|w| w["state"] == "done")
+    });
+    let tries = workers();
+    let by_branch = |branch: &str| {
+        let row = tries
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|w| w["branch"] == branch)
+            .unwrap();
+        (
+            row["id"].as_str().unwrap().to_string(),
+            PathBuf::from(row["cwd"].as_str().unwrap()),
+        )
+    };
+    let (winner_id, winner) = by_branch("feat/try-2");
+    let (_, loser) = by_branch("feat/try-1");
+    std::fs::write(winner.join("picked.txt"), "picked\n").unwrap();
+    hub.wait();
+
+    let number: i64 = winner_id[1..].parse().unwrap();
+    let picked = hub.call("worker.pick", serde_json::json!({ "id": number }));
+    assert_eq!(picked["result"]["into"], "main", "{picked}");
+    assert_eq!(picked["result"]["closed"].as_array().unwrap().len(), 2, "{picked}");
+    assert_eq!(
+        std::fs::read_to_string(hub.repo.join("picked.txt")).unwrap(),
+        "picked\n"
+    );
+    assert!(!loser.exists(), "the losing worktree is removed");
+    let ids: Vec<String> = snapshot(&hub)["workers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|w| w["id"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(ids, vec![winner_id.clone()], "only the kept try stays in Echo");
+    assert!(
+        git(&hub.repo, &["branch", "--list", "feat/try-1"]).contains("feat/try-1"),
+        "its branch stays"
+    );
+    let messages = hub.wait();
+    assert!(
+        messages.contains(&format!(
+            "The human picked {winner_id} of a fan-out in Echo and merged feat/try-2 into main."
+        )),
+        "{messages}"
+    );
+}
+
+#[test]
+fn a_reopened_multiplexer_shell_still_names_its_session() {
+    let hub = Hub::new("muxagain");
+    hub.ok(&["status"]);
+    let opened = hub.call(
+        "agent.open",
+        serde_json::json!({ "repo": hub.repo_key(), "kind": "claude", "name": "sleeper" }),
+    );
+    let agent = opened["result"]["agent"].as_i64().unwrap();
+    let params = serde_json::json!({ "agent": agent, "command": "sleep 30 # {session} {dir} {command}" });
+    let first = hub.call("mux.open", params.clone());
+    let again = hub.call("mux.open", params);
+    assert_eq!(again["result"]["shell"], first["result"]["shell"], "{again}");
+    assert_eq!(again["result"]["session"], format!("echo-repo-a{agent}"), "{again}");
+}
+
+#[test]
+fn an_orchestrator_in_its_own_worktree_keeps_its_workers_there() {
+    let hub = Hub::new("place");
+    hub.ok(&["status"]);
+    let commit = ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam"];
+    git(&hub.repo, &["branch", "fix/old"]);
+    let open = |params: serde_json::Value| {
+        let opened = hub.call("agent.open", params);
+        assert_eq!(opened["ok"], true, "{opened}");
+        opened["result"]["agent"].as_i64().unwrap()
+    };
+    let login = open(
+        serde_json::json!({ "repo": hub.repo_key(), "kind": "orchestrator", "new_branch": "feat/login", "base": "main" }),
+    );
+    let old =
+        open(serde_json::json!({ "repo": hub.repo_key(), "kind": "claude", "name": "sleeper", "branch": "fix/old" }));
+    let here =
+        open(serde_json::json!({ "repo": hub.repo_key(), "kind": "claude", "name": "sleeper", "branch": "main" }));
+    let agents = hub.call("sessions.list", serde_json::json!({}))["result"]["sessions"][0]["agents"].clone();
+    let agent = |id: i64| {
+        agents
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["id"] == id)
+            .unwrap()
+            .clone()
+    };
+    let home = PathBuf::from(agent(login)["cwd"].as_str().unwrap());
+    assert!(home.ends_with("feat-login"), "{}", home.display());
+    assert_eq!(agent(login)["branch"], "feat/login");
+    assert!(agent(old)["cwd"].as_str().unwrap().ends_with("fix-old"));
+    assert_eq!(
+        agent(here)["cwd"],
+        serde_json::Value::Null,
+        "main is the repo's own checkout"
+    );
+
+    // The Orchestrator commits on its branch; its Workers start from there, not from main.
+    std::fs::write(home.join("README.md"), "# login\n").unwrap();
+    git(&home, &[&commit[..], &["login work"]].concat());
+    let start = |worktree: &str| {
+        let started = hub.call(
+            "worker.start",
+            serde_json::json!({ "repo": hub.repo_key(), "profile": "bash", "spec": "sleep", "agent": login, "worktree": worktree }),
+        );
+        PathBuf::from(started["result"]["cwd"].as_str().unwrap_or_else(|| panic!("{started}")))
+    };
+    assert_eq!(start("current"), home, "in place means the Orchestrator's worktree");
+    let branched = start("new:feat/form");
+    assert_eq!(
+        std::fs::read_to_string(branched.join("README.md")).unwrap(),
+        "# login\n"
+    );
+
+    let branches = hub.call("branches.list", serde_json::json!({ "repo": hub.repo_key() }))["result"].clone();
+    assert_eq!(branches["current"], "main");
+    let row = branches["branches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|b| b["name"] == "feat/login")
+        .unwrap()
+        .clone();
+    assert_eq!(row["agent"], login, "{branches}");
 }
 
 #[test]
@@ -485,4 +952,149 @@ fn shells_open_in_the_repo_and_close() {
         next["result"]["shell"].as_i64().unwrap() > id,
         "shell ids are never reused"
     );
+}
+
+/// Reads an attached stream until `want` shows up.
+fn read_until(reader: &mut impl Read, seen: &mut Vec<u8>, want: &str) {
+    let mut buf = [0u8; 4096];
+    while !String::from_utf8_lossy(seen).contains(want) {
+        let n = reader
+            .read(&mut buf)
+            .unwrap_or_else(|e| panic!("waiting for {want:?}: {e}\n{}", String::from_utf8_lossy(seen)));
+        assert!(n > 0, "stream ended before {want:?}: {}", String::from_utf8_lossy(seen));
+        seen.extend_from_slice(&buf[..n]);
+    }
+}
+
+#[test]
+fn a_multiplexer_shows_an_agent_and_follows_it_through_restarts() {
+    let hub = Hub::new("mux");
+    let out = hub.run_with(&["status"], &[("HUB_SHELL", "/bin/sh")]);
+    assert!(out.status.success());
+    let repo = hub.repo_key();
+    let opened = hub.call(
+        "agent.open",
+        serde_json::json!({ "repo": repo, "kind": "claude", "name": "echo me" }),
+    );
+    let agent = opened["result"]["agent"].as_i64().unwrap();
+    // A stand-in for `tmux new-session -A -s {session} -c {dir} {command}`.
+    let command = "printf 'mux %s in %s\\n' {session} {dir}; sh -c {command}";
+    let mux = hub.call("mux.open", serde_json::json!({ "agent": agent, "command": command }));
+    assert_eq!(mux["ok"], true, "{mux}");
+    let shell = mux["result"]["shell"].as_i64().unwrap();
+    assert_eq!(mux["result"]["session"], format!("echo-repo-a{agent}"));
+    let again = hub.call("mux.open", serde_json::json!({ "agent": agent, "command": command }));
+    assert_eq!(again["result"]["shell"], shell, "one multiplexer shell per agent");
+
+    let mut stream = UnixStream::connect(hub.state.join("hubd.sock")).unwrap();
+    let request = serde_json::json!({ "method": "attach", "params": { "shell": shell, "rows": 30, "cols": 100 } });
+    stream.write_all(format!("{request}\n").as_bytes()).unwrap();
+    stream.set_read_timeout(Some(Duration::from_secs(15))).unwrap();
+    let mut reader = BufReader::new(stream.try_clone().unwrap());
+    let mut line = String::new();
+    reader.read_line(&mut line).unwrap();
+    assert!(line.contains("\"ok\":true"), "{line}");
+    let mut seen = Vec::new();
+    read_until(&mut reader, &mut seen, &format!("mux echo-repo-a{agent} in {repo}"));
+    read_until(&mut reader, &mut seen, "Working");
+    stream.write_all(b"hello\r").unwrap();
+    read_until(&mut reader, &mut seen, "got: hello");
+
+    hub.call("agent.close", serde_json::json!({ "agent": agent }));
+    read_until(&mut reader, &mut seen, "picks it up again when it starts");
+    hub.call("agent.open", serde_json::json!({ "agent": agent }));
+    seen.clear();
+    read_until(&mut reader, &mut seen, "Working");
+    stream.write_all(b"again\r").unwrap();
+    read_until(&mut reader, &mut seen, "got: again");
+
+    hub.call("agent.forget", serde_json::json!({ "agent": agent }));
+    read_until(&mut reader, &mut seen, &format!("a{agent} is closed"));
+    hub.eventually("the multiplexer shell to exit", || {
+        snapshot(&hub)["shells"] == serde_json::json!([])
+    });
+}
+
+#[test]
+fn tmux_runs_the_agent_in_its_first_pane() {
+    if Command::new("tmux").arg("-V").output().is_err() {
+        eprintln!("tmux is not installed; skipping");
+        return;
+    }
+    let hub = Hub::new("tmux");
+    let out = hub.run_with(&["status"], &[("HUB_SHELL", "/bin/sh")]);
+    assert!(out.status.success());
+    let socket = format!("hubt{}", std::process::id());
+    let opened = hub.call(
+        "agent.open",
+        serde_json::json!({ "repo": hub.repo_key(), "kind": "claude", "name": "echo me" }),
+    );
+    let agent = opened["result"]["agent"].as_i64().unwrap();
+    // Echo's default, on a private tmux server.
+    let command = format!("tmux -L {socket} new-session -A -s {{session}} -c {{dir}} {{command}}");
+    let mux = hub.call("mux.open", serde_json::json!({ "agent": agent, "command": command }));
+    let shell = mux["result"]["shell"].as_i64().expect("a shell");
+
+    let mut stream = UnixStream::connect(hub.state.join("hubd.sock")).unwrap();
+    let request = serde_json::json!({ "method": "attach", "params": { "shell": shell, "rows": 30, "cols": 100 } });
+    stream.write_all(format!("{request}\n").as_bytes()).unwrap();
+    stream.set_read_timeout(Some(Duration::from_secs(15))).unwrap();
+    let mut reader = BufReader::new(stream.try_clone().unwrap());
+    let mut line = String::new();
+    reader.read_line(&mut line).unwrap();
+    let mut seen = Vec::new();
+    read_until(&mut reader, &mut seen, "Working");
+    stream.write_all(b"hello\r").unwrap();
+    read_until(&mut reader, &mut seen, "got: hello");
+    let panes = Command::new("tmux")
+        .args([
+            "-L",
+            &socket,
+            "list-panes",
+            "-t",
+            &format!("echo-repo-a{agent}"),
+            "-F",
+            "#{pane_current_command}",
+        ])
+        .output()
+        .unwrap();
+    let _ = Command::new("tmux").args(["-L", &socket, "kill-server"]).output();
+    assert!(panes.status.success(), "{}", String::from_utf8_lossy(&panes.stderr));
+}
+
+#[test]
+fn hub_opens_the_orchestrator_working_in_this_checkout() {
+    let hub = Hub::new("which");
+    hub.ok(&["status"]);
+    let open = |params: serde_json::Value| {
+        let opened = hub.call("agent.open", params);
+        assert_eq!(opened["ok"], true, "{opened}");
+        opened["result"]["agent"].as_i64().unwrap()
+    };
+    let first = open(serde_json::json!({ "repo": hub.repo_key(), "kind": "orchestrator" }));
+    let login = open(
+        serde_json::json!({ "repo": hub.repo_key(), "kind": "orchestrator", "new_branch": "feat/login", "base": "main" }),
+    );
+    let agents = hub.call("sessions.list", serde_json::json!({}))["result"]["sessions"][0]["agents"].clone();
+    let home = agents.as_array().unwrap().iter().find(|a| a["id"] == login).unwrap()["cwd"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let session = |extra: serde_json::Value| {
+        let mut params = serde_json::json!({ "repo": hub.repo_key() });
+        params
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        let opened = hub.call("session.open", params);
+        assert_eq!(opened["ok"], true, "{opened}");
+        opened["result"]["agent"].as_i64().unwrap()
+    };
+    assert_eq!(session(serde_json::json!({ "checkout": home })), login, "its worktree");
+    assert_eq!(
+        session(serde_json::json!({ "checkout": hub.repo_key() })),
+        first,
+        "the repo's own checkout"
+    );
+    assert_eq!(session(serde_json::json!({})), first, "an older client");
 }

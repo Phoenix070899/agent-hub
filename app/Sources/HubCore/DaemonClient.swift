@@ -73,12 +73,119 @@ public struct DaemonClient: Sendable {
         try call("terminal.resize", params)
     }
 
-    public func openSession(repo: String) throws {
-        try call("session.open", ["repo": repo])
+    /// Starts a new agent in a repo: an Orchestrator or a Normal session, with an optional name and
+    /// model. Returns the repo's key as the daemon names it, and the new agent's id.
+    /// Starts a new agent. `branch` puts it on an existing branch; `newBranch` on a new branch
+    /// from `base`, in its own worktree; neither, in the repo's checkout.
+    public func openAgent(repo: String, kind: Agent.Kind, name: String? = nil, model: String? = nil,
+                          request: String? = nil, branch: String? = nil, newBranch: String? = nil,
+                          base: String? = nil) throws -> (repo: String, agent: Int)
+    {
+        var params: [String: Any] = ["repo": repo, "kind": kind.rawValue]
+        if let branch { params["branch"] = branch }
+        if let newBranch { params["new_branch"] = newBranch }
+        if let base, !base.isEmpty { params["base"] = base }
+        if let name, !name.isEmpty { params["name"] = name }
+        if let model, !model.isEmpty { params["model"] = model }
+        if let request, !request.isEmpty { params["request"] = request }
+        let result = try call("agent.open", params) as? [String: Any]
+        guard let agent = result?["agent"] as? Int else { throw HubError.badResponse }
+        return (result?["repo"] as? String ?? repo, agent)
+    }
+
+    /// Starts a stopped agent again, resuming its conversation.
+    public func startAgent(_ id: Int) throws {
+        try call("agent.open", ["agent": id])
+    }
+
+    /// Stops an agent's terminal; it stays in the ledger, ready to start again.
+    public func stopAgent(_ id: Int) throws {
+        try call("agent.close", ["agent": id])
+    }
+
+    /// Stops an agent and takes it out of the ledger.
+    public func forgetAgent(_ id: Int) throws {
+        try call("agent.forget", ["agent": id])
+    }
+
+    public func renameAgent(_ id: Int, to name: String) throws {
+        try call("agent.rename", ["agent": id, "name": name])
+    }
+
+    /// The human's multiplexer around an agent's or a Worker's terminal: `command` runs with
+    /// `{session}`, `{dir}` and `{command}` filled in. Returns the shell to attach to; asking again
+    /// returns the same one while it lives.
+    /// The shell running the multiplexer around `target`, and the multiplexer session it opened.
+    public func openMux(_ target: TerminalTarget, command: String) throws -> (shell: Int, session: String?) {
+        var params = target.params
+        params["command"] = command
+        let result = try call("mux.open", params) as? [String: Any]
+        guard let shell = result?["shell"] as? Int else { throw HubError.badResponse }
+        return (shell, result?["session"] as? String)
+    }
+
+    /// Stops a Worker and closes its terminal.
+    public func closeWorker(_ id: Int) throws {
+        try call("worker.close", ["id": id])
+    }
+
+    /// Takes a settled Worker off Echo's Done list; the Orchestrator's view is unchanged.
+    public func dismissWorker(_ id: Int) throws {
+        try call("worker.dismiss", ["id": id])
+    }
+
+    /// What a Worker changed: its diff, and whether the daemon cut it short.
+    public func workerDiff(_ id: Int) throws -> (diff: String, truncated: Bool) {
+        let result = try call("worker.diff", ["id": id]) as? [String: Any]
+        guard let diff = result?["diff"] as? String else { throw HubError.badResponse }
+        return (diff, result?["truncated"] as? Bool ?? false)
+    }
+
+    /// The repo's checked-out branch and its local branches, newest first.
+    public func branches(repo: String) throws -> (current: String, branches: [RepoBranch]) {
+        let result = try call("branches.list", ["repo": repo]) as? [String: Any]
+        let data = try JSONSerialization.data(withJSONObject: result?["branches"] ?? [])
+        return (result?["current"] as? String ?? "", try JSONDecoder().decode([RepoBranch].self, from: data))
+    }
+
+    public func profiles() throws -> [WorkerProfile] {
+        let result = try call("profiles.list") as? [String: Any]
+        let data = try JSONSerialization.data(withJSONObject: result?["profiles"] ?? [])
+        return try JSONDecoder().decode([WorkerProfile].self, from: data)
+    }
+
+    /// Starts `count` Workers on one Task, each in its own worktree on `<branch>-<n>`. Returns
+    /// their ids, and why any of them could not start.
+    public func fanOut(repo: String, agent: Int?, profile: String, title: String, spec: String,
+                       branch: String, count: Int) throws -> (workers: [String], failed: [String]) {
+        var params: [String: Any] = ["repo": repo, "profile": profile, "title": title, "spec": spec,
+                                     "branch": branch, "count": count]
+        if let agent { params["agent"] = agent }
+        let result = try call("worker.fanout", params) as? [String: Any]
+        return (result?["workers"] as? [String] ?? [], result?["failed"] as? [String] ?? [])
+    }
+
+    /// Keeps one try of a fan-out: merges its branch, closes the others. Returns the branch and
+    /// the branch it went into.
+    public func pickWorker(_ id: Int) throws -> (branch: String, into: String) {
+        let result = try call("worker.pick", ["id": id]) as? [String: Any]
+        return (result?["branch"] as? String ?? "", result?["into"] as? String ?? "")
+    }
+
+    /// Sends the human's review of a Worker's changes to the Worker itself or its Orchestrator.
+    public func reviewWorker(_ id: Int, toWorker: Bool, body: String) throws {
+        try call("worker.review", ["id": id, "to": toWorker ? "worker" : "orchestrator", "body": body])
     }
 
     public func decide(worker: Int, approve: Bool, note: String? = nil) throws {
         var params: [String: Any] = ["worker": worker, "approve": approve]
+        if let note, !note.isEmpty { params["note"] = note }
+        try call("decide", params)
+    }
+
+    /// Approve or Deny on a Normal session's own permission prompt.
+    public func decide(agent: Int, approve: Bool, note: String? = nil) throws {
+        var params: [String: Any] = ["agent": agent, "approve": approve]
         if let note, !note.isEmpty { params["note"] = note }
         try call("decide", params)
     }

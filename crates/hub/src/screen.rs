@@ -9,6 +9,8 @@ pub enum Look {
     PermissionPrompt,
     /// A turn is running: the spinner line, e.g. `· Churning… (21s · ↓ 81 tokens)`.
     Working,
+    /// At its input box while a background shell it started still runs (`· 1 shell ·` in the footer).
+    Waiting,
     /// Waiting at its input box.
     Idle,
 }
@@ -26,7 +28,22 @@ pub fn look(screen: &str) -> Look {
     if lines.iter().any(|line| is_spinner(line)) {
         return Look::Working;
     }
+    // Only the footer below the input box counts: the transcript keeps "1 shell still running" after it ends.
+    let footer = lines
+        .iter()
+        .rposition(|line| line.starts_with('❯'))
+        .map_or(&lines[..0], |at| &lines[at..]);
+    if footer.iter().any(|line| line.split('·').any(is_shell_count)) {
+        return Look::Waiting;
+    }
     Look::Idle
+}
+
+/// A footer segment like "1 shell" or "2 shells".
+fn is_shell_count(segment: &str) -> bool {
+    let mut words = segment.split_whitespace();
+    let count = words.next().is_some_and(|n| n.parse::<u32>().is_ok_and(|n| n > 0));
+    count && matches!(words.next(), Some("shell" | "shells")) && words.next().is_none()
 }
 
 /// The spinner line: a glyph, a word ending in "…", then "(<digits>".
@@ -92,6 +109,20 @@ mod tests {
     #[test]
     fn a_finished_turn_is_idle() {
         let screen = "⏺ DONE\n✻ Cogitated for 17s · done 5:29 PM\n────\n❯ \n────\n  Haiku 5.5";
+        assert_eq!(look(screen), Look::Idle);
+    }
+
+    #[test]
+    fn idle_with_a_background_shell_is_waiting() {
+        let screen = "⏺ Step B runs in the background.\n✻ Baked for 12s · done 11:00 AM · 1 shell still running\n\
+                      ────\n❯ \n────\n    Haiku 5.5 | ctx: 59% used\n  ⏵⏵ auto mode on · 2 shells · ← 1 agent";
+        assert_eq!(look(screen), Look::Waiting);
+    }
+
+    #[test]
+    fn a_finished_background_shell_in_the_transcript_is_idle() {
+        let screen =
+            "✻ Baked for 12s · done 11:00 AM · 1 shell still running\n────\n❯ \n────\n  ⏵⏵ auto mode on · ← 1 agent";
         assert_eq!(look(screen), Look::Idle);
     }
 

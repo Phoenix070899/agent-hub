@@ -1,18 +1,74 @@
-//! `hub attach`: this terminal becomes the Worker's terminal until Ctrl-] or the Worker ends.
+//! `hub attach`: this terminal becomes a Worker's or an agent's terminal until Ctrl-] or it ends.
+//! With `--follow` it stays put and reattaches whenever the agent starts again, which is how
+//! Echo shows an agent inside the human's multiplexer.
 
 use std::io::{BufReader, Read, Write};
-use std::sync::OnceLock;
+use std::os::unix::net::UnixStream;
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde_json::{json, Value};
 
 use crate::proto;
 
-/// Ctrl-] detaches, as in telnet; the Worker keeps running.
+/// Ctrl-] detaches, as in telnet; the terminal keeps running.
 const DETACH: u8 = 0x1d;
+const CTRL_C: u8 = 0x03;
 
 static ORIGINAL: OnceLock<libc::termios> = OnceLock::new();
+/// Where typed input goes: the attached terminal, or nowhere while waiting.
+static CURRENT: Mutex<Option<UnixStream>> = Mutex::new(None);
+/// The attached terminal's params, for resizes.
+static TARGET: Mutex<Option<Value>> = Mutex::new(None);
+
+/// What `hub attach` names: `w12` (or `12`, `#12`) is a Worker, `a3` an agent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Target {
+    Worker(i64),
+    Agent(i64),
+}
+
+impl Target {
+    pub fn parse(text: &str) -> Result<Target> {
+        let bad = || format!("{text:?} is not a terminal like w12 or a3");
+        if let Some(id) = text.strip_prefix('a') {
+            return Ok(Target::Agent(id.parse().with_context(bad)?));
+        }
+        let id = text.trim_start_matches(['w', '#']).parse().with_context(bad)?;
+        Ok(Target::Worker(id))
+    }
+
+    fn params(self) -> Value {
+        match self {
+            Target::Worker(id) => json!({ "id": id }),
+            Target::Agent(id) => json!({ "agent": id }),
+        }
+    }
+
+    fn label(self) -> String {
+        match self {
+            Target::Worker(id) => format!("w{id}"),
+            Target::Agent(id) => format!("a{id}"),
+        }
+    }
+
+    /// Whether it has a live terminal now; `None` once it is gone for good.
+    fn live(self) -> Option<bool> {
+        match self {
+            Target::Worker(id) => Some(proto::call("worker.read", json!({ "id": id, "lines": 1 })).is_ok()),
+            Target::Agent(id) => {
+                let sessions = proto::call("sessions.list", json!({})).ok()?;
+                sessions["sessions"]
+                    .as_array()?
+                    .iter()
+                    .flat_map(|s| s["agents"].as_array().cloned().unwrap_or_default())
+                    .find(|a| a["id"].as_i64() == Some(id))
+                    .map(|a| a["live"].as_bool() == Some(true))
+            }
+        }
+    }
+}
 
 fn size() -> (u16, u16) {
     let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
@@ -43,63 +99,159 @@ fn restore_and_exit(note: &str) -> ! {
     std::process::exit(0)
 }
 
-/// Attaches to one terminal: `{"id": n}` for a Worker, `{"orchestrator": repo}` for the Orchestrator.
-pub fn run(target: Value, label: &str) -> Result<()> {
+/// A line in raw mode, between attachments.
+fn say(note: &str) {
+    let mut stdout = std::io::stdout();
+    let _ = write!(stdout, "\r\n\x1b[2m[hub: {note}]\x1b[0m\r\n");
+    let _ = stdout.flush();
+}
+
+/// Opens an `attach` connection: the stream to type into, and the reader the terminal's bytes
+/// arrive on (it may already hold some, read along with the response line).
+fn connect(params: &Value) -> Result<(UnixStream, BufReader<UnixStream>)> {
     let (rows, cols) = size();
-    let mut params = target.clone();
+    let mut params = params.clone();
     params["rows"] = json!(rows);
     params["cols"] = json!(cols);
     let mut stream = proto::connect()?;
     proto::write_line(&mut stream, &json!({ "method": "attach", "params": params }))?;
     let mut reader = BufReader::new(stream.try_clone()?);
     proto::into_result(proto::read_line(&mut reader)?)?;
-    raw_mode();
+    Ok((stream, reader))
+}
 
-    let ended = format!("{label} ended");
+/// Typed input goes to whatever is attached; Ctrl-] leaves. While nothing is attached, Ctrl-C
+/// leaves too.
+fn forward_input(label: String, follow: bool) {
     std::thread::spawn(move || {
-        let mut stdout = std::io::stdout();
-        let mut buf = [0u8; 16 * 1024];
+        let mut stdin = std::io::stdin();
+        let mut buf = [0u8; 4096];
         loop {
-            match reader.read(&mut buf) {
-                Ok(0) | Err(_) => break,
-                Ok(n) => {
-                    let _ = stdout.write_all(&buf[..n]);
-                    let _ = stdout.flush();
+            let n = match stdin.read(&mut buf) {
+                Ok(0) | Err(_) => restore_and_exit("detached"),
+                Ok(n) => n,
+            };
+            let input = &buf[..n];
+            let mut current = CURRENT.lock().unwrap();
+            let Some(stream) = current.as_mut() else {
+                if input.contains(&DETACH) || input.contains(&CTRL_C) {
+                    restore_and_exit(&format!("stopped following {label}"));
                 }
+                continue;
+            };
+            if let Some(at) = input.iter().position(|&b| b == DETACH) {
+                let _ = stream.write_all(&input[..at]);
+                let note = if follow {
+                    format!("stopped following {label}; it keeps running")
+                } else {
+                    format!("detached; {label} keeps running")
+                };
+                restore_and_exit(&note);
+            }
+            if stream.write_all(input).is_err() {
+                *current = None;
             }
         }
-        restore_and_exit(&ended);
     });
+}
 
-    std::thread::spawn(move || {
-        let mut last = (rows, cols);
+/// Passes this terminal's size on to whatever is attached.
+fn forward_resizes() {
+    std::thread::spawn(|| {
+        let mut last = size();
         loop {
             std::thread::sleep(Duration::from_millis(300));
             let now = size();
             if now != last {
                 last = now;
-                let mut params = target.clone();
-                params["rows"] = json!(now.0);
-                params["cols"] = json!(now.1);
-                let _ = proto::call("terminal.resize", params);
+                if let Some(mut params) = TARGET.lock().unwrap().clone() {
+                    params["rows"] = json!(now.0);
+                    params["cols"] = json!(now.1);
+                    let _ = proto::call("terminal.resize", params);
+                }
             }
         }
     });
+}
 
-    let mut stdin = std::io::stdin();
-    let mut buf = [0u8; 4096];
+/// Copies the terminal's bytes here until it ends.
+fn pump((stream, mut reader): (UnixStream, BufReader<UnixStream>), params: &Value) {
+    *TARGET.lock().unwrap() = Some(params.clone());
+    *CURRENT.lock().unwrap() = Some(stream);
+    let mut stdout = std::io::stdout();
+    let mut buf = [0u8; 16 * 1024];
     loop {
-        let n = stdin.read(&mut buf)?;
-        if n == 0 {
-            restore_and_exit("detached");
+        match reader.read(&mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => {
+                let _ = stdout.write_all(&buf[..n]);
+                let _ = stdout.flush();
+            }
         }
-        let input = &buf[..n];
-        if let Some(at) = input.iter().position(|&b| b == DETACH) {
-            let _ = stream.write_all(&input[..at]);
-            restore_and_exit(&format!("detached; {label} keeps running"));
+    }
+    *CURRENT.lock().unwrap() = None;
+    *TARGET.lock().unwrap() = None;
+}
+
+/// Attaches to one terminal (`{"id": n}` for a Worker, `{"agent": n}` for an agent) until it
+/// ends or Ctrl-] detaches.
+pub fn run(target: Value, label: &str) -> Result<()> {
+    let attached = connect(&target)?;
+    raw_mode();
+    forward_input(label.to_string(), false);
+    forward_resizes();
+    pump(attached, &target);
+    restore_and_exit(&format!("{label} ended"))
+}
+
+/// Shows `target` here for as long as it exists: when its terminal ends it waits, and attaches
+/// again when it starts. Leaves once it is gone for good, or on Ctrl-].
+pub fn follow(target: Target) -> Result<()> {
+    let label = target.label();
+    let params = target.params();
+    raw_mode();
+    forward_input(label.clone(), true);
+    forward_resizes();
+    let mut first = true;
+    loop {
+        match connect(&params) {
+            Ok(attached) => {
+                if !first {
+                    // A fresh screen: the daemon redraws the terminal from its own copy.
+                    print!("\x1b[2J\x1b[H");
+                }
+                pump(attached, &params);
+                say(&format!("{label} stopped. This pane picks it up again when it starts."));
+            }
+            Err(_) if first => say(&format!(
+                "{label} is not running. This pane picks it up when it starts."
+            )),
+            Err(_) => {}
         }
-        if stream.write_all(input).is_err() {
-            restore_and_exit(&format!("{label} ended"));
+        first = false;
+        loop {
+            std::thread::sleep(Duration::from_secs(1));
+            match target.live() {
+                None => restore_and_exit(&format!("{label} is closed")),
+                Some(true) => break,
+                Some(false) if matches!(target, Target::Worker(_)) => restore_and_exit(&format!("{label} ended")),
+                Some(false) => {}
+            }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn targets_name_workers_and_agents() {
+        assert_eq!(Target::parse("w12").unwrap(), Target::Worker(12));
+        assert_eq!(Target::parse("#12").unwrap(), Target::Worker(12));
+        assert_eq!(Target::parse("12").unwrap(), Target::Worker(12));
+        assert_eq!(Target::parse("a3").unwrap(), Target::Agent(3));
+        assert!(Target::parse("ax").is_err());
+        assert_eq!(Target::Agent(3).label(), "a3");
     }
 }

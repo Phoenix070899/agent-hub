@@ -13,6 +13,9 @@ pub struct Profile {
     pub skills: Vec<String>,
     pub context: Vec<String>,
     pub role: String,
+    pub description: String,
+    /// It edits files, so its tries of a Task differ and are worth comparing.
+    pub writes: bool,
 }
 
 pub fn load(hub: &Path, name: &str) -> Result<Profile> {
@@ -64,7 +67,20 @@ fn parse(name: &str, text: &str) -> Result<Profile> {
         skills: list("skills"),
         context: list("context"),
         role: body.trim().to_string(),
+        description: field("description").unwrap_or_default(),
+        writes: field("writes").as_deref() == Some("true"),
     })
+}
+
+/// Every profile that loads, by name.
+pub fn all(hub: &Path) -> Result<Vec<Profile>> {
+    let mut names: Vec<String> = std::fs::read_dir(hub.join("profiles"))?
+        .flatten()
+        .filter(|entry| entry.path().extension().is_some_and(|e| e == "md"))
+        .filter_map(|entry| entry.path().file_stem().map(|stem| stem.to_string_lossy().into_owned()))
+        .collect();
+    names.sort();
+    Ok(names.iter().filter_map(|name| load(hub, name).ok()).collect())
 }
 
 /// Worker Contract, Preferences, then the profile's role, skills, and context.
