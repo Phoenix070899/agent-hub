@@ -244,6 +244,11 @@ struct TerminalPane: NSViewRepresentable {
                 if let text = body["data"] as? String { type(Data(text.utf8)) }
             case "resize":
                 sizeChanged(cols: body["cols"] as? Int ?? 0, rows: body["rows"] as? Int ?? 0)
+            case "clipboard":
+                if let text = body["text"] as? String {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(text, forType: .string)
+                }
             case "link":
                 if let link = body["url"] as? String, let url = URL(string: link) { NSWorkspace.shared.open(url) }
             default:
