@@ -51,6 +51,11 @@ public final class HubSocket: @unchecked Sendable {
         setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, socklen_t(MemoryLayout<Int32>.size))
     }
 
+    /// Wraps a connected socket it now owns.
+    init(fd: Int32) {
+        self.fd = fd
+    }
+
     deinit { close(fd) }
 
     public func write(_ data: Data) throws {
@@ -80,7 +85,8 @@ public final class HubSocket: @unchecked Sendable {
                 buffer.removeSubrange(buffer.startIndex...newline)
                 return Data(line)
             }
-            guard let chunk = try readChunk() else { throw HubError.closed }
+            // From the socket, not readChunk: that would hand back the partial line just buffered.
+            guard let chunk = readSocket() else { throw HubError.closed }
             buffer.append(chunk)
         }
     }
@@ -91,6 +97,10 @@ public final class HubSocket: @unchecked Sendable {
             defer { buffer.removeAll() }
             return buffer
         }
+        return readSocket()
+    }
+
+    private func readSocket() -> Data? {
         var bytes = [UInt8](repeating: 0, count: 16 * 1024)
         let n = Darwin.read(fd, &bytes, bytes.count)
         if n <= 0 { return nil }
