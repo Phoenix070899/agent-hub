@@ -52,20 +52,40 @@ struct SettingsView: View {
                         }
                     }
                 }
-                if let path = model.appearance.backgroundImage {
-                    Slider(value: $model.appearance.backgroundImageDim, in: 0.3...0.95) {
+                // Always shown, so the controls can be found before an image is chosen.
+                Group {
+                    LabeledContent {
+                        HStack(spacing: 10) {
+                            Slider(value: $model.appearance.backgroundImageDim, in: 0.3...0.95)
+                            Text("\(Int((model.appearance.backgroundImageDim * 100).rounded()))%")
+                                .monospacedDigit()
+                                .foregroundStyle(.secondary)
+                                .frame(width: 40, alignment: .trailing)
+                        }
+                    } label: {
                         Text("Dim")
                     }
-                    Slider(value: $model.appearance.backgroundImageBlur, in: 0...30) {
+                    LabeledContent {
+                        HStack(spacing: 10) {
+                            Slider(value: $model.appearance.backgroundImageBlur, in: 0...30)
+                            Text("\(Int(model.appearance.backgroundImageBlur.rounded())) pt")
+                                .monospacedDigit()
+                                .foregroundStyle(.secondary)
+                                .frame(width: 40, alignment: .trailing)
+                        }
+                    } label: {
                         Text("Blur")
                     }
+                }
+                .disabled(model.appearance.backgroundImage == nil)
+                if let path = model.appearance.backgroundImage {
                     if !FileManager.default.fileExists(atPath: path) {
                         Text("The image is gone; terminals show the theme background.")
                             .font(.caption)
                             .foregroundStyle(.orange)
                     }
                 }
-                Text("Shown behind every terminal. Text and coloured cells stay solid; dim or blur it until the text reads easily.")
+                Text("Choose an image to show behind every terminal. Text and coloured cells stay solid; dim or blur the image until the text reads easily.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)

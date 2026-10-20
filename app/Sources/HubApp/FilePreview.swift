@@ -445,7 +445,7 @@ private struct MarkdownView: View {
                         NoteableBlock(marked: notes.cursor == index || notes.editing == index) {
                             notes.start(at: index)
                         } content: {
-                            view(block)
+                            MarkdownBlockView(block: block)
                         }
                         ForEach(Array(all.enumerated()).filter { $0.element.path == file.path && $0.element.lines == spans[index] },
                                 id: \.offset) { position, note in
@@ -466,7 +466,7 @@ private struct MarkdownView: View {
                             }
                         }
                     }
-                    .padding(.top, index == 0 ? 0 : gap(blocks[index - 1], block))
+                    .padding(.top, index == 0 ? 0 : MarkdownBlockView.gap(blocks[index - 1], block))
                     .id(index)
                 }
             }
@@ -494,8 +494,20 @@ private struct MarkdownView: View {
         done()
     }
 
+}
+
+/// One Markdown block drawn as a document: the shared look of a previewed file and a Final Report.
+struct MarkdownBlockView: View {
+    let block: MarkdownBlock
+    /// Extra space between wrapped lines of text.
+    var leading: CGFloat = 4
+    /// Inline `code`, a little smaller than the text around it.
+    var codeSize: CGFloat = 12.5
+
+    var body: some View { view(block) }
+
     /// Items of one list sit close; other blocks get room, headings the most.
-    private func gap(_ previous: MarkdownBlock, _ block: MarkdownBlock) -> CGFloat {
+    static func gap(_ previous: MarkdownBlock, _ block: MarkdownBlock) -> CGFloat {
         switch (previous, block) {
         case (.bullet, .bullet): 5
         case (_, .heading(let level, _)): level <= 2 ? 28 : 20
@@ -523,25 +535,25 @@ private struct MarkdownView: View {
             .background(Ledger.wash, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
         case .heading(let level, let text):
             VStack(alignment: .leading, spacing: 8) {
-                Text(inline(text))
+                Text(inline(text, code: codeSize))
                     .font(.system(size: [26, 20, 16.5, 15, 14, 13.5][min(level, 6) - 1], weight: .semibold))
                     .foregroundStyle(level == 6 ? Ledger.ink2 : Ledger.ink)
                 if level <= 2 { Rectangle().fill(Ledger.rule).frame(height: 1) }
             }
         case .paragraph(let text):
-            Text(inline(text)).lineSpacing(4)
+            Text(inline(text, code: codeSize)).lineSpacing(leading)
         case .bullet(let text, let ordered, let depth, let checked):
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 marker(ordered: ordered, depth: depth, checked: checked)
-                Text(inline(text))
-                    .lineSpacing(4)
+                Text(inline(text, code: codeSize))
+                    .lineSpacing(leading)
                     .foregroundStyle(checked == true ? Ledger.ink2 : Ledger.ink)
             }
             .padding(.leading, 4 + CGFloat(depth) * 22)
         case .quote(let text):
             HStack(spacing: 12) {
                 Rectangle().fill(Ledger.rule).frame(width: 3)
-                Text(inline(text)).lineSpacing(4).foregroundStyle(Ledger.ink2)
+                Text(inline(text, code: codeSize)).lineSpacing(leading).foregroundStyle(Ledger.ink2)
             }
             .fixedSize(horizontal: false, vertical: true)
         case .code(let code, let language):
@@ -720,7 +732,7 @@ private struct TableLayout: Layout {
     }
 }
 
-private func inline(_ text: String) -> AttributedString { inlineMarkdown(text) }
+private func inline(_ text: String, code: CGFloat = 12.5) -> AttributedString { inlineMarkdown(text, code: code) }
 
 /// Front matter as "key: value" rows; an indented line or "- item" carries on the field above.
 private func frontMatterFields(_ yaml: String) -> [(key: String, value: String)] {
@@ -743,13 +755,13 @@ private func frontMatterFields(_ yaml: String) -> [(key: String, value: String)]
 
 /// Inline Markdown (bold, italics, code, links, strikethrough) with code spans set in mono on a
 /// tint, and `<br>` as a line break.
-private func inlineMarkdown(_ text: String) -> AttributedString {
+private func inlineMarkdown(_ text: String, code: CGFloat = 12.5) -> AttributedString {
     var source = text
     for tag in ["<br>", "<br/>", "<br />"] { source = source.replacingOccurrences(of: tag, with: "\n") }
     guard var out = try? AttributedString(markdown: source, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))
     else { return AttributedString(source) }
     for run in out.runs where run.inlinePresentationIntent?.contains(.code) == true {
-        out[run.range].font = .system(size: 12.5, design: .monospaced)
+        out[run.range].font = .system(size: code, design: .monospaced)
         out[run.range].backgroundColor = Ledger.wash
     }
     return out

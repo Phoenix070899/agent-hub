@@ -560,6 +560,9 @@ struct AgentGroupView: View {
                                             .buttonStyle(.ledgerLink)
                                             .help("Take the reports you have opened off this list")
                                     }
+                                    Button("Clear all") { model.dismiss(group.settled) }
+                                        .buttonStyle(.ledgerLink)
+                                        .help("Take every report off this list, read or not")
                                     if group.settled.count > Self.doneShown {
                                         Button(showAllDone.on ? "Show fewer" : "Show all") { showAllDone.on.toggle() }
                                             .buttonStyle(.ledgerLink)
@@ -800,7 +803,7 @@ struct LiveTerminal: View {
             if let shown {
                 TerminalPane(target: shown, client: model.client, appearance: model.appearance,
                              keyboard: !model.modalShown && model.preview == nil && !model.treeFocused,
-                             gpu: model.gpuRendering)
+                             focusRequest: model.terminalFocusRequest, gpu: model.gpuRendering)
             } else {
                 Text("Starting the multiplexer…")
                     .font(.system(size: 12.5))
@@ -834,6 +837,9 @@ struct TerminalBackdrop: View {
                 }
                 .clipped()
                 .overlay { background.opacity(appearance.backgroundImageDim) }
+                // The filled image spills past the panel; clipping hides that but still hit-tests
+                // it, which took clicks meant for the ledger and the Files column.
+                .allowsHitTesting(false)
         } else {
             background
         }
@@ -1088,15 +1094,16 @@ enum Fact {
 }
 
 /// A settled Worker: its Final Report, read as a document rather than a closed terminal.
+/// Each section's text renders as Markdown, so lists, `code`, and emphasis read as written.
 struct FinalReportView: View {
     let worker: WorkerRow
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
+            VStack(alignment: .leading, spacing: 30) {
                 HStack(alignment: .firstTextBaseline) {
                     Text(worker.finalReport == nil ? "No Final Report" : "Final Report")
-                        .font(.system(size: 22, weight: .semibold))
+                        .font(.system(size: 30, weight: .bold))
                     Spacer(minLength: 8)
                     if let report = worker.finalReport {
                         Button("Copy report") {
@@ -1108,29 +1115,43 @@ struct FinalReportView: View {
                 }
                 if let report = worker.finalReport {
                     ForEach(Array(ReportSection.parse(report).enumerated()), id: \.offset) { _, section in
-                        VStack(alignment: .leading, spacing: 4) {
+                        VStack(alignment: .leading, spacing: 12) {
                             if let title = section.title {
-                                Text(title).font(.system(size: 14, weight: .semibold))
+                                VStack(alignment: .leading, spacing: 8) {
+                                    Text(title).font(.system(size: 19, weight: .semibold))
+                                    Rectangle().fill(Ledger.rule).frame(height: 1)
+                                }
                             }
-                            Text(section.body)
-                                .font(.system(size: 14))
-                                .lineSpacing(3)
-                                .foregroundStyle(section.title == "State" && worker.isTrouble ? Ledger.fail : Ledger.ink)
-                                .textSelection(.enabled)
-                                .fixedSize(horizontal: false, vertical: true)
+                            let blocks = parseMarkdown(section.body)
+                            VStack(alignment: .leading, spacing: 0) {
+                                ForEach(Array(blocks.enumerated()), id: \.offset) { index, block in
+                                    MarkdownBlockView(block: block, leading: 7, codeSize: 13.5)
+                                        .padding(.top, index == 0 ? 0 : Self.gap(blocks[index - 1], block))
+                                }
+                            }
+                            .foregroundStyle(section.title == "State" && worker.isTrouble ? Ledger.fail : Ledger.ink)
                         }
                     }
                 } else {
                     Text("\(worker.id) \(worker.phaseLabel.lowercased()) without sending one. The Orchestrator has been told.")
-                        .font(.system(size: 14))
+                        .lineSpacing(7)
                         .foregroundStyle(Ledger.ink2)
                 }
             }
-            .frame(maxWidth: 680, alignment: .leading)
-            .padding(.horizontal, 32)
-            .padding(.vertical, 26)
+            .font(.system(size: 15))
+            .foregroundStyle(Ledger.ink)
+            .textSelection(.enabled)
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(.horizontal, 40)
+            .padding(.vertical, 32)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
+    }
+
+    /// The file preview's spacing, opened up to match the report's larger text.
+    private static func gap(_ previous: MarkdownBlock, _ block: MarkdownBlock) -> CGFloat {
+        if case .bullet = previous, case .bullet = block { return 9 }
+        return MarkdownBlockView.gap(previous, block) + 4
     }
 }
 

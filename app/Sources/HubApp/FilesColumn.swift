@@ -77,6 +77,8 @@ private struct FilesTree: View {
                         handledFocus.value = model.filesFocusRequest
                         focused = true
                     }
+                    // Selecting an agent or Worker in the ledger hands the keyboard to its terminal.
+                    .onChange(of: model.terminalFocusRequest) { focused = false }
                     .onChange(of: focused) { model.treeFocused = focused }
                     .onDisappear { model.treeFocused = false }
                     .onChange(of: cursor) {

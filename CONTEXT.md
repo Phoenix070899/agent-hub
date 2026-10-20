@@ -53,7 +53,7 @@ The human's standing instructions about how work should be done, kept between se
 _Avoid_: memory, settings
 
 **Dashboard**:
-The always-visible band above the Orchestrator's prompt listing every Worker of the Hub Session with its state.
+The list of every Worker of the Hub Session with its state, as `hub status` prints it.
 _Avoid_: status panel, monitor
 
 **Hub Daemon**:

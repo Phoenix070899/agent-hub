@@ -12,6 +12,8 @@ struct TerminalPane: NSViewRepresentable {
     /// False while a modal is up: the terminal gives up the keyboard, so typing and Escape reach
     /// the modal rather than the agent.
     let keyboard: Bool
+    /// Changes when the human selects what this pane shows, even if it already shows it.
+    let focusRequest: Int
     /// Draw with SwiftTerm's Metal renderer (Settings > Terminal rendering).
     let gpu: Bool
 
@@ -24,6 +26,7 @@ struct TerminalPane: NSViewRepresentable {
         try? view.setUseMetal(gpu)
         view.terminalDelegate = context.coordinator
         context.coordinator.keyboard = keyboard
+        context.coordinator.focusRequest = focusRequest
         if context.coordinator.show(target, in: view), keyboard { Self.focus(view) }
         return view
     }
@@ -33,15 +36,18 @@ struct TerminalPane: NSViewRepresentable {
         // A no-op unless the setting changed; on failure SwiftTerm keeps Core Graphics.
         try? view.setUseMetal(gpu)
         let regained = keyboard && !context.coordinator.keyboard
+        let requested = focusRequest != context.coordinator.focusRequest
         context.coordinator.keyboard = keyboard
+        context.coordinator.focusRequest = focusRequest
         if !keyboard {
             Self.unfocus(view)
             context.coordinator.show(target, in: view)
             return
         }
-        // Focus moves to the terminal only when it starts showing something new or a modal
-        // closes, never on a redraw, so a reply being typed in the ledger keeps its focus.
-        if context.coordinator.show(target, in: view) || regained { Self.focus(view) }
+        // Focus moves to the terminal only when it starts showing something new, a modal closes,
+        // or the human selects it again, never on a redraw, so a reply being typed in the ledger
+        // keeps its focus.
+        if context.coordinator.show(target, in: view) || regained || requested { Self.focus(view) }
     }
 
     private static func unfocus(_ view: TerminalView) {
@@ -73,6 +79,8 @@ struct TerminalPane: NSViewRepresentable {
         private var applied: TerminalAppearance?
         /// Whether the pane last had leave to hold the keyboard.
         var keyboard = true
+        /// The last selection's focus request this pane has acted on.
+        var focusRequest = 0
 
         /// Sets the font and colours, only when they changed: re-installing colours redraws everything.
         func apply(_ appearance: TerminalAppearance, to view: TerminalView) {

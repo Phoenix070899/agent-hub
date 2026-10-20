@@ -1,44 +1,21 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register } from 'claude-code'
+import type { Register } from 'claude-code'
 
-import type { WorkerRow, WorkerState } from '../types'
-import { formatAge, parseStatus } from './dashboard'
 import { needsHuman } from './report'
 
-const workers = atom({ plugin: 'hub', key: 'workers' } as const, [])
 const showTools = atom({ plugin: 'hub', key: 'showTools' } as const, false)
 const turnTools = atom({ plugin: 'hub', key: 'turnTools' } as const, 0)
 
-const POLL_MS = 5000
-
-/** Reply cards for a dark terminal theme: navy, or amber when the human must act. */
-const REPLY = { background: '#1f2d3d', border: '#4a6d91' }
-const REPLY_NEEDS_YOU = { background: '#3d3200', border: '#9a7d00' }
-
-/** Each state's badge color: yellow needs you, blue running, green done, red failed. */
-const STATE_BADGE: Record<WorkerState, { icon: string; color: string }> = {
-  'needs you': { icon: '◆', color: 'yellow' },
-  running: { icon: '●', color: 'blue' },
-  failed: { icon: '✗', color: 'red' },
-  done: { icon: '✓', color: 'green' },
-}
-
-/** One color per Worker row, cycled; none is a badge color (yellow, blue, green, red). */
-const ROW_COLORS = ['cyan', 'magenta', 'white', 'cyanBright', 'magentaBright']
+/**
+ * Reply cards: navy, or amber when the human must act. A terminal cell holds one solid color,
+ * so "50% opacity" is the card color mixed half-and-half with black, and there is no blur.
+ */
+const REPLY = { background: '#0f161e', border: '#4a6d91' }
+const REPLY_NEEDS_YOU = { background: '#1e1900', border: '#9a7d00' }
 
 const formatDuration = (ms: number) => {
   const seconds = Math.round(ms / 1000)
   return seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${seconds % 60}s`
-}
-
-const fit = (text: string, width: number) =>
-  text.length <= width ? text.padEnd(width) : `${text.slice(0, Math.max(0, width - 1))}…`
-
-async function poll($: EngineInterface) {
-  const { exitCode, stdout } = await $.process.run(['hub', 'status', '--json'], { timeoutMs: 4000 })
-  if (exitCode !== 0) return
-  const rows = parseStatus(stdout)
-  await update($, workers, () => rows)
 }
 
 export const register: Register = on => {
@@ -50,10 +27,6 @@ export const register: Register = on => {
       name: 'tools',
       description: 'Show or fold the Orchestrator tool calls in the transcript',
     })
-
-    const refresh = () => poll($).catch(() => undefined)
-    await refresh()
-    $.clock.every(POLL_MS, () => void refresh())
 
     return next(e)
   })
@@ -123,7 +96,7 @@ export const register: Register = on => {
     )
   })
 
-  // Replies are the content the human reads: drawn on a colored background so they stand
+  // Replies are the content the human reads: drawn on a tinted card so they stand
   // apart from folded tool rows. Amber when the reply's Needs you section lists something.
   on('ui.render', { component: 'AssistantMessage' }, async ($, e, next) => {
     if (!e.props.text.trim()) return next(e)
@@ -157,73 +130,5 @@ export const register: Register = on => {
     if (!e.props.text.trim()) return next(e)
     const { Markdown } = $.ui.resolve(e)
     return <Markdown text={e.props.text} dimColor />
-  })
-
-  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
-    const rows: WorkerRow[] = await read($, workers)
-    if (e.props.hasSurvey || rows.length === 0) return next(e)
-
-    const { Box, Button, Text } = $.ui.resolve(e)
-    // The border takes 2 columns and 2 rows, the header and its rule 2 rows.
-    const width = e.props.bodyColumns - 4
-    const shown = rows.slice(0, Math.max(1, Math.min(9, e.props.maxRows - 4)))
-    const divider = <Text dimColor> │ </Text>
-    // "1: " hotkey + "↗ " + profile 8 + badge 11 + age 4 + place 16 + four dividers of 3.
-    const titleWidth = Math.max(10, width - (3 + 2 + 8 + 11 + 4 + 16 + 4 * 3))
-    const count = (state: WorkerState) => rows.filter(row => row.state === state).length
-    const metric = (state: WorkerState, label: string) => {
-      const n = count(state)
-      const badge = STATE_BADGE[state]
-      return (
-        <Text color={n > 0 ? badge.color : undefined} dimColor={n === 0} bold={n > 0 && state === 'needs you'}>
-          {badge.icon} {label} {n}
-        </Text>
-      )
-    }
-
-    return (
-      <Box flexDirection="column" borderStyle="round" borderDimColor paddingX={1}>
-        <Text wrap="truncate-end">
-          <Text bold>Workers</Text>
-          {'   '}
-          {metric('needs you', 'Needs you')}
-          {'   '}
-          {metric('running', 'Running')}
-          {'   '}
-          {metric('done', 'Done')}
-          {count('failed') > 0 ? <Text>{'   '}{metric('failed', 'Failed')}</Text> : null}
-        </Text>
-        <Text dimColor>{'─'.repeat(Math.max(0, width))}</Text>
-        {shown.map((row, index) => {
-          const color = ROW_COLORS[index % ROW_COLORS.length]
-          const badge = STATE_BADGE[row.state]
-          return (
-            <Box key={row.id} flexDirection="row">
-              <Button
-                key={`go-${row.id}`}
-                hotkey={String(index + 1)}
-                plain
-                label="↗"
-                onPress={() => void $.process.run(['hub', 'open', row.id])}
-              />
-              <Text wrap="truncate-end">
-                {' '}
-                <Text color={color} bold>{fit(row.profile, 8)}</Text>
-                {divider}
-                <Text color={badge.color} bold={row.state === 'needs you'}>
-                  {fit(`${badge.icon} ${row.state}`, 11)}
-                </Text>
-                {divider}
-                <Text color={color}>{fit(row.title, titleWidth)}</Text>
-                {divider}
-                <Text dimColor>{formatAge(row.quietSeconds).padStart(4)}</Text>
-                {divider}
-                <Text dimColor>{fit(row.place, 16)}</Text>
-              </Text>
-            </Box>
-          )
-        })}
-      </Box>
-    )
   })
 }

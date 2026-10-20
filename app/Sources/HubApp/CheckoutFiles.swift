@@ -17,6 +17,8 @@ final class CheckoutFiles: ObservableObject {
     @Published private(set) var generation = 0
 
     private var showIgnored = false
+    /// Ignored folders listed on demand; each re-read lists them again, as git does not.
+    private var filled: Set<String> = []
     private var stream: FSEventStreamRef?
     private var pending: DispatchWorkItem?
     private var reading = false
@@ -63,6 +65,10 @@ final class CheckoutFiles: ObservableObject {
             let name = branch.output?.trimmingCharacters(in: .whitespacesAndNewlines)
             await MainActor.run {
                 self.tree = tree
+                // Parents first, so a folder opened inside another ignored folder is found again.
+                for folder in self.filled.sorted(by: { $0.split(separator: "/").count < $1.split(separator: "/").count }) {
+                    self.fill(folder)
+                }
                 self.marks = marks
                 self.branch = (name?.isEmpty ?? true) ? nil : name
                 self.problem = problem
@@ -79,8 +85,17 @@ final class CheckoutFiles: ObservableObject {
     /// Lists an ignored folder's contents the first time it is opened; git lists it as one entry.
     func fillIfNeeded(_ folder: String) {
         guard tree.children[folder] == nil else { return }
+        fill(folder)
+    }
+
+    private func fill(_ folder: String) {
         let url = URL(fileURLWithPath: root).appendingPathComponent(folder)
-        let found = (try? FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: [.isDirectoryKey])) ?? []
+        guard let found = try? FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: [.isDirectoryKey])
+        else {
+            filled.remove(folder)
+            return
+        }
+        filled.insert(folder)
         tree.fill(folder, with: found.map {
             ($0.lastPathComponent, (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true)
         })

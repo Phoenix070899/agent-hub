@@ -537,8 +537,13 @@ final class AppModel: ObservableObject {
         background(quiet: true) { client in try client.branches(repo: repo) } then: { done($0) }
     }
 
+    /// Bumped on every selection, the one already shown included, so its terminal takes the
+    /// keyboard: clicking the selected agent is how the human says "let me type here".
+    @Published private(set) var terminalFocusRequest = 0
+
     func select(_ selection: Selection) {
         self.selection = selection
+        terminalFocusRequest += 1
         lastSelection[selection.repo] = selection
         if case .worker(let repo, let id) = selection,
            let worker = snapshot(repo).workers.first(where: { $0.id == id }) {
