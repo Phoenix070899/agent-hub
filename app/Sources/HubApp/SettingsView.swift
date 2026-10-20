@@ -1,6 +1,7 @@
 import AppKit
 import HubCore
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// Settings: the window's look, the terminal theme (a preset, then any colour changed by hand),
 /// the font, and the multiplexer agents run inside.
@@ -37,6 +38,37 @@ struct SettingsView: View {
                 ColorPicker("Cursor", selection: colour(\.cursor), supportsOpacity: false)
                 ColorPicker("Selection", selection: colour(\.selection), supportsOpacity: false)
                 LabeledContent("Palette") { Swatches(theme: model.appearance.theme) }
+            }
+            Section("Terminal background") {
+                LabeledContent("Image") {
+                    HStack(spacing: 8) {
+                        Text(model.appearance.backgroundImage.map { URL(fileURLWithPath: $0).lastPathComponent } ?? "None")
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        Button("Choose…", action: chooseImage)
+                        if model.appearance.backgroundImage != nil {
+                            Button("Remove") { model.appearance.backgroundImage = nil }
+                        }
+                    }
+                }
+                if let path = model.appearance.backgroundImage {
+                    Slider(value: $model.appearance.backgroundImageDim, in: 0.3...0.95) {
+                        Text("Dim")
+                    }
+                    Slider(value: $model.appearance.backgroundImageBlur, in: 0...30) {
+                        Text("Blur")
+                    }
+                    if !FileManager.default.fileExists(atPath: path) {
+                        Text("The image is gone; terminals show the theme background.")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                    }
+                }
+                Text("Shown behind every terminal. Text and coloured cells stay solid; dim or blur it until the text reads easily.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             Section("Terminal rendering") {
                 Toggle("Draw terminals with the GPU (Metal)", isOn: $model.gpuRendering)
@@ -90,6 +122,16 @@ struct SettingsView: View {
         .formStyle(.grouped)
         .frame(width: 520)
         .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private func chooseImage() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.image]
+        panel.allowsMultipleSelection = false
+        panel.message = "Choose an image to show behind every terminal"
+        if panel.runModal() == .OK, let url = panel.url {
+            model.appearance.backgroundImage = url.path
+        }
     }
 
     private var help: String {

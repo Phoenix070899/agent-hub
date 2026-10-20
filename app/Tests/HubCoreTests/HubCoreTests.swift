@@ -343,6 +343,22 @@ func row(_ id: String, phase: String, quiet: Int, model: String? = nil, effort: 
     #expect(TerminalAppearance.orca.theme == .ayuDark)
 }
 
+@Test func aLookSavedBeforeBackgroundImagesStillLoads() throws {
+    var old = try JSONSerialization.jsonObject(with: JSONEncoder().encode(TerminalAppearance.orca)) as! [String: Any]
+    old.removeValue(forKey: "backgroundImage")
+    old.removeValue(forKey: "backgroundImageDim")
+    old.removeValue(forKey: "backgroundImageBlur")
+    let loaded = try JSONDecoder().decode(TerminalAppearance.self, from: JSONSerialization.data(withJSONObject: old))
+    #expect(loaded == .orca)
+    #expect(loaded.backgroundImage == nil)
+
+    var withImage = TerminalAppearance.orca
+    withImage.backgroundImage = "/Users/me/Pictures/sea.jpg"
+    withImage.backgroundImageDim = 0.5
+    withImage.backgroundImageBlur = 12
+    #expect(try JSONDecoder().decode(TerminalAppearance.self, from: JSONEncoder().encode(withImage)) == withImage)
+}
+
 @Test func theWindowFollowsTheTerminalBackground() {
     #expect(TerminalTheme.ayuDark.isDark)
     var light = TerminalTheme.ayuDark

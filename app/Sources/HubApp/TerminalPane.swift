@@ -83,7 +83,10 @@ struct TerminalPane: NSViewRepresentable {
                 ?? NSFont.monospacedSystemFont(ofSize: size, weight: .regular)
             let theme = appearance.theme
             view.installColors(theme.ansi.map(Self.terminalColor))
+            // With an image, the default background is clear and the image shows through from
+            // behind the pane; text, coloured cells, and reverse video stay opaque.
             view.nativeBackgroundColor = Self.nsColor(theme.background)
+            view.backgroundOpacity = appearance.backgroundImage == nil ? 1 : 0
             view.nativeForegroundColor = Self.nsColor(theme.foreground)
             view.caretColor = Self.nsColor(theme.cursor)
             view.selectedTextBackgroundColor = Self.nsColor(theme.selection)

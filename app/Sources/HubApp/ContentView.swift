@@ -810,12 +810,41 @@ struct LiveTerminal: View {
         }
         .padding(.leading, 10)
         .padding(.vertical, 6)
-        .background(TerminalTheme.color(model.appearance.theme.background))
+        .background { TerminalBackdrop(appearance: model.appearance) }
         .opacity(model.daemonDown ? 0.45 : 1)
         // Runs again whenever the multiplexer shell changes, so one that exited is replaced.
         .task(id: "\(target.label) \(shown?.label ?? "-") \(model.multiplexer.enabled)") {
             model.ensureMux(target, repo: repo)
         }
+    }
+}
+
+/// What sits behind a terminal: the theme background, or the chosen image, blurred and dimmed by it.
+struct TerminalBackdrop: View {
+    let appearance: TerminalAppearance
+    private static var images: [String: NSImage] = [:]
+
+    var body: some View {
+        let background = TerminalTheme.color(appearance.theme.background)
+        if let path = appearance.backgroundImage, let image = Self.image(at: path) {
+            Color.clear
+                .overlay {
+                    Image(nsImage: image).resizable().scaledToFill()
+                        .blur(radius: appearance.backgroundImageBlur, opaque: true)
+                }
+                .clipped()
+                .overlay { background.opacity(appearance.backgroundImageDim) }
+        } else {
+            background
+        }
+    }
+
+    /// Read once per path; a file that is gone falls back to the plain background.
+    private static func image(at path: String) -> NSImage? {
+        if let image = images[path] { return image }
+        let image = NSImage(contentsOfFile: path)
+        images[path] = image
+        return image
     }
 }
 
