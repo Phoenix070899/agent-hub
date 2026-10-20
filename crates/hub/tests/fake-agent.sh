@@ -15,6 +15,8 @@ if [ "$1" = "-p" ] && [ "$2" = "/usage" ]; then
   exit 0
 fi
 echo "· Working… (1s · fake agent)"
+# An Orchestrator gets "orchestrator" first; opened with the request "prompt me", it shows a prompt.
+if [ "$1" = "orchestrator" ] && [ "$2" = "prompt me" ]; then shift; fi
 case "$1" in
   ask*) answer=$(hub ask "Which color?") && hub done --state done "answer was $answer" ;;
   done*) hub done --state done "finished" ;;

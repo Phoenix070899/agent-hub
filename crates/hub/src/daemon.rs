@@ -453,10 +453,8 @@ impl Hub {
             }
         })?;
         self.agents.lock().unwrap().insert(agent.id, Arc::clone(&live));
-        if !orchestrator {
-            let hub = Arc::clone(self);
-            std::thread::spawn(move || hub.watch_agent(live));
-        }
+        let hub = Arc::clone(self);
+        std::thread::spawn(move || hub.watch_agent(live));
         self.notify();
         Ok(view(true, resume))
     }
@@ -1468,7 +1466,8 @@ impl Hub {
             }
         }
         drop(db);
-        // A Normal session's own permission prompt: there is no Orchestrator to tell, only the human.
+        // An Orchestrator's or Normal session's own permission prompt: there is no one to tell but
+        // the human, who may be looking at another agent or away from Echo.
         for agent in db::agents(&self.db(), Some(repo))? {
             let Some(at) = self.agent_prompts.lock().unwrap().get(&agent.id).copied() else {
                 continue;
@@ -1479,8 +1478,10 @@ impl Hub {
                 "message": 0,
                 "agent": agent.id,
                 "worker": null,
-                "profile": "claude",
-                "title": agent.name.clone().unwrap_or_else(|| "Claude Code".into()),
+                "profile": if agent.kind == db::agent_kind::ORCHESTRATOR { "orchestrator" } else { "claude" },
+                "title": agent.name.clone().unwrap_or_else(|| {
+                    if agent.kind == db::agent_kind::ORCHESTRATOR { "Orchestrator" } else { "Claude Code" }.into()
+                }),
                 "body": "A permission prompt is waiting on screen.",
                 "prompt": screen::prompt_lines(&live.screen()),
                 "at": at,
@@ -1643,7 +1644,8 @@ impl Hub {
         Ok(json!({}))
     }
 
-    /// Approve or Deny on a Normal session's own prompt: press the key; the human is the only one to tell.
+    /// Approve or Deny on an Orchestrator's or Normal session's own prompt: press the key; the human
+    /// is the only one to tell.
     fn decide_agent(&self, id: i64, approve: bool, note: Option<&str>) -> Result<Value> {
         let live = self.agent_live(id)?;
         if screen::look(&live.screen()) != Look::PermissionPrompt {
@@ -1665,7 +1667,8 @@ impl Hub {
         Ok(json!({}))
     }
 
-    /// Watches a Normal session's screen for permission prompts, so they reach Needs you.
+    /// Watches an Orchestrator's or Normal session's screen for permission prompts, so they reach
+    /// Needs you.
     fn watch_agent(self: Arc<Self>, live: Arc<Live>) {
         while live.is_alive() {
             std::thread::sleep(Duration::from_secs(1));

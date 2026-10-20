@@ -461,6 +461,33 @@ fn a_normal_session_puts_its_permission_prompt_under_needs_you() {
 }
 
 #[test]
+fn an_orchestrator_puts_its_own_permission_prompt_under_needs_you() {
+    let hub = Hub::new("orchprompt");
+    hub.ok(&["status"]);
+    let opened = hub.call(
+        "agent.open",
+        serde_json::json!({ "repo": hub.repo_key(), "kind": "orchestrator", "request": "prompt me" }),
+    );
+    let agent = opened["result"]["agent"].as_i64().unwrap();
+    hub.eventually("the prompt to reach Needs you", || {
+        snapshot(&hub)["needs"]
+            .as_array()
+            .is_some_and(|needs| !needs.is_empty())
+    });
+    let need = snapshot(&hub)["needs"][0].clone();
+    assert_eq!(need["agent"], agent);
+    assert_eq!(need["worker"], serde_json::Value::Null);
+    assert_eq!(need["profile"], "orchestrator");
+    assert_eq!(need["title"], "Orchestrator");
+    assert_eq!(need["prompt"], "Bash command\nrm -rf junk\nDo you want to proceed?");
+    let decided = hub.call("decide", serde_json::json!({ "agent": agent, "approve": true }));
+    assert_eq!(decided["ok"], true, "{decided}");
+    hub.eventually("the prompt to clear", || {
+        snapshot(&hub)["needs"].as_array().is_some_and(|needs| needs.is_empty())
+    });
+}
+
+#[test]
 fn an_unnamed_agent_is_named_after_the_first_request() {
     let hub = Hub::new("naming");
     hub.ok(&["status"]);

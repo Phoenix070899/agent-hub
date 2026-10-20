@@ -45,7 +45,7 @@ struct NeedItem: View {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { replyFocused = true }
     }
 
-    /// Shows the terminal the Need is about: the Worker's, or the Normal session's own.
+    /// Shows the terminal the Need is about: the Worker's, or the agent's own.
     private func open() {
         if let worker = need.worker {
             model.select(.worker(repo: repo, id: worker))
@@ -158,7 +158,7 @@ final class Draft: ObservableObject {
 extension Need {
     /// Who wants what, for the highlighter: "w21 sasuke wants to run".
     var headline: String {
-        let who = worker.map { "\($0) \(profile)" } ?? "Claude Code"
+        let who = worker.map { "\($0) \(profile)" } ?? (profile == "orchestrator" ? "The Orchestrator" : "Claude Code")
         switch kind {
         case .question: return "\(who) asks"
         case .permissionPrompt: return "\(who) wants to run"
