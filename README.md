@@ -1,13 +1,13 @@
-# Agent Hub
+# Echo
 
-Agent Hub lets one person direct a team of coding agents from one window.
+Echo lets one person direct a team of coding agents from one window.
 You talk to an Orchestrator.
 It splits the work into Tasks, hands each Task to a specialised Worker, and reports back.
 You can also open a plain Claude Code session next to it.
 
 Two parts:
 
-- **Echo**: a native macOS app (`app/`, Swift) that shows every agent of a repo in one ledger and one terminal.
+- **The Echo app**: a native macOS app (`app/`, Swift) that shows every agent of a repo in one ledger and one terminal.
 - **Hub Daemon and `hub` CLI**: a Rust program (`crates/hub/`) that owns each Worker's terminal, worktree, and messages, so Workers outlive the Orchestrator and the app.
 
 The domain words (Orchestrator, Worker, Task, Needs you, Final Report, and the rest) are defined in [`CONTEXT.md`](CONTEXT.md).
