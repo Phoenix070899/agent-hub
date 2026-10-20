@@ -555,18 +555,28 @@ struct AgentGroupView: View {
                                     if unread > 0 {
                                         Text("\(unread) unread").font(.system(size: 12)).foregroundStyle(Ledger.ink3)
                                     }
-                                    if !read.isEmpty {
-                                        Button("Clear read") { model.dismiss(read) }
-                                            .buttonStyle(.ledgerLink)
-                                            .help("Take the reports you have opened off this list")
-                                    }
-                                    Button("Clear all") { model.dismiss(group.settled) }
-                                        .buttonStyle(.ledgerLink)
-                                        .help("Take every report off this list, read or not")
                                     if group.settled.count > Self.doneShown {
                                         Button(showAllDone.on ? "Show fewer" : "Show all") { showAllDone.on.toggle() }
                                             .buttonStyle(.ledgerLink)
                                     }
+                                    Menu {
+                                        Button("Clear read") { model.dismiss(read) }
+                                            .disabled(read.isEmpty)
+                                            .help("Take the reports you have opened off this list")
+                                        Button("Clear all") { model.dismiss(group.settled) }
+                                            .help("Take every report off this list, read or not")
+                                    } label: {
+                                        Image(systemName: "ellipsis")
+                                            .rotationEffect(.degrees(90))
+                                            .font(.system(size: 12.5, weight: .medium))
+                                            .foregroundStyle(Ledger.run)
+                                            .frame(width: 16, height: 16)
+                                            .contentShape(Rectangle())
+                                    }
+                                    .menuStyle(.borderlessButton)
+                                    .menuIndicator(.hidden)
+                                    .fixedSize()
+                                    .help("More actions for this list")
                                 }
                             }
                             ForEach(showAllDone.on ? group.settled : Array(group.settled.prefix(Self.doneShown))) { worker in
