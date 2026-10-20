@@ -235,12 +235,6 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// Terminals drawn by SwiftTerm's Metal renderer instead of Core Graphics. SwiftTerm calls it
-    /// experimental, so it is a setting; it falls back to Core Graphics if Metal fails.
-    @Published var gpuRendering: Bool = UserDefaults.standard.bool(forKey: "gpuRendering") {
-        didSet { UserDefaults.standard.set(gpuRendering, forKey: "gpuRendering") }
-    }
-
     @Published var multiplexer: MultiplexerSettings =
         AppModel.load(MultiplexerSettings.self, key: "multiplexer") ?? MultiplexerSettings()
     {

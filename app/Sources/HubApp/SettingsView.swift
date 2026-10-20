@@ -90,13 +90,6 @@ struct SettingsView: View {
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            Section("Terminal rendering") {
-                Toggle("Draw terminals with the GPU (Metal)", isOn: $model.gpuRendering)
-                Text("SwiftTerm's Metal renderer, still marked experimental. It falls back to the standard drawing if Metal is unavailable.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
             Section("Font") {
                 TextField("Family", text: $model.appearance.fontName)
                 Stepper(value: $model.appearance.fontSize, in: 9...28, step: 0.5) {

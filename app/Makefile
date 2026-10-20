@@ -12,6 +12,8 @@ app:
 	cp bundle/AppIcon.icns $(APP)/Contents/Resources/AppIcon.icns
 	# Highlightr's themes and highlight.js, found through Bundle.main.resourceURL.
 	cp -R .build/release/Highlightr_Highlightr.bundle $(APP)/Contents/Resources/
+	# xterm.js and its page, found through Bundle.main.resourceURL.
+	cp -R .build/release/HubApp_HubApp.bundle $(APP)/Contents/Resources/
 	codesign --force --sign - $(APP)
 	@echo "Built $(APP)"
 

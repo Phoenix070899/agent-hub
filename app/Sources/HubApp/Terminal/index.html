@@ -1,0 +1,56 @@
+<!doctype html>
+<meta charset="utf-8">
+<link rel="stylesheet" href="xterm.css">
+<style>
+  html, body, #t { margin: 0; height: 100%; overflow: hidden; background: transparent; }
+  .xterm .xterm-viewport { background-color: transparent !important; }
+</style>
+<div id="t"></div>
+<script src="xterm.js"></script>
+<script src="addon-fit.js"></script>
+<script src="addon-web-links.js"></script>
+<script>
+  const post = m => webkit.messageHandlers.echo.postMessage(m);
+  const term = new Terminal({
+    allowTransparency: true,
+    macOptionIsMeta: true,
+    cursorBlink: false,
+    scrollback: 5000,
+  });
+  const fit = new FitAddon.FitAddon();
+  term.loadAddon(fit);
+  term.loadAddon(new WebLinksAddon.WebLinksAddon((_, url) => post({ type: 'link', url })));
+  term.open(document.getElementById('t'));
+
+  term.onData(data => post({ type: 'in', data }));
+  term.onResize(({ cols, rows }) => post({ type: 'resize', cols, rows }));
+  new ResizeObserver(() => fit.fit()).observe(document.getElementById('t'));
+
+  const echo = {
+    // `a`: { fontFamily, fontSize, transparent, theme: { background, foreground, cursor, selection, ansi[16] } }
+    setAppearance(a) {
+      const t = a.theme;
+      const names = ['black', 'red', 'green', 'yellow', 'blue', 'magenta', 'cyan', 'white'];
+      const colors = {};
+      names.forEach((n, i) => { colors[n] = t.ansi[i]; colors['bright' + n[0].toUpperCase() + n.slice(1)] = t.ansi[i + 8]; });
+      term.options.fontFamily = a.fontFamily;
+      term.options.fontSize = a.fontSize;
+      term.options.theme = {
+        ...colors,
+        // ds-allow-hardcode: a clear default background lets the image behind the pane show through
+        background: a.transparent ? 'rgba(0, 0, 0, 0)' : t.background,
+        foreground: t.foreground,
+        cursor: t.cursor,
+        selectionBackground: t.selection,
+      };
+      fit.fit();
+    },
+    write(b64) { term.write(Uint8Array.from(atob(b64), c => c.charCodeAt(0))); },
+    reset() { term.reset(); },
+    focus() { term.focus(); },
+    blur() { term.blur(); },
+  };
+
+  fit.fit();
+  post({ type: 'ready', cols: term.cols, rows: term.rows });
+</script>

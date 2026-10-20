@@ -1,10 +1,10 @@
 import AppKit
 import HubCore
-import SwiftTerm
 import SwiftUI
+import WebKit
 
-/// A daemon-owned terminal drawn with SwiftTerm. Everything SwiftTerm-specific stays in this file,
-/// so another renderer (libghostty) can replace it behind the same view.
+/// A daemon-owned terminal drawn with xterm.js in a web view. Everything renderer-specific stays
+/// in this file and `Terminal/`, so another renderer (libghostty) can replace it behind the same view.
 struct TerminalPane: NSViewRepresentable {
     let target: TerminalTarget
     let client: DaemonClient
@@ -14,66 +14,79 @@ struct TerminalPane: NSViewRepresentable {
     let keyboard: Bool
     /// Changes when the human selects what this pane shows, even if it already shows it.
     let focusRequest: Int
-    /// Draw with SwiftTerm's Metal renderer (Settings > Terminal rendering).
-    let gpu: Bool
 
     func makeCoordinator() -> Coordinator { Coordinator(client: client) }
 
-    func makeNSView(context: Context) -> TerminalView {
-        let view = DropTerminalView(frame: NSRect(x: 0, y: 0, width: 800, height: 500))
-        view.optionAsMetaKey = true
-        context.coordinator.apply(appearance, to: view)
-        try? view.setUseMetal(gpu)
-        view.terminalDelegate = context.coordinator
-        context.coordinator.keyboard = keyboard
-        context.coordinator.focusRequest = focusRequest
-        if context.coordinator.show(target, in: view), keyboard { Self.focus(view) }
+    func makeNSView(context: Context) -> DropWebView {
+        let coordinator = context.coordinator
+        let config = WKWebViewConfiguration()
+        config.userContentController.add(coordinator, name: "echo")
+        let view = DropWebView(frame: NSRect(x: 0, y: 0, width: 800, height: 500), configuration: config)
+        // Clear, so a background image behind the pane shows through the page.
+        view.setValue(false, forKey: "drawsBackground")
+        view.underPageBackgroundColor = .clear
+        view.onDrop = { [weak coordinator] text in coordinator?.type(Data(text.utf8)) }
+        coordinator.view = view
+        coordinator.apply(appearance)
+        coordinator.keyboard = keyboard
+        coordinator.focusRequest = focusRequest
+        if let page = Self.page { view.loadFileURL(page, allowingReadAccessTo: page.deletingLastPathComponent()) }
+        if coordinator.show(target), keyboard { Self.focus(view) }
         return view
     }
 
-    func updateNSView(_ view: TerminalView, context: Context) {
-        context.coordinator.apply(appearance, to: view)
-        // A no-op unless the setting changed; on failure SwiftTerm keeps Core Graphics.
-        try? view.setUseMetal(gpu)
-        let regained = keyboard && !context.coordinator.keyboard
-        let requested = focusRequest != context.coordinator.focusRequest
-        context.coordinator.keyboard = keyboard
-        context.coordinator.focusRequest = focusRequest
+    func updateNSView(_ view: DropWebView, context: Context) {
+        let coordinator = context.coordinator
+        coordinator.apply(appearance)
+        let regained = keyboard && !coordinator.keyboard
+        let requested = focusRequest != coordinator.focusRequest
+        coordinator.keyboard = keyboard
+        coordinator.focusRequest = focusRequest
         if !keyboard {
             Self.unfocus(view)
-            context.coordinator.show(target, in: view)
+            coordinator.show(target)
             return
         }
         // Focus moves to the terminal only when it starts showing something new, a modal closes,
         // or the human selects it again, never on a redraw, so a reply being typed in the ledger
         // keeps its focus.
-        if context.coordinator.show(target, in: view) || regained || requested { Self.focus(view) }
+        if coordinator.show(target) || regained || requested { Self.focus(view) }
     }
 
-    private static func unfocus(_ view: TerminalView) {
-        guard let window = view.window, window.firstResponder === view else { return }
-        window.makeFirstResponder(nil)
-    }
-
-    /// Gives the terminal the keyboard once it is in a window.
-    private static func focus(_ view: TerminalView) {
-        DispatchQueue.main.async {
-            guard let window = view.window, window.firstResponder !== view else { return }
-            window.makeFirstResponder(view)
-        }
-    }
-
-    static func dismantleNSView(_ view: TerminalView, coordinator: Coordinator) {
+    static func dismantleNSView(_ view: DropWebView, coordinator: Coordinator) {
+        view.configuration.userContentController.removeScriptMessageHandler(forName: "echo")
         coordinator.detach()
     }
 
-    final class Coordinator: NSObject, TerminalViewDelegate {
+    /// The xterm page: in the app's resource bundle (see the Makefile), or SwiftPM's own for `swift run`.
+    private static let page: URL? = {
+        let bundle = Bundle.main.resourceURL.flatMap { Bundle(url: $0.appendingPathComponent("HubApp_HubApp.bundle")) }
+            ?? Bundle.module
+        return bundle.url(forResource: "Terminal", withExtension: nil)?.appendingPathComponent("index.html")
+    }()
+
+    private static func unfocus(_ view: DropWebView) {
+        guard let window = view.window, window.firstResponder === view else { return }
+        window.makeFirstResponder(nil)
+        view.evaluateJavaScript("echo.blur()")
+    }
+
+    /// Gives the terminal the keyboard once it is in a window.
+    private static func focus(_ view: DropWebView) {
+        DispatchQueue.main.async {
+            guard let window = view.window else { return }
+            if window.firstResponder !== view { window.makeFirstResponder(view) }
+            view.evaluateJavaScript("echo.focus()")
+        }
+    }
+
+    final class Coordinator: NSObject, WKScriptMessageHandler {
         let client: DaemonClient
         private var target: TerminalTarget?
         private var socket: HubSocket?
-        private weak var view: TerminalView?
+        weak var view: DropWebView?
         private var generation = 0
-        /// The grid size SwiftTerm last reported; 0 until the first layout.
+        /// The grid size xterm last reported; 0 until the first layout.
         private var size = (rows: 0, cols: 0)
 
         private var applied: TerminalAppearance?
@@ -82,32 +95,38 @@ struct TerminalPane: NSViewRepresentable {
         /// The last selection's focus request this pane has acted on.
         var focusRequest = 0
 
+        /// Script waiting for the page to load; order is kept, so the look lands before the output.
+        private var queued: [String] = []
+        private var pageReady = false
+
+        /// Runs `script` in the page, or holds it until the page has loaded.
+        private func run(_ script: String) {
+            if pageReady { view?.evaluateJavaScript(script) } else { queued.append(script) }
+        }
+
+        private func feed(_ bytes: Data) { run("echo.write('\(bytes.base64EncodedString())')") }
+
         /// Sets the font and colours, only when they changed: re-installing colours redraws everything.
-        func apply(_ appearance: TerminalAppearance, to view: TerminalView) {
+        func apply(_ appearance: TerminalAppearance) {
             guard appearance != applied else { return }
             applied = appearance
-            let size = CGFloat(appearance.fontSize)
-            view.font = NSFont(name: appearance.fontName, size: size)
-                ?? NSFont.monospacedSystemFont(ofSize: size, weight: .regular)
-            let theme = appearance.theme
-            view.installColors(theme.ansi.map(Self.terminalColor))
-            // With an image, the default background is clear and the image shows through from
-            // behind the pane; text, coloured cells, and reverse video stay opaque.
-            view.nativeBackgroundColor = Self.nsColor(theme.background)
-            view.backgroundOpacity = appearance.backgroundImage == nil ? 1 : 0
-            view.nativeForegroundColor = Self.nsColor(theme.foreground)
-            view.caretColor = Self.nsColor(theme.cursor)
-            view.selectedTextBackgroundColor = Self.nsColor(theme.selection)
-        }
-
-        static func nsColor(_ hex: String) -> NSColor {
-            guard let c = TerminalTheme.rgb(hex) else { return .textColor }
-            return NSColor(srgbRed: c.red, green: c.green, blue: c.blue, alpha: 1)
-        }
-
-        static func terminalColor(_ hex: String) -> SwiftTerm.Color {
-            let c = TerminalTheme.rgb(hex) ?? (0, 0, 0)
-            return SwiftTerm.Color(red: UInt16(c.red * 65535), green: UInt16(c.green * 65535), blue: UInt16(c.blue * 65535))
+            let look: [String: Any] = [
+                "fontFamily": "\"\(appearance.fontName)\", Menlo, monospace",
+                "fontSize": appearance.fontSize,
+                // With an image, the default background is clear and the image shows through from
+                // behind the pane; text, coloured cells, and reverse video stay opaque.
+                "transparent": appearance.backgroundImage != nil,
+                "theme": [
+                    "background": appearance.theme.background,
+                    "foreground": appearance.theme.foreground,
+                    "cursor": appearance.theme.cursor,
+                    "selection": appearance.theme.selection,
+                    "ansi": appearance.theme.ansi,
+                ],
+            ]
+            guard let json = try? JSONSerialization.data(withJSONObject: look),
+                  let text = String(data: json, encoding: .utf8) else { return }
+            run("echo.setAppearance(\(text))")
         }
 
         init(client: DaemonClient) {
@@ -121,25 +140,33 @@ struct TerminalPane: NSViewRepresentable {
         /// multiplexer, which hands it to its focused pane.
         @objc private func typeText(_ note: Notification) {
             // Echo has one terminal on screen at a time; one not in a window is being torn down.
-            guard let text = note.object as? Data, let socket, view?.window != nil else { return }
-            DispatchQueue.global(qos: .userInteractive).async { try? socket.write(text) }
+            guard let text = note.object as? Data, view?.window != nil else { return }
+            type(text)
         }
 
         /// Types ⌘D's keys into this terminal when it shows a multiplexer in the key window.
         @objc private func typeMuxKeys(_ note: Notification) {
-            guard case .shell = target, let keys = note.object as? Data, let socket,
+            guard case .shell = target, let keys = note.object as? Data,
                   view?.window?.isKeyWindow == true else { return }
-            DispatchQueue.global(qos: .userInteractive).async { try? socket.write(keys) }
+            type(keys)
+        }
+
+        /// One queue, so keys reach the daemon in the order they were typed.
+        private let writes = DispatchQueue(label: "echo.terminal.writes", qos: .userInteractive)
+
+        /// Sends bytes to whatever the terminal shows.
+        func type(_ data: Data) {
+            guard let socket else { return }
+            writes.async { try? socket.write(data) }
         }
 
         /// Attaches to `target`, unless already showing it. Returns whether it attached.
         @discardableResult
-        func show(_ target: TerminalTarget, in view: TerminalView) -> Bool {
+        func show(_ target: TerminalTarget) -> Bool {
             guard target != self.target else { return false }
             detach()
             self.target = target
-            self.view = view
-            view.resetToInitialState()
+            run("echo.reset()")
             generation += 1
             let generation = generation
             let (rows, cols) = size
@@ -159,20 +186,19 @@ struct TerminalPane: NSViewRepresentable {
                     }
                     guard current else { return socket.shutdown() }
                     while let chunk = try socket.readChunk() {
-                        let bytes = [UInt8](chunk)
                         DispatchQueue.main.async {
                             guard let self, self.generation == generation else { return }
-                            self.view?.feed(byteArray: bytes[...])
+                            self.feed(chunk)
                         }
                     }
                     DispatchQueue.main.async {
                         guard let self, self.generation == generation else { return }
-                        self.view?.feed(text: "\r\n\u{1b}[2m[terminal ended]\u{1b}[0m\r\n")
+                        self.feed(Data("\r\n\u{1b}[2m[terminal ended]\u{1b}[0m\r\n".utf8))
                     }
                 } catch {
                     DispatchQueue.main.async {
                         guard let self, self.generation == generation else { return }
-                        self.view?.feed(text: "\u{1b}[2m\(error)\u{1b}[0m\r\n")
+                        self.feed(Data("\u{1b}[2m\(error)\u{1b}[0m\r\n".utf8))
                     }
                 }
             }
@@ -186,61 +212,59 @@ struct TerminalPane: NSViewRepresentable {
             target = nil
         }
 
-        func send(source: TerminalView, data: ArraySlice<UInt8>) {
-            guard let socket else { return }
-            let bytes = Data(data)
-            DispatchQueue.global(qos: .userInteractive).async { try? socket.write(bytes) }
-        }
-
         /// Smaller than this is a layout passing through, not a size to give the agent: shrinking
         /// the terminal that far would clip its screen.
         private static let minimumSize = (rows: 8, cols: 40)
         private var pendingResize: DispatchWorkItem?
 
-        func sizeChanged(source: TerminalView, newCols: Int, newRows: Int) {
-            guard newCols >= Self.minimumSize.cols, newRows >= Self.minimumSize.rows else { return }
-            size = (newRows, newCols)
+        private func sizeChanged(cols: Int, rows: Int) {
+            guard cols >= Self.minimumSize.cols, rows >= Self.minimumSize.rows else { return }
+            size = (rows, cols)
             guard let target, socket != nil else { return }
             // Only the size the layout settles on reaches the daemon.
             pendingResize?.cancel()
             let client = client
             let resize = DispatchWorkItem {
-                DispatchQueue.global().async { try? client.resize(target, rows: newRows, cols: newCols) }
+                DispatchQueue.global().async { try? client.resize(target, rows: rows, cols: cols) }
             }
             pendingResize = resize
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.2, execute: resize)
         }
 
-        func setTerminalTitle(source: TerminalView, title: String) {}
-        func hostCurrentDirectoryUpdate(source: TerminalView, directory: String?) {}
-        func scrolled(source: TerminalView, position: Double) {}
-        func requestOpenLink(source: TerminalView, link: String, params: [String: String]) {
-            if let url = URL(string: link) { NSWorkspace.shared.open(url) }
-        }
-        func bell(source: TerminalView) {}
-        func clipboardCopy(source: TerminalView, content: Data) {
-            if let text = String(data: content, encoding: .utf8) {
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(text, forType: .string)
+        func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
+            guard let body = message.body as? [String: Any], let kind = body["type"] as? String else { return }
+            switch kind {
+            case "ready":
+                pageReady = true
+                queued.forEach { view?.evaluateJavaScript($0) }
+                queued = []
+                sizeChanged(cols: body["cols"] as? Int ?? 0, rows: body["rows"] as? Int ?? 0)
+                if keyboard { view?.evaluateJavaScript("echo.focus()") }
+            case "in":
+                if let text = body["data"] as? String { type(Data(text.utf8)) }
+            case "resize":
+                sizeChanged(cols: body["cols"] as? Int ?? 0, rows: body["rows"] as? Int ?? 0)
+            case "link":
+                if let link = body["url"] as? String, let url = URL(string: link) { NSWorkspace.shared.open(url) }
+            default:
+                break
             }
         }
-        func iTermContent(source: TerminalView, content: ArraySlice<UInt8>) {}
-        func rangeChanged(source: TerminalView, startY: Int, endY: Int) {}
     }
 }
 
-/// SwiftTerm's view, taking dropped files and images: their paths are typed at the cursor, as
-/// Terminal.app does, so Claude Code attaches an image or reads a file.
-final class DropTerminalView: TerminalView {
-    override init(frame: CGRect) {
-        super.init(frame: frame)
+/// The terminal's web view, taking dropped files and images: their paths are typed at the cursor,
+/// as Terminal.app does, so Claude Code attaches an image or reads a file.
+final class DropWebView: WKWebView {
+    /// Receives the text to type for a drop.
+    var onDrop: ((String) -> Void)?
+
+    override init(frame: CGRect, configuration: WKWebViewConfiguration) {
+        super.init(frame: frame, configuration: configuration)
         registerForDraggedTypes([.fileURL, .png, .tiff])
     }
 
-    required init?(coder: NSCoder) {
-        super.init(coder: coder)
-        registerForDraggedTypes([.fileURL, .png, .tiff])
-    }
+    required init?(coder: NSCoder) { fatalError("DropWebView is built in code") }
 
     override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation { .copy }
 
@@ -248,8 +272,14 @@ final class DropTerminalView: TerminalView {
         let paths = Self.paths(from: sender.draggingPasteboard)
         guard !paths.isEmpty else { return false }
         window?.makeFirstResponder(self)
-        send(txt: droppedPaths(paths))
+        onDrop?(paths.map(Self.shellQuoted).joined(separator: " ") + " ")
         return true
+    }
+
+    /// Backslash-escapes what a shell would split or expand, as Terminal.app does for a dropped path.
+    private static func shellQuoted(_ path: String) -> String {
+        let safe = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "/._-+@%:,="))
+        return path.unicodeScalars.map { safe.contains($0) ? String($0) : "\\" + String($0) }.joined()
     }
 
     /// Files as their paths; an image with no file behind it (from a browser, say) saved first.

@@ -803,7 +803,7 @@ struct LiveTerminal: View {
             if let shown {
                 TerminalPane(target: shown, client: model.client, appearance: model.appearance,
                              keyboard: !model.modalShown && model.preview == nil && !model.treeFocused,
-                             focusRequest: model.terminalFocusRequest, gpu: model.gpuRendering)
+                             focusRequest: model.terminalFocusRequest)
             } else {
                 Text("Starting the multiplexer…")
                     .font(.system(size: 12.5))
