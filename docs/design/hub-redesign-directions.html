@@ -1,0 +1,509 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hub App redesign directions</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Condensed:wght@400;500;600&family=JetBrains+Mono:wght@400;600&family=Instrument+Sans:wght@400;500;600;700&family=Spline+Sans+Mono:wght@400;500;600&family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root{
+  --board:#dcdee2; --ink:#1d2127; --ink2:#4a525e; --rule:#c3c7cd; --card:#eceef1;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--board);color:var(--ink);font:15px/1.55 -apple-system,BlinkMacSystemFont,"SF Pro Text","Helvetica Neue",sans-serif;-webkit-font-smoothing:antialiased}
+.page{max-width:1240px;margin:0 auto;padding:56px 24px 96px}
+h1{font:600 34px/1.15 -apple-system,BlinkMacSystemFont,"SF Pro Display",sans-serif;letter-spacing:-.02em;max-width:22ch}
+.lede{margin-top:14px;max-width:68ch;color:var(--ink2);font-size:17px}
+.diag{display:grid;grid-template-columns:repeat(3,1fr);gap:28px;margin:40px 0 8px;padding-top:24px;border-top:1px solid var(--rule)}
+.diag h3{font-size:15px;font-weight:600;margin-bottom:4px}
+.diag p{color:var(--ink2);font-size:14px;max-width:44ch}
+.pick{margin:28px 0 0;padding:18px 22px;background:var(--card);border-radius:10px;max-width:860px}
+.pick strong{font-weight:600}
+section.opt{margin-top:88px}
+.opt-head{display:flex;align-items:baseline;gap:16px;flex-wrap:wrap}
+.opt-head .letter{font:600 15px/1 -apple-system,sans-serif;color:#fff;background:var(--ink);border-radius:6px;padding:6px 9px}
+.opt-head h2{font:600 26px/1.2 -apple-system,BlinkMacSystemFont,"SF Pro Display",sans-serif;letter-spacing:-.015em}
+.opt-head .tag{font-size:14px;color:var(--ink2)}
+.pitch{margin:8px 0 22px;max-width:70ch;color:var(--ink2);font-size:16px}
+.stage{width:100%;overflow:hidden;border-radius:12px;box-shadow:0 1px 0 rgba(0,0,0,.06),0 18px 50px -20px rgba(20,24,32,.45)}
+.stage .win{width:1180px;height:700px;transform-origin:0 0}
+.notes{display:grid;grid-template-columns:repeat(4,1fr);gap:24px;margin-top:26px}
+.notes h4{font-size:13px;font-weight:600;margin-bottom:4px}
+.notes p,.notes li{font-size:14px;color:var(--ink2)}
+.notes ul{padding-left:16px}
+.swatches{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px}
+.sw{display:flex;align-items:center;gap:6px;font:12px/1 ui-monospace,Menlo,monospace;color:var(--ink2)}
+.sw i{width:16px;height:16px;border-radius:4px;display:inline-block;box-shadow:inset 0 0 0 1px rgba(0,0,0,.12)}
+table.cmp{width:100%;border-collapse:collapse;margin-top:28px;font-size:14px}
+table.cmp th,table.cmp td{text-align:left;padding:10px 12px;border-bottom:1px solid var(--rule);vertical-align:top}
+table.cmp th{font-weight:600}
+table.cmp td{color:var(--ink2)}
+h2.sec{font:600 22px/1.2 -apple-system,sans-serif;margin-top:96px}
+@media (max-width:820px){.diag,.notes{grid-template-columns:1fr}h1{font-size:28px}}
+
+/* ---------- shared mock pieces ---------- */
+.win{position:relative;display:flex;flex-direction:column;overflow:hidden}
+.lights{display:flex;gap:8px}
+.lights i{width:12px;height:12px;border-radius:50%;display:block}
+.lights i:nth-child(1){background:#ff5f57}.lights i:nth-child(2){background:#febc2e}.lights i:nth-child(3){background:#28c840}
+.term{white-space:pre;overflow:hidden}
+.term .c{color:var(--t-cursor)}
+.term .p{color:var(--t-prompt)}
+.term .b{color:var(--t-bullet)}
+.term .d{color:var(--t-dim)}
+.term .h{color:var(--t-head);font-weight:600}
+.term .y{color:var(--t-need)}
+.term .g{color:var(--t-done)}
+.term .r{color:var(--t-run)}
+.term .cur{background:var(--t-cursor);color:transparent}
+
+/* =========== A. Quiet Mac =========== */
+.A{--bg:#1e1e20;--side:#28282b;--side2:#2f2f33;--line:#3a3a3f;--fg:#e6e6e8;--fg2:#9b9ba1;--fg3:#6c6c72;--acc:#0a84ff;
+  --need:#ffd60a;--run:#64a8ff;--done:#32d74b;--fail:#ff6961;
+  --t-bg:#0a0e14;--t-fg:#b3b1ad;--t-dim:#626a73;--t-prompt:#e6b450;--t-bullet:#b3b1ad;--t-head:#e6e1cf;--t-need:#ffb454;--t-done:#91b362;--t-run:#59c2ff;--t-cursor:#e6b450;
+  background:var(--bg);color:var(--fg);font:13px/1.35 -apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif}
+.A .tb{height:52px;display:flex;align-items:center;gap:14px;padding:0 14px;background:var(--side);border-bottom:1px solid #000}
+.A .tb .title{font-weight:600;font-size:13px;margin-left:200px}
+.A .tb .sub{color:var(--fg2);font-size:11px}
+.A .seg{display:flex;margin-left:auto;background:#1c1c1e;border-radius:7px;padding:2px;gap:2px}
+.A .seg span{padding:4px 11px;border-radius:5px;color:var(--fg2);font-size:12px;display:flex;align-items:center;gap:6px}
+.A .seg span.on{background:#4a4a4f;color:var(--fg)}
+.A .seg em{width:7px;height:7px;border-radius:50%;display:inline-block}
+.A .tbtn{font-size:12px;color:var(--fg2);border:1px solid var(--line);padding:4px 10px;border-radius:6px}
+.A .body{flex:1;display:flex;min-height:0}
+.A .side{width:250px;background:var(--side);border-right:1px solid #000;padding:10px 8px;display:flex;flex-direction:column}
+.A .grp{font-size:11px;color:var(--fg3);font-weight:600;padding:10px 8px 4px}
+.A .row{display:flex;align-items:center;gap:8px;padding:5px 8px;border-radius:6px;color:var(--fg)}
+.A .row.sel{background:#3d3d42}
+.A .row .ic{width:14px;text-align:center;font-size:11px}
+.A .row .meta{margin-left:auto;color:var(--fg3);font-size:11px;font-variant-numeric:tabular-nums}
+.A .row.w{padding-left:26px}
+.A .row.w .t{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:130px}
+.A .row .pill{background:var(--need);color:#1a1a1a;font-weight:700;font-size:10px;border-radius:8px;padding:0 6px;margin-left:auto}
+.A .row.dim{color:var(--fg3)}
+.A .side .foot{margin-top:auto;padding:8px;color:var(--fg2);font-size:12px;border-top:1px solid var(--line)}
+.A .main{flex:1;display:flex;flex-direction:column;min-width:0;background:var(--t-bg)}
+.A .main .term{flex:1;padding:16px 20px;font:13px/1.55 "JetBrains Mono",ui-monospace,Menlo,monospace;color:var(--t-fg)}
+.A .insp{width:290px;background:var(--side);border-left:1px solid #000;padding:14px;display:flex;flex-direction:column;gap:14px}
+.A .insp h5{font-size:11px;color:var(--fg3);font-weight:600}
+.A .need{background:var(--side2);border-radius:8px;padding:12px;border-left:3px solid var(--need)}
+.A .need .who{font-size:12px;color:var(--fg2);margin-bottom:6px}
+.A .need .who b{color:var(--fg);font-weight:600}
+.A .need code{display:block;font:12px/1.45 "JetBrains Mono",monospace;background:#1c1c1e;border-radius:5px;padding:8px;color:#e6e1cf;white-space:pre-wrap}
+.A .need .acts{display:flex;gap:6px;margin-top:10px}
+.A .btn{font-size:12px;padding:4px 12px;border-radius:6px;background:#4a4a4f;color:var(--fg)}
+.A .btn.pri{background:var(--acc);color:#fff}
+.A .sumrow{display:flex;gap:8px;font-size:12px;padding:3px 0;color:var(--fg2)}
+.A .sumrow b{color:var(--fg);font-weight:500}
+.A .status{height:24px;display:flex;align-items:center;gap:18px;padding:0 14px;background:var(--side);border-top:1px solid #000;font-size:11px;color:var(--fg2)}
+.A .bar{width:54px;height:4px;border-radius:2px;background:#3a3a3f;display:inline-block;vertical-align:middle;margin:0 6px;position:relative;overflow:hidden}
+.A .bar i{position:absolute;inset:0 auto 0 0;background:var(--fg2)}
+
+/* =========== B. Switchboard =========== */
+.B{--bg:#0d1218;--panel:#111821;--line:#1f2a36;--line2:#2a3746;--fg:#cfd6de;--fg2:#7d8a99;--fg3:#4e5b6a;
+  --need:#f5b83d;--run:#4cc3ff;--done:#8fcf5a;--fail:#ff6b6b;
+  --t-bg:#0a0e14;--t-fg:#b3b1ad;--t-dim:#5c6773;--t-prompt:#f5b83d;--t-bullet:#4cc3ff;--t-head:#e6e1cf;--t-need:#f5b83d;--t-done:#8fcf5a;--t-run:#4cc3ff;--t-cursor:#f5b83d;
+  background:var(--bg);color:var(--fg);font:13px/1.3 "IBM Plex Sans Condensed",-apple-system,sans-serif}
+.B .tb{height:38px;display:flex;align-items:center;gap:16px;padding:0 14px;border-bottom:1px solid var(--line)}
+.B .tb .lights{margin-right:10px}
+.B .tb .ses{display:flex;gap:2px;height:100%}
+.B .tb .ses span{display:flex;align-items:center;gap:8px;padding:0 14px;color:var(--fg2);font-weight:500;border-bottom:2px solid transparent}
+.B .tb .ses span.on{color:var(--fg);border-bottom-color:var(--fg)}
+.B .tb .ses .n{font:600 11px/1 "JetBrains Mono",monospace;color:#1b1406;background:var(--need);padding:2px 5px;border-radius:2px}
+.B .body{flex:1;display:flex;min-height:0}
+.B .lines{width:300px;background:var(--panel);border-right:1px solid var(--line);display:flex;flex-direction:column}
+.B .lh{display:grid;grid-template-columns:18px 34px 58px 1fr 36px;gap:6px;padding:8px 12px;color:var(--fg3);font-size:11.5px;border-bottom:1px solid var(--line)}
+.B .ln{display:grid;grid-template-columns:18px 34px 58px 1fr 36px;gap:6px;align-items:center;padding:7px 12px;border-bottom:1px solid var(--line);font-size:13px}
+.B .ln .id{font:12px "JetBrains Mono",monospace;color:var(--fg2)}
+.B .ln .pf{color:var(--fg2)}
+.B .ln .tt{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.B .ln .ag{font:11.5px "JetBrains Mono",monospace;color:var(--fg3);text-align:right}
+.B .ln.sel{background:#16202b;box-shadow:inset 2px 0 0 var(--fg)}
+.B .ln.orc .tt{font-weight:600}
+.B .lamp{width:10px;height:10px;border-radius:50%;box-shadow:0 0 0 2px #0b0f14}
+.B .lamp.need{background:var(--need);box-shadow:0 0 0 2px #0b0f14,0 0 10px 1px rgba(245,184,61,.65)}
+.B .lamp.run{background:var(--run);box-shadow:0 0 0 2px #0b0f14,0 0 8px rgba(76,195,255,.45)}
+.B .lamp.done{background:transparent;border:2px solid var(--done)}
+.B .lamp.fail{background:var(--fail)}
+.B .lamp.off{background:#2a3440}
+.B .lgroup{padding:12px 12px 6px;color:var(--fg2);font-size:12px;display:flex;justify-content:space-between}
+.B .lines .new{margin-top:auto;padding:10px 12px;border-top:1px solid var(--line);color:var(--fg2);font-size:12.5px}
+.B .main{flex:1;display:flex;flex-direction:column;min-width:0;background:var(--t-bg)}
+.B .strip{display:flex;align-items:center;gap:14px;padding:10px 16px;background:var(--need);color:#1b1406}
+.B .strip .k{font-weight:600}
+.B .strip code{font:12.5px "JetBrains Mono",monospace;background:rgba(0,0,0,.12);padding:3px 7px;border-radius:2px}
+.B .key{margin-left:auto;display:flex;gap:6px}
+.B .key span{font:600 12px/1 "IBM Plex Sans Condensed",sans-serif;padding:6px 10px;border-radius:3px;background:#1b1406;color:var(--need);box-shadow:0 2px 0 #000}
+.B .key span.alt{background:transparent;color:#1b1406;box-shadow:inset 0 0 0 1.5px #1b1406}
+.B .key kbd{font:11px "JetBrains Mono",monospace;opacity:.7;margin-left:6px}
+.B .tabs{display:flex;height:32px;border-bottom:1px solid var(--line);background:var(--bg)}
+.B .tabs span{display:flex;align-items:center;gap:8px;padding:0 14px;color:var(--fg2);border-right:1px solid var(--line);font-size:12.5px;position:relative}
+.B .tabs span.on{color:var(--fg);background:var(--t-bg)}
+.B .tabs span.on::before{content:"";position:absolute;left:0;right:0;top:0;height:2px;background:var(--fg)}
+.B .tabs .dot{width:7px;height:7px;border-radius:50%}
+.B .main .term{flex:1;padding:14px 18px;font:13px/1.55 "JetBrains Mono",monospace;color:var(--t-fg)}
+.B .meters{height:30px;display:flex;align-items:center;gap:26px;padding:0 14px;border-top:1px solid var(--line);font-size:12px;color:var(--fg2)}
+.B .seg{display:inline-flex;gap:2px;margin:0 8px;vertical-align:middle}
+.B .seg i{width:6px;height:10px;background:#1f2a36;border-radius:1px}
+.B .seg i.on{background:var(--run)}
+.B .seg i.hot{background:var(--need)}
+.B .meters .v{font-family:"JetBrains Mono",monospace;color:var(--fg)}
+
+/* =========== C. Ledger =========== */
+.C{--bg:#e9edf2;--paper:#fbfcfd;--ink:#14213d;--ink2:#56627a;--ink3:#8a94a8;--rule:#d5dbe4;
+  --hl:#ffe347;--run:#2f5be0;--done:#23804b;--fail:#c63a2e;
+  --t-bg:#fbfcfd;--t-fg:#2a3550;--t-dim:#8a94a8;--t-prompt:#2f5be0;--t-bullet:#2f5be0;--t-head:#14213d;--t-need:#14213d;--t-done:#23804b;--t-run:#2f5be0;--t-cursor:#2f5be0;
+  background:var(--bg);color:var(--ink);font:13.5px/1.4 "Instrument Sans",-apple-system,sans-serif}
+.C .tb{height:46px;display:flex;align-items:center;gap:22px;padding:0 16px}
+.C .tb .ses{display:flex;gap:4px;margin-left:24px}
+.C .tb .ses span{padding:5px 12px;border-radius:6px;color:var(--ink2);font-weight:500}
+.C .tb .ses span.on{background:var(--paper);color:var(--ink);box-shadow:0 0 0 1px var(--rule)}
+.C .tb .ses span small{color:var(--ink3);font-weight:400;margin-left:6px}
+.C .tb .right{margin-left:auto;color:var(--ink2);font-size:12.5px;display:flex;gap:18px}
+.C .tb .right b{color:var(--ink);font-weight:600;font-variant-numeric:tabular-nums}
+.C .body{flex:1;display:flex;gap:12px;padding:0 12px 12px;min-height:0}
+.C .ledger{width:330px;background:var(--paper);border-radius:8px;box-shadow:0 0 0 1px var(--rule);padding:6px 0;overflow:hidden}
+.C .lsec{padding:12px 18px 6px;display:flex;align-items:baseline;gap:8px}
+.C .lsec h6{font:600 15px/1 "Instrument Sans",sans-serif}
+.C .lsec span{color:var(--ink3);font-size:12.5px}
+.C .ent{padding:9px 18px;border-top:1px solid var(--rule)}
+.C .ent:first-of-type{border-top:0}
+.C .ent .top{display:flex;gap:8px;align-items:baseline}
+.C .ent .tt{font-weight:500}
+.C .ent .hl{background:linear-gradient(transparent 12%,var(--hl) 12%,var(--hl) 88%,transparent 88%);padding:0 3px;margin:0 -3px}
+.C .ent .sub{color:var(--ink2);font-size:12.5px;margin-top:2px}
+.C .ent .ag{margin-left:auto;color:var(--ink3);font-size:12px;font-variant-numeric:tabular-nums}
+.C .ent .acts{display:flex;gap:6px;margin-top:9px}
+.C .ent code{display:block;margin-top:6px;font:12px/1.45 "Spline Sans Mono",monospace;color:var(--ink);background:#f1f4f8;border-radius:5px;padding:7px 9px}
+.C .btn{font-size:12.5px;font-weight:600;padding:5px 12px;border-radius:6px;box-shadow:0 0 0 1px var(--rule);color:var(--ink)}
+.C .btn.pri{background:var(--ink);color:#fff;box-shadow:none}
+.C .mark{width:8px;height:8px;border-radius:2px;display:inline-block;flex:none;transform:translateY(-1px)}
+.C .ent.sel{background:#f1f4fa;box-shadow:inset 3px 0 0 var(--run)}
+.C .main{flex:1;background:var(--paper);border-radius:8px;box-shadow:0 0 0 1px var(--rule);display:flex;flex-direction:column;min-width:0}
+.C .mh{display:flex;align-items:center;gap:10px;padding:10px 16px;border-bottom:1px solid var(--rule)}
+.C .mh .who{font-weight:600}
+.C .mh .w{color:var(--ink3);font-size:12.5px}
+.C .mh .tabs{margin-left:auto;display:flex;gap:2px;font-size:12.5px}
+.C .mh .tabs span{padding:4px 10px;border-radius:5px;color:var(--ink2)}
+.C .mh .tabs span.on{background:#eef2f8;color:var(--ink)}
+.C .main .term{flex:1;padding:18px 26px;font:13px/1.6 "Spline Sans Mono",monospace;color:var(--t-fg)}
+.C .term .y{background:var(--hl);color:var(--ink);padding:0 2px}
+
+/* =========== D. Wall =========== */
+.D{--bg:#18191c;--chrome:#1f2024;--line:#2c2e33;--fg:#e8e8ea;--fg2:#9a9ca3;--fg3:#62646b;
+  --need:#ffbf3c;--run:#5fb3ff;--done:#7cd992;--fail:#ff7a6b;
+  --t-bg:#0e1013;--t-fg:#b9bcc2;--t-dim:#5d6168;--t-prompt:#e8e8ea;--t-bullet:#5fb3ff;--t-head:#e8e8ea;--t-need:#ffbf3c;--t-done:#7cd992;--t-run:#5fb3ff;--t-cursor:#e8e8ea;
+  background:var(--bg);color:var(--fg);font:13px/1.35 "Geist",-apple-system,sans-serif}
+.D .tb{height:40px;display:flex;align-items:center;gap:14px;padding:0 14px}
+.D .tb .ses{display:flex;gap:6px;margin-left:18px}
+.D .tb .ses span{display:flex;align-items:center;gap:7px;padding:4px 10px;border-radius:999px;color:var(--fg2);font-size:12.5px}
+.D .tb .ses span.on{background:#2c2e33;color:var(--fg)}
+.D .tb .ses i{width:6px;height:6px;border-radius:50%;display:block}
+.D .tb .right{margin-left:auto;display:flex;gap:6px;color:var(--fg2);font-size:12px}
+.D .tb .right span{padding:4px 9px;border-radius:6px;box-shadow:inset 0 0 0 1px var(--line)}
+.D .tb .right span.on{background:#2c2e33;color:var(--fg);box-shadow:none}
+.D .body{flex:1;display:grid;grid-template-columns:400px 1fr 1fr;grid-template-rows:1fr 1fr;gap:6px;padding:0 6px 6px;min-height:0}
+.D .tile{background:var(--t-bg);border-radius:8px;display:flex;flex-direction:column;overflow:hidden;box-shadow:inset 0 0 0 1px var(--line)}
+.D .tile.orc{grid-row:1 / span 2}
+.D .tile.need{box-shadow:inset 0 0 0 2px var(--need)}
+.D .th{display:flex;align-items:center;gap:8px;padding:8px 12px;background:var(--chrome);font-size:12.5px;border-bottom:1px solid var(--line)}
+.D .th .id{font:12px "Geist Mono",monospace;color:var(--fg2)}
+.D .th .pf{font-weight:600}
+.D .th .tt{color:var(--fg2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.D .th .st{margin-left:auto;display:flex;align-items:center;gap:6px;font-size:12px;white-space:nowrap}
+.D .th .st i{width:7px;height:7px;border-radius:50%;display:block}
+.D .tile.need .th{background:#2b2414}
+.D .tile .term{flex:1;padding:10px 12px;font:11.5px/1.5 "Geist Mono",monospace;color:var(--t-fg)}
+.D .tile.orc .term{font-size:12.5px;line-height:1.55;padding:14px 16px}
+.D .ask{padding:10px 12px;border-top:1px solid #3a3020;background:#1d1a12;display:flex;gap:8px;align-items:center;font-size:12.5px}
+.D .ask .q{color:var(--fg)}
+.D .ask .acts{margin-left:auto;display:flex;gap:6px}
+.D .btn{font-size:12px;font-weight:500;padding:4px 11px;border-radius:6px;box-shadow:inset 0 0 0 1px #4a4232;color:var(--fg)}
+.D .btn.pri{background:var(--need);color:#1a1405;box-shadow:none}
+.D .usage{position:absolute;right:14px;top:11px}
+</style>
+</head>
+<body>
+<main class="page">
+
+<h1>Four directions for the Hub App</h1>
+<p class="lede">Each mock uses the same moment: the demo session with four Workers, sasuke waiting on a push approval, and the Orchestrator’s latest Summary. Same content, so you’re comparing the look and the layout, nothing else.</p>
+
+<div class="diag">
+  <div>
+    <h3>Glass has nothing to refract</h3>
+    <p>Liquid Glass is meant for controls floating over rich content. Here the content is an opaque terminal on a flat dark fill, so the capsules render as soft grey pills with no depth cue.</p>
+  </div>
+  <div>
+    <h3>Everything is the same shape</h3>
+    <p>Session cards, tabs, the plus button, Needs cards and the usage footer are all glass capsules. Nothing tells you that Needs you outranks a tab, so urgency is carried by a 12% yellow tint.</p>
+  </div>
+  <div>
+    <h3>The chrome fights the terminal</h3>
+    <p>The window is Ayu Dark inside and system grey glass outside. Two material systems meet at every edge, which is why it reads as a wrapper around a terminal rather than one tool.</p>
+  </div>
+</div>
+
+<div class="pick"><strong>My recommendation:</strong> A as the base, with B’s Needs strip and lamps. A fixes the material problem at the lowest cost (it’s mostly stock SwiftUI with the glass removed), and B’s strip solves the urgency problem better than any card. Pick C if you want the Summary to be the app, or D if you mostly watch Workers run.</div>
+
+<!-- ================= A ================= -->
+<section class="opt">
+  <div class="opt-head"><span class="letter">A</span><h2>Quiet Mac</h2><span class="tag">Opaque, native, three columns</span></div>
+  <p class="pitch">Behave like Xcode or Tower. Glass stays only where macOS puts it (the sidebar material); the terminal runs flush to the edges, and Needs you moves into a right-hand inspector so it never pushes the terminal down.</p>
+  <div class="stage"><div class="win A">
+    <div class="tb">
+      <div class="lights"><i></i><i></i><i></i></div>
+      <div><div class="title">demo</div><div class="sub">Orchestrator live, 4 Workers</div></div>
+      <div class="seg">
+        <span class="on"><em style="background:var(--acc)"></em>Orchestrator</span>
+        <span><em style="background:var(--run)"></em>w14 naruto</span>
+        <span><em style="background:var(--need)"></em>w15 sasuke</span>
+        <span>Shell 1</span>
+      </div>
+      <span class="tbtn">Split</span><span class="tbtn">Stop Orchestrator</span>
+    </div>
+    <div class="body">
+      <div class="side">
+        <div class="grp">Sessions</div>
+        <div class="row sel"><span class="ic" style="color:var(--acc)">✦</span>demo<span class="pill">1</span></div>
+        <div class="row w"><span class="ic" style="color:var(--need)">●</span><span class="t">Verify rerank fix</span><span class="meta">12s</span></div>
+        <div class="row w"><span class="ic" style="color:var(--run)">◌</span><span class="t">Fix rerank multi-window</span><span class="meta">2m</span></div>
+        <div class="row w"><span class="ic" style="color:var(--run)">◌</span><span class="t">Cross-corpus bench</span><span class="meta">40s</span></div>
+        <div class="row w"><span class="ic" style="color:var(--done)">✓</span><span class="t">Qdrant source filter</span><span class="meta">14m</span></div>
+        <div class="row"><span class="ic" style="color:var(--acc)">✦</span>agent-hub<span class="meta">2</span></div>
+        <div class="row dim"><span class="ic">✦</span>storefront<span class="meta">stopped</span></div>
+        <div class="foot">＋ New Session</div>
+      </div>
+      <div class="main"><div class="term" data-term></div></div>
+      <div class="insp">
+        <h5>Needs you</h5>
+        <div class="need">
+          <div class="who"><b>w15 sasuke</b> wants permission</div>
+          <code>git push origin demo-rerank-multi-window
+Do you want to proceed?</code>
+          <div class="acts"><span class="btn pri">Approve</span><span class="btn">Deny</span><span class="btn" style="margin-left:auto">Open</span></div>
+        </div>
+        <h5>Summary</h5>
+        <div>
+          <div class="sumrow"><span style="color:var(--done)">✓</span><b>w12</b> Qdrant source filter options</div>
+          <div class="sumrow"><span style="color:var(--run)">◌</span><b>w14</b> tests 41 of 44 passing</div>
+          <div class="sumrow"><span style="color:var(--run)">◌</span><b>w13</b> corpus 2 of 5</div>
+        </div>
+      </div>
+    </div>
+    <div class="status">
+      <span>Session<span class="bar"><i style="width:48%"></i></span>48%, resets 4:50pm</span>
+      <span>Week<span class="bar"><i style="width:22%"></i></span>22%, resets Oct 23</span>
+      <span style="margin-left:auto">Daemon connected</span>
+    </div>
+  </div></div>
+  <div class="notes">
+    <div><h4>Why it fits</h4><p>You live in this window all day. Stock macOS chrome disappears; the terminal gets every remaining pixel and stays visually continuous.</p></div>
+    <div><h4>In SwiftUI</h4><ul><li>Remove every <code>.glassEffect</code></li><li><code>.inspector</code> for Needs and Summary</li><li>Standard <code>List</code> outline, toolbar <code>Picker</code> for tabs</li></ul></div>
+    <div><h4>Type and color</h4><p>SF Pro and JetBrains Mono. System accent; state colors only on small marks.</p>
+      <div class="swatches"><span class="sw"><i style="background:#28282b"></i>side</span><span class="sw"><i style="background:#0a0e14"></i>term</span><span class="sw"><i style="background:#ffd60a"></i>need</span><span class="sw"><i style="background:#64a8ff"></i>run</span></div></div>
+    <div><h4>Trade-off</h4><p>Least character of the four. It will look like a good Mac app, not like your app.</p></div>
+  </div>
+</section>
+
+<!-- ================= B ================= -->
+<section class="opt">
+  <div class="opt-head"><span class="letter">B</span><h2>Switchboard</h2><span class="tag">Dense, dark, one surface</span></div>
+  <p class="pitch">The Orchestrator is the operator and each Worker is a line with a lamp. Chrome takes the terminal’s own color so the window is one surface. When something needs you, a lit strip spans the terminal with keys you can hit without leaving the keyboard.</p>
+  <div class="stage"><div class="win B">
+    <div class="tb">
+      <div class="lights"><i></i><i></i><i></i></div>
+      <div class="ses">
+        <span class="on">demo <b class="n">1</b></span>
+        <span>agent-hub</span>
+        <span style="color:var(--fg3)">storefront</span>
+      </div>
+    </div>
+    <div class="body">
+      <div class="lines">
+        <div class="lh"><span></span><span>Line</span><span>Profile</span><span>Task</span><span style="text-align:right">Quiet</span></div>
+        <div class="ln orc sel"><i class="lamp run" style="background:var(--fg);box-shadow:0 0 0 2px #0b0f14"></i><span class="id">orc</span><span class="pf">opus</span><span class="tt">Orchestrator</span><span class="ag">now</span></div>
+        <div class="ln"><i class="lamp need"></i><span class="id">w15</span><span class="pf">sasuke</span><span class="tt">Verify rerank multi-window</span><span class="ag">12s</span></div>
+        <div class="ln"><i class="lamp run"></i><span class="id">w14</span><span class="pf">naruto</span><span class="tt">Fix rerank multi-window</span><span class="ag">2m</span></div>
+        <div class="ln"><i class="lamp run"></i><span class="id">w13</span><span class="pf">bash</span><span class="tt">Run cross-corpus bench</span><span class="ag">40s</span></div>
+        <div class="ln"><i class="lamp done"></i><span class="id">w12</span><span class="pf">jiraiya</span><span class="tt">Qdrant source filter options</span><span class="ag">14m</span></div>
+        <div class="ln"><i class="lamp fail"></i><span class="id">w11</span><span class="pf">hinata</span><span class="tt">Why merge gave no gain</span><span class="ag">1h</span></div>
+        <div class="new">＋ Hand a Task to a new line</div>
+      </div>
+      <div class="main">
+        <div class="strip"><span class="k">w15 sasuke asks to run</span><code>git push origin demo-rerank-multi-window</code>
+          <div class="key"><span>Approve<kbd>⌘↩</kbd></span><span class="alt">Deny<kbd>⌘⌫</kbd></span></div></div>
+        <div class="tabs">
+          <span class="on"><i class="dot" style="background:var(--fg)"></i>Orchestrator</span>
+          <span><i class="dot" style="background:var(--run)"></i>w14 naruto</span>
+          <span><i class="dot" style="background:var(--need)"></i>w15 sasuke</span>
+          <span>Shell 1</span>
+        </div>
+        <div class="term" data-term></div>
+      </div>
+    </div>
+    <div class="meters">
+      <span>Session<span class="seg" data-seg="5" data-hot="0"></span><span class="v">48%</span> resets 4:50pm</span>
+      <span>Week<span class="seg" data-seg="2" data-hot="0"></span><span class="v">22%</span> resets Oct 23</span>
+      <span style="margin-left:auto">2 running, 1 waiting, 1 failed</span>
+    </div>
+  </div></div>
+  <div class="notes">
+    <div><h4>Why it fits</h4><p>Your Workers are concurrent lines, and the job is noticing which one lit up. A table with lamps scans faster than cards, and it holds 15 Workers without scrolling.</p></div>
+    <div><h4>In SwiftUI</h4><ul><li><code>Table</code> or a custom grid for lines</li><li>Window background set to the terminal theme</li><li>Strip is a plain <code>HStack</code> with <code>.keyboardShortcut</code></li></ul></div>
+    <div><h4>Type and color</h4><p>IBM Plex Sans Condensed for density, JetBrains Mono for ids and the terminal.</p>
+      <div class="swatches"><span class="sw"><i style="background:#0d1218"></i>base</span><span class="sw"><i style="background:#f5b83d"></i>need</span><span class="sw"><i style="background:#4cc3ff"></i>run</span><span class="sw"><i style="background:#8fcf5a"></i>done</span><span class="sw"><i style="background:#ff6b6b"></i>fail</span></div></div>
+    <div><h4>Trade-off</h4><p>Strongest identity, but dark-only in practice, and the custom font needs bundling. Least Mac-like.</p></div>
+  </div>
+</section>
+
+<!-- ================= C ================= -->
+<section class="opt">
+  <div class="opt-head"><span class="letter">C</span><h2>Ledger</h2><span class="tag">Light, Summary-first</span></div>
+  <p class="pitch">Your Summary already has a shape: Needs you, Done, Running. Make that the left column across every session, instead of a session tree. The terminal turns light and calm, and anything waiting on you is marked with a highlighter, the way you’d mark a printout.</p>
+  <div class="stage"><div class="win C">
+    <div class="tb">
+      <div class="lights"><i></i><i></i><i></i></div>
+      <div class="ses">
+        <span class="on">demo<small>4</small></span>
+        <span>agent-hub<small>2</small></span>
+        <span>storefront<small>stopped</small></span>
+      </div>
+      <div class="right"><span>Session <b>48%</b></span><span>Week <b>22%</b></span></div>
+    </div>
+    <div class="body">
+      <div class="ledger">
+        <div class="lsec"><h6>Needs you</h6><span>1</span></div>
+        <div class="ent">
+          <div class="top"><span class="tt"><span class="hl">w15 sasuke wants to push</span></span><span class="ag">12s</span></div>
+          <code>git push origin demo-rerank-multi-window</code>
+          <div class="acts"><span class="btn pri">Approve</span><span class="btn">Deny</span><span class="btn">Open w15</span></div>
+        </div>
+        <div class="lsec"><h6>Running</h6><span>2</span></div>
+        <div class="ent sel"><div class="top"><i class="mark" style="background:var(--run)"></i><span class="tt">Fix rerank multi-window</span><span class="ag">2m</span></div><div class="sub">w14 naruto, tests 41 of 44 passing</div></div>
+        <div class="ent"><div class="top"><i class="mark" style="background:var(--run)"></i><span class="tt">Run cross-corpus bench</span><span class="ag">40s</span></div><div class="sub">w13 bash, corpus 2 of 5</div></div>
+        <div class="lsec"><h6>Done</h6><span>2</span></div>
+        <div class="ent"><div class="top"><i class="mark" style="background:var(--done)"></i><span class="tt">Qdrant source filter options</span><span class="ag">14m</span></div><div class="sub">w12 jiraiya, 3 options with sources</div></div>
+        <div class="ent"><div class="top"><i class="mark" style="background:var(--fail)"></i><span class="tt">Why merge gave no gain</span><span class="ag">1h</span></div><div class="sub">w11 hinata, blocked on missing eval set</div></div>
+      </div>
+      <div class="main">
+        <div class="mh"><span class="who">Orchestrator</span><span class="w">demo, opus</span>
+          <div class="tabs"><span class="on">Orchestrator</span><span>w14</span><span>w15</span><span>Shell 1</span></div></div>
+        <div class="term" data-term></div>
+      </div>
+    </div>
+  </div></div>
+  <div class="notes">
+    <div><h4>Why it fits</h4><p>It organises the app around the question you actually ask when you look over: what needs me, what finished. Sessions become a filter, not a tree.</p></div>
+    <div><h4>In SwiftUI</h4><ul><li>Sectioned <code>List</code> fed by all snapshots</li><li>Light terminal theme (Tango Light exists)</li><li>Highlight via <code>AttributedString</code> background</li></ul></div>
+    <div><h4>Type and color</h4><p>Instrument Sans for UI, Spline Sans Mono for the terminal. Ink blue on cool paper.</p>
+      <div class="swatches"><span class="sw"><i style="background:#e9edf2"></i>desk</span><span class="sw"><i style="background:#14213d"></i>ink</span><span class="sw"><i style="background:#ffe347"></i>marker</span><span class="sw"><i style="background:#2f5be0"></i>run</span></div></div>
+    <div><h4>Trade-off</h4><p>Light terminals are a hard sell for some agent CLIs’ colors, and it needs a matching dark variant to be complete.</p></div>
+  </div>
+</section>
+
+<!-- ================= D ================= -->
+<section class="opt">
+  <div class="opt-head"><span class="letter">D</span><h2>Wall</h2><span class="tag">Every live Worker on screen</span></div>
+  <p class="pitch">Closest to Orca’s spirit. The Orchestrator is pinned on the left and live Workers tile on the right, so you watch them work instead of clicking into them. A Worker that needs you gets a lit frame and answers inline, in its own tile.</p>
+  <div class="stage"><div class="win D">
+    <div class="tb">
+      <div class="lights"><i></i><i></i><i></i></div>
+      <div class="ses">
+        <span class="on"><i style="background:var(--need)"></i>demo</span>
+        <span><i style="background:var(--run)"></i>agent-hub</span>
+        <span><i style="background:#4a4c52"></i>storefront</span>
+      </div>
+      <div class="right"><span class="on">Wall</span><span>Focus</span><span>Session 48%</span><span>Week 22%</span></div>
+    </div>
+    <div class="body">
+      <div class="tile orc"><div class="th"><span class="pf">Orchestrator</span><span class="tt">demo</span><span class="st" style="color:var(--fg2)"><i style="background:var(--done)"></i>live</span></div><div class="term" data-term></div></div>
+      <div class="tile need"><div class="th"><span class="id">w15</span><span class="pf">sasuke</span><span class="tt">Verify rerank fix</span><span class="st" style="color:var(--need)"><i style="background:var(--need)"></i>Needs you</span></div>
+        <div class="term"><span class="d">$ cargo test -p rerank</span>
+<span class="g">test result: ok. 44 passed; 0 failed</span>
+<span class="d">$ git diff --stat main...HEAD</span>
+ src/rerank/window.rs | 38 ++++++++----
+ 2 files changed, 41 insertions(+)
+
+Bash command
+  git push origin demo-rerank-multi-window</div>
+        <div class="ask"><span class="q">Run git push?</span><div class="acts"><span class="btn pri">Approve</span><span class="btn">Deny</span></div></div>
+      </div>
+      <div class="tile"><div class="th"><span class="id">w14</span><span class="pf">naruto</span><span class="tt">Fix rerank multi-window</span><span class="st" style="color:var(--run)"><i style="background:var(--run)"></i>2m</span></div>
+        <div class="term"><span class="d">● Editing src/rerank/window.rs</span>
+  - let span = hits.windows(1);
+  + let span = hits.windows(cfg.width);
+<span class="d">● Running cargo test</span>
+<span class="g">  41 passed</span>, <span class="y">3 failed</span>
+<span class="d">  rerank::window::overlap_edges</span></div></div>
+      <div class="tile"><div class="th"><span class="id">w13</span><span class="pf">bash</span><span class="tt">Cross-corpus bench</span><span class="st" style="color:var(--run)"><i style="background:var(--run)"></i>40s</span></div>
+        <div class="term"><span class="d">$ make bench CORPUS=all</span>
+slack     ndcg@10 0.612  <span class="g">done</span>
+meetings  ndcg@10 0.548  <span class="g">done</span>
+confluence <span class="r">running…</span></div></div>
+      <div class="tile"><div class="th"><span class="id">w12</span><span class="pf">jiraiya</span><span class="tt">Qdrant source filter</span><span class="st" style="color:var(--done)"><i style="background:var(--done)"></i>Done</span></div>
+        <div class="term"><span class="h">Final Report: done</span>
+Qdrant filters on payload <span class="r">source</span>
+natively. Three options, cited.
+<span class="d">Verified against Qdrant 1.12 docs.</span></div></div>
+    </div>
+  </div></div>
+  <div class="notes">
+    <div><h4>Why it fits</h4><p>“Working in multiple agents at the same time” taken literally. You see progress without switching, and answering a Worker happens where its context is.</p></div>
+    <div><h4>In SwiftUI</h4><ul><li><code>Grid</code> of <code>TerminalPane</code>s, reusing PaneTree</li><li>Focus mode is today’s single pane</li><li>Needs a cheap renderer at small sizes (libghostty later)</li></ul></div>
+    <div><h4>Type and color</h4><p>Geist and Geist Mono. Graphite chrome, state only on tile frames and headers.</p>
+      <div class="swatches"><span class="sw"><i style="background:#18191c"></i>chrome</span><span class="sw"><i style="background:#0e1013"></i>term</span><span class="sw"><i style="background:#ffbf3c"></i>need</span><span class="sw"><i style="background:#5fb3ff"></i>run</span></div></div>
+    <div><h4>Trade-off</h4><p>Cramped past six Workers and heavy on rendering. Best as a mode next to A or B, not the only view.</p></div>
+  </div>
+</section>
+
+<h2 class="sec">Side by side</h2>
+<table class="cmp">
+  <tr><th></th><th>A Quiet Mac</th><th>B Switchboard</th><th>C Ledger</th><th>D Wall</th></tr>
+  <tr><td>Build effort</td><td>Low, mostly deletion</td><td>Medium</td><td>Medium, plus a light theme pass</td><td>High, rendering cost</td></tr>
+  <tr><td>Needs you</td><td>Inspector card</td><td>Full-width strip with keys</td><td>Highlighted top of ledger</td><td>Lit tile, inline answer</td></tr>
+  <tr><td>Scales to many Workers</td><td>Good</td><td>Best</td><td>Good</td><td>Poor past six</td></tr>
+  <tr><td>Feels like your own app</td><td>Low</td><td>High</td><td>High</td><td>Medium</td></tr>
+  <tr><td>Fits the Floating Hub button</td><td>Reuse inspector</td><td>Reuse lines and strip</td><td>Reuse ledger as is</td><td>Doesn’t translate</td></tr>
+</table>
+
+</main>
+
+<script>
+const T = `<span class="p">></span> rerun the rerank arm with the multi-window fix and verify it
+
+<span class="b">●</span> Handing this to two Workers.
+  w14 naruto   Fix rerank multi-window
+  w15 sasuke   Verify w14’s commits
+
+<span class="b">●</span> w12 jiraiya finished. Qdrant filters on payload
+  <span class="r">source</span> natively; three options, each cited.
+
+<span class="b">●</span> <span class="h">Summary</span>
+  <span class="h">Needs you</span>
+    <span class="y">w15 wants to run git push origin demo-rerank…</span>
+  <span class="h">Done</span>
+    <span class="g">w12</span> Qdrant source filter options
+  <span class="h">Running</span>
+    <span class="r">w14</span> Fix rerank multi-window, 41 of 44 passing
+    <span class="r">w13</span> Cross-corpus bench, corpus 2 of 5
+
+<span class="p">></span> <span class="cur">_</span>`;
+document.querySelectorAll('[data-term]').forEach(el => el.innerHTML = T);
+document.querySelectorAll('[data-seg]').forEach(el => {
+  const n = +el.dataset.seg; let h = '';
+  for (let i = 0; i < 10; i++) h += `<i class="${i < n ? 'on' : ''}"></i>`;
+  el.innerHTML = h;
+});
+function fit(){
+  document.querySelectorAll('.stage').forEach(s => {
+    const w = s.querySelector('.win'); const k = Math.min(1, s.clientWidth / 1180);
+    w.style.transform = `scale(${k})`; s.style.height = (700 * k) + 'px';
+  });
+}
+addEventListener('resize', fit); fit();
+</script>
+</body>
+</html>

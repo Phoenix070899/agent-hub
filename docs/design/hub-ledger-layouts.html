@@ -1,0 +1,403 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ledger layout alternatives</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700&family=Spline+Sans+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root{--board:#dcdee2;--bink:#1d2127;--bink2:#4a525e;--brule:#c3c7cd;--bcard:#eceef1}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--board);color:var(--bink);font:15px/1.55 -apple-system,BlinkMacSystemFont,"SF Pro Text","Helvetica Neue",sans-serif;-webkit-font-smoothing:antialiased}
+.page{max-width:1240px;margin:0 auto;padding:56px 24px 96px}
+h1{font:600 34px/1.15 -apple-system,BlinkMacSystemFont,"SF Pro Display",sans-serif;letter-spacing:-.02em}
+.lede{margin-top:14px;max-width:70ch;color:var(--bink2);font-size:17px}
+.keep{display:grid;grid-template-columns:repeat(3,1fr);gap:28px;margin-top:36px;padding-top:22px;border-top:1px solid var(--brule)}
+.keep h3{font-size:15px;font-weight:600;margin-bottom:4px}
+.keep p{color:var(--bink2);font-size:14px;max-width:44ch}
+.pick{margin:28px 0 0;padding:18px 22px;background:var(--bcard);border-radius:10px;max-width:880px}
+.pick strong{font-weight:600}
+section.opt{margin-top:88px}
+.opt-head{display:flex;align-items:baseline;gap:14px;flex-wrap:wrap}
+.opt-head .letter{font:600 15px/1 -apple-system,sans-serif;color:#fff;background:var(--bink);border-radius:6px;padding:6px 9px}
+.opt-head h2{font:600 26px/1.2 -apple-system,BlinkMacSystemFont,"SF Pro Display",sans-serif;letter-spacing:-.015em}
+.opt-head .tag{font-size:14px;color:var(--bink2)}
+.pitch{margin:8px 0 22px;max-width:72ch;color:var(--bink2);font-size:16px}
+.wire{font:12px/1.25 ui-monospace,Menlo,monospace;color:var(--bink2);background:var(--bcard);border-radius:8px;padding:12px 14px;margin:-6px 0 22px;display:inline-block;white-space:pre}
+.stage{width:100%;overflow:hidden;border-radius:12px;box-shadow:0 1px 0 rgba(0,0,0,.06),0 18px 50px -20px rgba(20,24,32,.45)}
+.stage .win{width:1180px;height:700px;transform-origin:0 0}
+.notes{display:grid;grid-template-columns:repeat(3,1fr);gap:28px;margin-top:26px}
+.notes h4{font-size:13px;font-weight:600;margin-bottom:4px}
+.notes p,.notes li{font-size:14px;color:var(--bink2)}
+.notes ul{padding-left:16px}
+.notes code{font:12.5px ui-monospace,Menlo,monospace}
+table.cmp{width:100%;border-collapse:collapse;margin-top:28px;font-size:14px}
+table.cmp th,table.cmp td{text-align:left;padding:10px 12px;border-bottom:1px solid var(--brule);vertical-align:top}
+table.cmp th{font-weight:600}
+table.cmp td{color:var(--bink2)}
+h2.sec{font:600 22px/1.2 -apple-system,sans-serif;margin-top:96px}
+@media (max-width:820px){.keep,.notes{grid-template-columns:1fr}h1{font-size:28px}.wire{display:none}}
+
+/* ================= Ledger system ================= */
+.L{--desk:#e9edf2;--paper:#fbfcfd;--ink:#14213d;--ink2:#56627a;--ink3:#8a94a8;--rule:#d5dbe4;--wash:#f1f4f8;
+  --hl:#ffe347;--run:#2f5be0;--done:#23804b;--fail:#c63a2e;
+  position:relative;display:flex;flex-direction:column;overflow:hidden;
+  background:var(--desk);color:var(--ink);font:13.5px/1.4 "Instrument Sans",-apple-system,sans-serif}
+.L .lights{display:flex;gap:8px}
+.L .lights i{width:12px;height:12px;border-radius:50%;display:block}
+.L .lights i:nth-child(1){background:#ff5f57}.L .lights i:nth-child(2){background:#febc2e}.L .lights i:nth-child(3){background:#28c840}
+.L .tb{height:46px;flex:none;display:flex;align-items:center;gap:22px;padding:0 16px}
+.L .ses{display:flex;gap:4px;margin-left:24px}
+.L .ses span{padding:5px 12px;border-radius:6px;color:var(--ink2);font-weight:500;white-space:nowrap}
+.L .ses span.on{background:var(--paper);color:var(--ink);box-shadow:0 0 0 1px var(--rule)}
+.L .ses small{color:var(--ink3);font-weight:400;margin-left:6px;font-size:12.5px}
+.L .use{margin-left:auto;color:var(--ink2);font-size:12.5px;display:flex;gap:18px}
+.L .use b{color:var(--ink);font-weight:600;font-variant-numeric:tabular-nums}
+.L .sheet{background:var(--paper);border-radius:8px;box-shadow:0 0 0 1px var(--rule)}
+.L h6{font:600 15px/1 "Instrument Sans",sans-serif}
+.L .cnt{color:var(--ink3);font-size:12.5px;font-weight:400}
+.L .hl{background:linear-gradient(transparent 12%,var(--hl) 12%,var(--hl) 88%,transparent 88%);padding:0 3px;margin:0 -3px}
+.L .mk{width:8px;height:8px;border-radius:2px;display:inline-block;flex:none;transform:translateY(-1px)}
+.L .ag{margin-left:auto;color:var(--ink3);font-size:12px;font-variant-numeric:tabular-nums;white-space:nowrap}
+.L .sub{color:var(--ink2);font-size:12.5px;margin-top:2px}
+.L .tag{font-size:11.5px;color:var(--ink2);background:var(--wash);border-radius:4px;padding:1px 6px;white-space:nowrap}
+.L code{display:block;margin-top:6px;font:12px/1.45 "Spline Sans Mono",monospace;color:var(--ink);background:var(--wash);border-radius:5px;padding:7px 9px}
+.L .acts{display:flex;gap:6px;margin-top:9px}
+.L .btn{font-size:12.5px;font-weight:600;padding:5px 12px;border-radius:6px;box-shadow:0 0 0 1px var(--rule);color:var(--ink);background:var(--paper);white-space:nowrap}
+.L .btn.pri{background:var(--ink);color:#fff;box-shadow:none}
+.L .field{flex:1;font-size:12.5px;color:var(--ink3);padding:5px 10px;border-radius:6px;box-shadow:0 0 0 1px var(--rule);background:var(--paper)}
+.L .mh{display:flex;align-items:center;gap:10px;padding:10px 16px;border-bottom:1px solid var(--rule);flex:none}
+.L .mh .who{font-weight:600}
+.L .mh .w{color:var(--ink3);font-size:12.5px}
+.L .mh .tabs{margin-left:auto;display:flex;gap:2px;font-size:12.5px}
+.L .mh .tabs span{padding:4px 10px;border-radius:5px;color:var(--ink2)}
+.L .mh .tabs span.on{background:#eef2f8;color:var(--ink)}
+.L .term{flex:1;white-space:pre;overflow:hidden;padding:16px 24px;font:13px/1.6 "Spline Sans Mono",monospace;color:#2a3550}
+.L .term .p,.L .term .b,.L .term .r{color:var(--run)}
+.L .term .h{color:var(--ink);font-weight:600}
+.L .term .g{color:var(--done)}
+.L .term .d{color:var(--ink3)}
+.L .term .y{background:var(--hl);color:var(--ink);padding:0 2px}
+.L .term .cur{background:var(--run);color:transparent}
+.L .ent{padding:9px 16px;border-top:1px solid var(--rule)}
+.L .ent .top{display:flex;gap:8px;align-items:baseline}
+.L .ent .tt{font-weight:500}
+.L .ent.sel{background:#eef2fa;box-shadow:inset 3px 0 0 var(--run)}
+
+/* ---- 1 Top sheet ---- */
+.v1 .band{margin:0 12px;display:grid;grid-template-columns:1.25fr 1fr 1fr;flex:none}
+.v1 .col{padding:4px 0 8px;min-width:0}
+.v1 .col+.col{border-left:1px solid var(--rule)}
+.v1 .ch{display:flex;align-items:baseline;gap:8px;padding:12px 16px 10px}
+.v1 .ch .fold{margin-left:auto;color:var(--ink3);font-size:12px}
+.v1 .col .ent:first-of-type{border-top:0}
+.v1 .main{flex:1;margin:10px 12px 12px;display:flex;flex-direction:column;min-height:0}
+.v1 .term{padding:14px 24px}
+
+/* ---- 2 Ledger home ---- */
+.v2 .body{flex:1;display:flex;min-height:0;padding:0 12px 12px;gap:12px;position:relative}
+.v2 .page2{flex:1;display:flex;flex-direction:column;min-width:0}
+.v2 .scroll{flex:1;overflow:hidden;padding:6px 0}
+.v2 .sh{display:flex;align-items:baseline;gap:8px;padding:14px 22px 8px}
+.v2 .ent{padding:11px 22px}
+.v2 .sh+.ent{border-top:0}
+.v2 .composer{flex:none;border-top:1px solid var(--rule);padding:12px 16px;display:flex;gap:10px;align-items:center}
+.v2 .composer .to{font-size:12.5px;color:var(--ink2);white-space:nowrap}
+.v2 .composer .to b{color:var(--ink);font-weight:600}
+.v2 .composer .field{padding:9px 12px;font-size:13px}
+.v2 .over{position:absolute;top:0;right:12px;bottom:12px;width:540px;display:flex;flex-direction:column;
+  box-shadow:0 0 0 1px var(--rule),-24px 0 48px -24px rgba(20,33,61,.35)}
+.v2 .over .x{color:var(--ink3);margin-left:auto;font-size:13px}
+.v2 .over .term{font-size:12px;padding:14px 18px}
+.v2 .page2 .dim{opacity:.55}
+
+/* ---- 3 Day book ---- */
+.v3 .body{flex:1;display:flex;gap:12px;padding:0 12px 12px;min-height:0}
+.v3 .book{width:420px;flex:none;display:flex;flex-direction:column;overflow:hidden}
+.v3 .pin{padding:12px 16px 14px;border-bottom:1px solid var(--rule);background:#fffbe0;border-radius:8px 8px 0 0}
+.v3 .pin .ph{display:flex;align-items:baseline;gap:8px;margin-bottom:8px}
+.v3 .day{padding:12px 16px 4px;display:flex;align-items:baseline;gap:8px}
+.v3 .je{display:grid;grid-template-columns:44px 14px 1fr;gap:0 10px;padding:0 16px}
+.v3 .je .t{font:11.5px/1 "Spline Sans Mono",monospace;color:var(--ink3);padding-top:11px;text-align:right}
+.v3 .je .rail{position:relative}
+.v3 .je .rail::before{content:"";position:absolute;left:6px;top:0;bottom:0;width:1px;background:var(--rule)}
+.v3 .je .rail i{position:absolute;left:2px;top:11px;width:9px;height:9px;border-radius:2px;box-shadow:0 0 0 3px var(--paper)}
+.v3 .je .tx{padding:8px 0;min-width:0}
+.v3 .je .tx .tt{font-weight:500}
+.v3 .je.sel .tx{background:#eef2fa;border-radius:6px;margin-left:-6px;padding-left:6px}
+.v3 .main{flex:1;display:flex;flex-direction:column;min-width:0}
+
+/* ---- 4 Session columns ---- */
+.v4 .cols{flex:1;display:grid;grid-template-columns:1fr 1fr .72fr;gap:12px;padding:0 12px;min-height:0}
+.v4 .sc{display:flex;flex-direction:column;overflow:hidden}
+.v4 .sch{display:flex;align-items:center;gap:8px;padding:12px 16px;border-bottom:1px solid var(--rule)}
+.v4 .sch .nm{font:600 15px/1 "Instrument Sans",sans-serif}
+.v4 .live{width:7px;height:7px;border-radius:50%;background:var(--done)}
+.v4 .sch .st{color:var(--ink3);font-size:12.5px}
+.v4 .sch .orc{margin-left:auto;font-size:12.5px;color:var(--run);font-weight:500}
+.v4 .sl{padding:10px 16px 2px;color:var(--ink2);font-size:12.5px;font-weight:600}
+.v4 .ent{border-top:0;padding:7px 16px}
+.v4 .ent .acts{margin-top:7px}
+.v4 .stopped{flex:1;display:flex;flex-direction:column;align-items:flex-start;gap:10px;padding:18px 16px;color:var(--ink2);font-size:13px}
+.v4 .drawer{flex:none;height:262px;margin:12px;display:flex;flex-direction:column}
+.v4 .grip{width:36px;height:4px;border-radius:2px;background:var(--rule);margin:7px auto 0}
+.v4 .drawer .mh{padding-top:6px}
+.v4 .drawer .term{font-size:12px;line-height:1.55;padding:10px 20px}
+</style>
+</head>
+<body>
+<main class="page">
+
+<h1>Ledger, four ways to lay it out</h1>
+<p class="lede">The look stays the same in all four: cool paper, ink blue, and a highlighter on anything waiting for you. What changes is where the ledger sits next to the terminal, and what the ledger is ordered by. Same demo moment as before, plus a second session so the multi-session layouts have something to show.</p>
+
+<div class="keep">
+  <div><h3>What stays fixed</h3><p>Instrument Sans for the interface, Spline Sans Mono for terminals. Marker yellow is reserved for Needs you and nothing else, so it always means you.</p></div>
+  <div><h3>What each layout trades</h3><p>Terminal size against how much of the ledger you can see at once, and one session in depth against every session at a glance.</p></div>
+  <div><h3>No terminal tabs</h3><p>The ledger is how you move between the Orchestrator and Workers, and shells belong to your multiplexer. So the terminal header only names what it’s showing.</p></div>
+</div>
+
+<div class="pick"><strong>My pick: 3, Day book.</strong> It keeps the shape you liked in C (ledger left, terminal right) and fixes its weak spot. Sorting by state hides <em>when</em> things happened, and with several Workers that’s often the question: “what changed while I was away?” If you regularly keep two or three sessions live at once, look hard at 4.</div>
+
+<!-- ============ 1 ============ -->
+<section class="opt">
+  <div class="opt-head"><span class="letter">1</span><h2>Top sheet</h2><span class="tag">Ledger across the top, terminal full width below</span></div>
+  <p class="pitch">The three sections sit side by side like the columns of a ledger page. The terminal gets the window’s whole width, and the sheet folds to a single line of counts when you want the height back.</p>
+  <div class="stage"><div class="win L v1">
+    <div class="tb">
+      <div class="lights"><i></i><i></i><i></i></div>
+      <div class="ses"><span class="on">demo<small>4</small></span><span>agent-hub<small>2</small></span><span>storefront<small>stopped</small></span></div>
+      <div class="use"><span>Session <b>48%</b></span><span>Week <b>22%</b></span></div>
+    </div>
+    <div class="band sheet">
+      <div class="col">
+        <div class="ch"><h6>Needs you</h6><span class="cnt">1</span></div>
+        <div class="ent"><div class="top"><span class="tt"><span class="hl">w15 sasuke wants to push</span></span><span class="ag">12s</span></div>
+          <code>git push origin demo-rerank-multi-window</code>
+          <div class="acts"><span class="btn pri">Approve</span><span class="btn">Deny</span><span class="btn">Open w15</span></div></div>
+      </div>
+      <div class="col">
+        <div class="ch"><h6>Running</h6><span class="cnt">2</span></div>
+        <div class="ent sel"><div class="top"><i class="mk" style="background:var(--run)"></i><span class="tt">Fix rerank multi-window</span><span class="ag">2m</span></div><div class="sub">w14 naruto, 41 of 44 passing</div></div>
+        <div class="ent"><div class="top"><i class="mk" style="background:var(--run)"></i><span class="tt">Run cross-corpus bench</span><span class="ag">40s</span></div><div class="sub">w13 bash, corpus 2 of 5</div></div>
+      </div>
+      <div class="col">
+        <div class="ch"><h6>Done</h6><span class="cnt">2</span><span class="fold">Fold sheet</span></div>
+        <div class="ent"><div class="top"><i class="mk" style="background:var(--done)"></i><span class="tt">Qdrant source filter options</span><span class="ag">14m</span></div><div class="sub">w12 jiraiya, 3 options with sources</div></div>
+        <div class="ent"><div class="top"><i class="mk" style="background:var(--fail)"></i><span class="tt">Why merge gave no gain</span><span class="ag">1h</span></div><div class="sub">w11 hinata, blocked on missing eval set</div></div>
+      </div>
+    </div>
+    <div class="main sheet">
+      <div class="mh"><span class="who">Orchestrator</span><span class="w">demo, opus</span></div>
+      <div class="term" data-term="short"></div>
+    </div>
+  </div></div>
+  <div class="notes">
+    <div><h4>Best when</h4><p>You work on a wide external display, or you want the terminal wide enough for long diffs and test output.</p></div>
+    <div><h4>Trade-off</h4><p>Takes height, which terminals need most. With more than three Workers per section the band has to scroll or grow.</p></div>
+    <div><h4>In SwiftUI</h4><ul><li><code>VStack</code> of a 3-column <code>Grid</code> and <code>PaneTree</code></li><li>Fold with a <code>DisclosureGroup</code>-style toggle into a one-line summary</li></ul></div>
+  </div>
+</section>
+
+<!-- ============ 2 ============ -->
+<section class="opt">
+  <div class="opt-head"><span class="letter">2</span><h2>Ledger home</h2><span class="tag">The ledger is the page; terminals slide over it</span></div>
+  <p class="pitch">Summary-first taken all the way. The ledger fills the window across every session, and you talk to the Orchestrator from a composer at the foot of the page. A terminal opens as a sheet from the right only when you click into a Worker, then slides away.</p>
+  <div class="stage"><div class="win L v2">
+    <div class="tb">
+      <div class="lights"><i></i><i></i><i></i></div>
+      <div class="ses"><span class="on">All sessions</span><span>demo<small>4</small></span><span>agent-hub<small>2</small></span><span>storefront<small>stopped</small></span></div>
+      <div class="use"><span>Session <b>48%</b></span><span>Week <b>22%</b></span></div>
+    </div>
+    <div class="body">
+      <div class="page2 sheet">
+        <div class="scroll">
+          <div class="sh"><h6>Needs you</h6><span class="cnt">2</span></div>
+          <div class="ent"><div class="top"><span class="tt"><span class="hl">w15 sasuke wants to push</span></span><span class="tag">demo</span><span class="ag">12s</span></div>
+            <code>git push origin demo-rerank-multi-window</code>
+            <div class="acts"><span class="btn pri">Approve</span><span class="btn">Deny</span></div></div>
+          <div class="ent"><div class="top"><span class="tt"><span class="hl">w5 hinata asks a question</span></span><span class="tag">agent-hub</span><span class="ag">3m</span></div>
+            <div class="sub" style="color:var(--ink)">One floating Hub button per session, or one for all?</div>
+            <div class="acts"><span class="field">Reply to w5…</span><span class="btn">Send</span></div></div>
+          <div class="sh"><h6>Running</h6><span class="cnt">3</span></div>
+          <div class="ent sel"><div class="top"><i class="mk" style="background:var(--run)"></i><span class="tt">Fix rerank multi-window</span><span class="tag">demo</span><span class="ag">2m</span></div><div class="sub">w14 naruto, 41 of 44 passing</div></div>
+          <div class="ent"><div class="top"><i class="mk" style="background:var(--run)"></i><span class="tt">Run cross-corpus bench</span><span class="tag">demo</span><span class="ag">40s</span></div><div class="sub">w13 bash, corpus 2 of 5</div></div>
+          <div class="ent"><div class="top"><i class="mk" style="background:var(--run)"></i><span class="tt">Floating Hub button prototype</span><span class="tag">agent-hub</span><span class="ag">6m</span></div><div class="sub">w3 naruto, panel opens, no drag yet</div></div>
+          <div class="sh dim"><h6>Done</h6><span class="cnt">3</span></div>
+        </div>
+        <div class="composer"><span class="to">To <b>demo</b> Orchestrator</span><span class="field">Ask for something, or reply to the Summary…</span><span class="btn pri">Send</span></div>
+      </div>
+      <div class="over sheet">
+        <div class="mh"><span class="who">w14 naruto</span><span class="w">Fix rerank multi-window</span><span class="x">Close</span></div>
+        <div class="term" data-term="w14"></div>
+      </div>
+    </div>
+  </div></div>
+  <div class="notes">
+    <div><h4>Best when</h4><p>You mostly steer and approve, and rarely read the Orchestrator’s raw output. Feels closest to the Floating Hub button idea at full size.</p></div>
+    <div><h4>Trade-off</h4><p>The composer has to type into the Orchestrator’s terminal for you, which bends ADR 0005, and slash commands or TUI menus still need the real terminal.</p></div>
+    <div><h4>In SwiftUI</h4><ul><li>Sectioned <code>List</code> over all snapshots</li><li>Overlay sheet with <code>.transition(.move(edge: .trailing))</code></li><li>New daemon call to send a line to the Orchestrator</li></ul></div>
+  </div>
+</section>
+
+<!-- ============ 3 ============ -->
+<section class="opt">
+  <div class="opt-head"><span class="letter">3</span><h2>Day book</h2><span class="tag">Ledger by time, Needs you pinned on top</span></div>
+  <p class="pitch">Keep the original split, but write the ledger like a day book: every handoff, report and request in the order it happened, with what needs you pinned above it. Coming back after lunch, you read down from the top until you reach where you left off.</p>
+  <div class="stage"><div class="win L v3">
+    <div class="tb">
+      <div class="lights"><i></i><i></i><i></i></div>
+      <div class="ses"><span class="on">demo<small>4</small></span><span>agent-hub<small>2</small></span><span>storefront<small>stopped</small></span></div>
+      <div class="use"><span>Session <b>48%</b></span><span>Week <b>22%</b></span></div>
+    </div>
+    <div class="body">
+      <div class="book sheet">
+        <div class="pin">
+          <div class="ph"><h6>Needs you</h6><span class="cnt">1</span><span class="ag">14:32</span></div>
+          <div class="tt" style="font-weight:500"><span class="hl">w15 sasuke wants to push</span></div>
+          <code style="background:#fff">git push origin demo-rerank-multi-window</code>
+          <div class="acts"><span class="btn pri">Approve</span><span class="btn">Deny</span><span class="btn">Open w15</span></div>
+        </div>
+        <div class="day"><h6>Today</h6><span class="cnt">6 entries since 13:30</span></div>
+        <div class="je"><span class="t">14:30</span><span class="rail"><i style="background:var(--run)"></i></span><div class="tx"><div class="tt">w14 naruto: 41 of 44 tests passing</div><div class="sub">Fix rerank multi-window, still running</div></div></div>
+        <div class="je sel"><span class="t">14:28</span><span class="rail"><i style="background:var(--ink)"></i></span><div class="tx"><div class="tt">Orchestrator handed out 2 Tasks</div><div class="sub">w14 naruto to fix, w15 sasuke to verify</div></div></div>
+        <div class="je"><span class="t">14:18</span><span class="rail"><i style="background:var(--done)"></i></span><div class="tx"><div class="tt">w12 jiraiya finished</div><div class="sub">Qdrant source filter, 3 options with sources</div></div></div>
+        <div class="je"><span class="t">14:05</span><span class="rail"><i style="background:var(--run)"></i></span><div class="tx"><div class="tt">w13 bash started the cross-corpus bench</div><div class="sub">Corpus 2 of 5</div></div></div>
+        <div class="je"><span class="t">13:31</span><span class="rail"><i style="background:var(--fail)"></i></span><div class="tx"><div class="tt">w11 hinata is blocked</div><div class="sub">Why merge gave no gain: missing eval set</div></div></div>
+      </div>
+      <div class="main sheet">
+        <div class="mh"><span class="who">Orchestrator</span><span class="w">demo, opus</span></div>
+        <div class="term" data-term="full"></div>
+      </div>
+    </div>
+  </div></div>
+  <div class="notes">
+    <div><h4>Best when</h4><p>You step away and come back. Clicking an entry opens that Worker’s terminal, or the Orchestrator at that moment.</p></div>
+    <div><h4>Trade-off</h4><p>“What’s running right now” is no longer one glance; you read it from the Summary or the latest entries. Needs the daemon to keep an event log with timestamps.</p></div>
+    <div><h4>In SwiftUI</h4><ul><li><code>List</code> with a pinned header section</li><li>Entries from the daemon’s <code>events</code> stream, stored per session</li><li>Rail and marks drawn with a small <code>Canvas</code></li></ul></div>
+  </div>
+</section>
+
+<!-- ============ 4 ============ -->
+<section class="opt">
+  <div class="opt-head"><span class="letter">4</span><h2>Session columns</h2><span class="tag">One ledger per session, terminal in a drawer</span></div>
+  <p class="pitch">Built for running several Hub Sessions at once. Each session gets its own ledger column, side by side, so you see every repo’s state without switching. The terminal lives in a drawer at the bottom that shows whatever you last clicked: a Worker, or a session’s Orchestrator.</p>
+  <div class="stage"><div class="win L v4">
+    <div class="tb">
+      <div class="lights"><i></i><i></i><i></i></div>
+      <div style="font-weight:600;margin-left:24px">All sessions</div>
+      <div class="use"><span>Session <b>48%</b></span><span>Week <b>22%</b></span></div>
+    </div>
+    <div class="cols">
+      <div class="sc sheet">
+        <div class="sch"><i class="live"></i><span class="nm">demo</span><span class="st">4 Workers</span><span class="orc">Orchestrator</span></div>
+        <div class="sl">Needs you</div>
+        <div class="ent"><div class="top"><span class="tt"><span class="hl">w15 sasuke wants to push</span></span><span class="ag">12s</span></div>
+          <div class="acts"><span class="btn pri">Approve</span><span class="btn">Deny</span></div></div>
+        <div class="sl">Running</div>
+        <div class="ent"><div class="top"><i class="mk" style="background:var(--run)"></i><span class="tt">Fix rerank multi-window</span><span class="ag">2m</span></div></div>
+        <div class="ent"><div class="top"><i class="mk" style="background:var(--run)"></i><span class="tt">Run cross-corpus bench</span><span class="ag">40s</span></div></div>
+        <div class="sl">Done</div>
+        <div class="ent"><div class="top"><i class="mk" style="background:var(--done)"></i><span class="tt">Qdrant source filter options</span><span class="ag">14m</span></div></div>
+      </div>
+      <div class="sc sheet">
+        <div class="sch"><i class="live"></i><span class="nm">agent-hub</span><span class="st">2 Workers</span><span class="orc">Orchestrator</span></div>
+        <div class="sl">Needs you</div>
+        <div class="ent sel"><div class="top"><span class="tt"><span class="hl">w5 hinata asks a question</span></span><span class="ag">3m</span></div>
+          <div class="sub" style="color:var(--ink)">One floating Hub button per session, or one for all?</div></div>
+        <div class="sl">Running</div>
+        <div class="ent"><div class="top"><i class="mk" style="background:var(--run)"></i><span class="tt">Floating Hub button prototype</span><span class="ag">6m</span></div></div>
+        <div class="sl">Done</div>
+        <div class="ent"><div class="top"><i class="mk" style="background:var(--done)"></i><span class="tt">Merge new Preferences</span><span class="ag">25m</span></div></div>
+      </div>
+      <div class="sc sheet">
+        <div class="sch"><i class="live" style="background:var(--rule)"></i><span class="nm">storefront</span><span class="st">stopped</span></div>
+        <div class="stopped">No Workers running. Starting the Orchestrator resumes its last conversation.<span class="btn">Start Orchestrator</span></div>
+      </div>
+    </div>
+    <div class="drawer sheet">
+      <div class="grip"></div>
+      <div class="mh"><span class="who">w5 hinata</span><span class="w">agent-hub</span></div>
+      <div class="term" data-term="w5"></div>
+    </div>
+  </div></div>
+  <div class="notes">
+    <div><h4>Best when</h4><p>Two or three repos are live at once and you’re mostly answering and approving across them. Answers the backlog’s “multiple repos” item without Cmd-1 to Cmd-9.</p></div>
+    <div><h4>Trade-off</h4><p>The terminal is short, so long reads mean dragging the drawer up. Beyond three or four sessions the columns get narrow.</p></div>
+    <div><h4>In SwiftUI</h4><ul><li><code>HStack</code> of per-session <code>List</code>s, reusing today’s snapshots</li><li>Drawer is a <code>VSplitView</code> or custom drag handle</li><li>Drawer remembers its height per window</li></ul></div>
+  </div>
+</section>
+
+<h2 class="sec">Side by side</h2>
+<table class="cmp">
+  <tr><th></th><th>1 Top sheet</th><th>2 Ledger home</th><th>3 Day book</th><th>4 Session columns</th></tr>
+  <tr><td>Ledger is ordered by</td><td>State</td><td>State, all sessions</td><td>Time, Needs you pinned</td><td>Session, then state</td></tr>
+  <tr><td>Terminal space</td><td>Full width, shorter</td><td>Only on demand</td><td>Same as original C</td><td>Short drawer</td></tr>
+  <tr><td>Multiple sessions</td><td>Session switcher</td><td>Merged, tagged</td><td>Session switcher</td><td>Side by side</td></tr>
+  <tr><td>New daemon work</td><td>None</td><td>Send a line to the Orchestrator</td><td>Timestamped event log</td><td>None</td></tr>
+  <tr><td>Build effort</td><td>Low</td><td>High</td><td>Medium</td><td>Medium</td></tr>
+</table>
+
+</main>
+
+<script>
+const TERM = {
+full: `<span class="p">></span> rerun the rerank arm with the fix and verify it
+
+<span class="b">●</span> Handing this to two Workers.
+  w14 naruto   Fix rerank multi-window
+  w15 sasuke   Verify w14’s commits
+
+<span class="b">●</span> w12 jiraiya finished. Qdrant filters on payload
+  <span class="r">source</span> natively; three options, each cited.
+
+<span class="b">●</span> <span class="h">Summary</span>
+  <span class="h">Needs you</span>
+    <span class="y">w15 wants to run git push origin demo-rerank…</span>
+  <span class="h">Done</span>
+    <span class="g">w12</span> Qdrant source filter options
+  <span class="h">Running</span>
+    <span class="r">w14</span> Fix rerank multi-window, 41 of 44 passing
+    <span class="r">w13</span> Cross-corpus bench, corpus 2 of 5
+
+<span class="p">></span> <span class="cur">_</span>`,
+short: `<span class="p">></span> rerun the rerank arm with the fix and verify it
+
+<span class="b">●</span> Handing this to two Workers.
+  w14 naruto   Fix rerank multi-window
+  w15 sasuke   Verify w14’s commits
+
+<span class="b">●</span> w12 jiraiya finished. Qdrant filters on payload <span class="r">source</span> natively; three options, each cited.
+
+<span class="p">></span> <span class="cur">_</span>`,
+w14: `<span class="d">● Reading src/rerank/window.rs</span>
+<span class="d">● Editing src/rerank/window.rs</span>
+  - let span = hits.windows(1);
+  + let span = hits.windows(cfg.width);
+<span class="d">● Running cargo test -p rerank</span>
+  <span class="g">41 passed</span>, 3 failed
+    rerank::window::overlap_edges
+    rerank::window::empty_tail
+    rerank::window::single_hit
+<span class="d">● Looking at overlap_edges</span>
+  windows past the last hit are dropped
+  before scoring; fixing the bound check`,
+w5: `<span class="d">● Reading BACKLOG.md, docs/adr/0005-native-macos-app.md</span>
+<span class="b">●</span> The backlog leaves this open. Both work with the daemon as is:
+  one button per session means one <span class="r">events</span> stream each;
+  one for all means merging snapshots in the panel.
+  <span class="y">Asked the Orchestrator: one per session, or one for all?</span>`
+};
+document.querySelectorAll('[data-term]').forEach(el => el.innerHTML = TERM[el.dataset.term]);
+function fit(){
+  document.querySelectorAll('.stage').forEach(s => {
+    const w = s.querySelector('.win'); const k = s.clientWidth / 1180;
+    w.style.transform = `scale(${k})`; s.style.height = (700 * k) + 'px';
+  });
+}
+addEventListener('resize', fit); fit();
+</script>
+</body>
+</html>
