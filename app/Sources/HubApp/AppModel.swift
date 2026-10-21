@@ -171,8 +171,34 @@ final class AppModel: ObservableObject {
             if let preview, !openPreviews.contains(preview) { openPreviews.append(preview) }
         }
     }
-    /// Every file with a tab, in the order they were opened; they stay open until closed.
-    @Published private(set) var openPreviews: [FileRef] = []
+    /// Every file with a tab, in the order shown; they stay open until closed, and across relaunches
+    /// (a file that is gone drops out).
+    @Published private(set) var openPreviews: [FileRef] = AppModel.savedPreviews() {
+        didSet { UserDefaults.standard.set(openPreviews.map { [$0.root, $0.path] }, forKey: "openPreviews") }
+    }
+
+    private static func savedPreviews() -> [FileRef] {
+        (UserDefaults.standard.array(forKey: "openPreviews") as? [[String]] ?? []).compactMap { pair in
+            guard pair.count == 2 else { return nil }
+            let file = FileRef(root: pair[0], path: pair[1])
+            return FileManager.default.fileExists(atPath: file.url.path) ? file : nil
+        }
+    }
+
+    /// ⌃Tab and ⌃⇧Tab: the next or previous tab of this checkout, the Terminal first.
+    func cyclePreview(forward: Bool) {
+        let tabs: [FileRef?] = [nil] + openPreviews.filter { $0.root == selectedCheckout }
+        guard tabs.count > 1 else { return }
+        let at = tabs.firstIndex { $0 == preview } ?? 0
+        preview = tabs[(at + (forward ? 1 : -1) + tabs.count) % tabs.count]
+    }
+
+    /// Dropping a tab on another takes that tab's place.
+    func moveTab(_ file: FileRef, onto target: FileRef) {
+        guard let from = openPreviews.firstIndex(of: file), let to = openPreviews.firstIndex(of: target), from != to else { return }
+        openPreviews.remove(at: from)
+        openPreviews.insert(file, at: to)
+    }
     /// The line a text search hit opened the preview at, 1-based.
     @Published private(set) var previewLine: Int?
     /// The ledger's and the Files column's widths, as the human dragged them.
@@ -364,6 +390,10 @@ final class AppModel: ObservableObject {
     /// showing the agent itself is never closed; tmux would drop the agent's view with it. Away
     /// from tmux, ⌘W closes the window as usual.
     func closePane() {
+        if let file = preview, file.root == selectedCheckout {
+            closePreview(file)
+            return
+        }
         guard canSplit, let target = selectedTarget, let session = muxShells[target]?.session else {
             NSApp.keyWindow?.performClose(nil)
             return

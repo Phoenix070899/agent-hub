@@ -45,17 +45,18 @@ struct FilePreviewPanel: View {
             }
             return .handled
         }
-        // In rendered Markdown, ↑ and ↓ pick a block and Return leaves a note on it. Keys typed in
-        // a note bubble up here too; while one is being written, they are its own.
+        // ↑ and ↓ pick a rendered Markdown block or a line of code, and Return leaves a note on it.
+        // Keys typed in a note bubble up here too; while one is being written, they are its own.
         .onKeyPress(keys: [.downArrow, .upArrow, .return]) { press in
-            guard active, notesOpen, notes.editing == nil, press.modifiers.isDisjoint(with: [.command, .option, .control]),
-                  case .markdown(let blocks, _, _, _) = content.state, !blocks.isEmpty else { return .ignored }
+            let count = noteTargets
+            guard active, count > 0, notes.editing == nil, press.modifiers.isDisjoint(with: [.command, .option, .control])
+            else { return .ignored }
             if press.key == .return {
                 guard let cursor = notes.cursor else { return .ignored }
                 notes.start(at: cursor)
             } else {
                 let step = press.key == .downArrow ? 1 : -1
-                notes.cursor = notes.cursor.map { max(0, min(blocks.count - 1, $0 + step)) } ?? (step > 0 ? 0 : blocks.count - 1)
+                notes.cursor = notes.cursor.map { max(0, min(count - 1, $0 + step)) } ?? (step > 0 ? 0 : count - 1)
             }
             return .handled
         }
@@ -71,6 +72,11 @@ struct FilePreviewPanel: View {
             notes.cursor = nil
             notes.editing = nil
         }
+        // Blocks and lines are different things to point at.
+        .onChange(of: content.rendered) {
+            notes.cursor = nil
+            notes.editing = nil
+        }
         // From the tree, the tree keeps the keyboard (Space, arrows, Esc); from Quick Open, Esc
         // needs the preview to hold it.
         .onAppear { if active, !model.treeFocused { focused = true } }
@@ -81,10 +87,47 @@ struct FilePreviewPanel: View {
         }
     }
 
-    /// Notes can be written on the file: Markdown, shown rendered.
-    private var notesOpen: Bool {
-        if case .markdown = content.state { return content.rendered }
-        return false
+    /// What a note can point at: the blocks of rendered Markdown, or the lines of any text shown as
+    /// code. Zero for images, PDFs, binary files, and a rendered page.
+    private var noteTargets: Int {
+        switch content.state {
+        case .markdown(let blocks, _, let lines, _): content.rendered ? blocks.count : lines.count
+        case .text(let lines, _): lines.count
+        case .html(let lines, _): content.rendered ? 0 : lines.count
+        default: 0
+        }
+    }
+
+    private var notesOpen: Bool { noteTargets > 0 }
+
+    private func codeView(_ lines: [AttributedString], cut: Bool) -> CodeLines {
+        CodeLines(lines: lines, changed: content.changed, cut: cut, focus: active ? model.previewLine : nil,
+                  file: file, notes: notes) { focused = true }
+    }
+
+    private var pageErrors: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Divider().overlay(Ledger.rule)
+            HStack {
+                Text("\(content.pageErrors.count) error\(content.pageErrors.count == 1 ? "" : "s") in the page")
+                    .fontWeight(.semibold)
+                    .foregroundStyle(Ledger.fail)
+                Spacer(minLength: 8)
+                Button("Clear") { content.pageErrors = [] }.buttonStyle(.ledgerLink)
+            }
+            ForEach(Array(content.pageErrors.suffix(3).enumerated()), id: \.offset) { _, error in
+                Text(error)
+                    .font(.system(size: 12, design: .monospaced))
+                    .foregroundStyle(Ledger.ink2)
+                    .lineLimit(2)
+                    .textSelection(.enabled)
+            }
+        }
+        .font(.system(size: 12.5))
+        .padding(.horizontal, 18)
+        .padding(.bottom, 9)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Ledger.wash)
     }
 
     private var rootNotes: [FileNote] { model.fileNotes[file.root] ?? [] }
@@ -97,7 +140,7 @@ struct FilePreviewPanel: View {
             let name = model.terminalName ?? "the agent"
             HStack(spacing: 10) {
                 if notes.isEmpty {
-                    Text("Click + beside a block, or press Tab, ↑ ↓ and Return, to leave \(name) a note.")
+                    Text("Click + beside a block or line, or press Tab, ↑ ↓ and Return, to leave \(name) a note.")
                         .foregroundStyle(Ledger.ink3)
                         .lineLimit(1)
                 } else {
@@ -197,19 +240,22 @@ struct FilePreviewPanel: View {
             // in the tree while its tab is shown (the page loads again on return).
             if active { PDFPreview(document: document) }
         case .text(let lines, let cut):
-            CodeLines(lines: lines, changed: content.changed, cut: cut, focus: active ? model.previewLine : nil)
+            codeView(lines, cut: cut)
         case .html(let lines, let cut):
             if content.rendered {
-                if active { WebPreview(file: file, reloads: content.reloads) }
+                VStack(spacing: 0) {
+                    if active { WebPreview(file: file, content: content) }
+                    if !content.pageErrors.isEmpty { pageErrors }
+                }
             } else {
-                CodeLines(lines: lines, changed: content.changed, cut: cut, focus: active ? model.previewLine : nil)
+                codeView(lines, cut: cut)
             }
         case .markdown(let blocks, let spans, let lines, let cut):
             if content.rendered {
                 MarkdownView(blocks: blocks, spans: spans, source: lines.map { String($0.characters) },
                              file: file, notes: notes) { focused = true }
             } else {
-                CodeLines(lines: lines, changed: content.changed, cut: cut, focus: active ? model.previewLine : nil)
+                codeView(lines, cut: cut)
             }
         }
     }
@@ -248,7 +294,7 @@ struct PreviewTabs: View {
                 .buttonStyle(.plain)
             }
             ForEach(files, id: \.self) { file in
-                tab(active: model.preview == file) {
+                tab(active: model.preview == file, file: file) {
                     HStack(spacing: 8) {
                         Button { model.preview = file } label: {
                             Text(file.name).lineLimit(1).contentShape(Rectangle())
@@ -278,12 +324,25 @@ struct PreviewTabs: View {
         .background(Ledger.band)
     }
 
-    private func tab<Content: View>(active: Bool, @ViewBuilder _ content: () -> Content) -> some View {
-        content()
+    /// A file's tab can be dragged onto another to reorder.
+    @ViewBuilder
+    private func tab<Content: View>(active: Bool, file: FileRef? = nil, @ViewBuilder _ content: () -> Content) -> some View {
+        let look = content()
             .padding(.horizontal, 12)
             .padding(.vertical, 6)
             .foregroundStyle(active ? Ledger.ink : Ledger.ink2)
             .background(active ? Ledger.paper : Color.clear, in: UnevenRoundedRectangle(topLeadingRadius: 6, topTrailingRadius: 6))
+        if let file {
+            look
+                .draggable(file.root + "\n" + file.path)
+                .dropDestination(for: String.self) { items, _ in
+                    guard let item = items.first, let split = item.firstIndex(of: "\n") else { return false }
+                    model.moveTab(FileRef(root: String(item[..<split]), path: String(item[item.index(after: split)...])), onto: file)
+                    return true
+                }
+        } else {
+            look
+        }
     }
 }
 
@@ -316,6 +375,10 @@ final class PreviewContent: ObservableObject {
     @Published var rendered = true
     /// Counts reads, so the web view loads the page again when the file changes.
     @Published var reloads = 0
+    /// Errors the page reported (script errors, failed loads, `console.error`), newest last.
+    @Published var pageErrors: [String] = []
+    /// Where the page was scrolled to, so a reload or coming back to the tab keeps the place.
+    var webScroll: (x: Double, y: Double) = (0, 0)
     /// Lines that just changed, highlighted for a moment.
     @Published var changed: Set<Int> = []
 
@@ -364,6 +427,7 @@ final class PreviewContent: ObservableObject {
         shown = read.1.map { (path, $0) }
         state = read.0
         reloads += 1
+        pageErrors = []
     }
 
     /// The file coloured by Highlightr, one AttributedString per line; nil for plain text.
@@ -413,34 +477,56 @@ final class PreviewContent: ObservableObject {
     }
 }
 
-/// Code with line numbers in a gutter; lines an agent just changed glow for a moment.
+/// Code with line numbers in a gutter; lines an agent just changed glow for a moment. Each line
+/// takes a note for the agent: + in the gutter, or the keyboard cursor and Return.
 private struct CodeLines: View {
+    @EnvironmentObject private var model: AppModel
     let lines: [AttributedString]
     let changed: Set<Int>
     let cut: Bool
     /// The 1-based line to scroll to and mark.
     var focus: Int?
+    let file: FileRef
+    @ObservedObject var notes: NotesState
+    /// Gives the keyboard back to the preview once a note is saved.
+    let done: () -> Void
 
     var body: some View {
         let digits = max(3, String(lines.count).count)
+        let gutter = CGFloat(digits) * 8 + 32
+        let all = model.fileNotes[file.root] ?? []
         GeometryReader { geometry in
         ScrollViewReader { proxy in
         ScrollView([.vertical, .horizontal]) {
             LazyVStack(alignment: .leading, spacing: 0) {
                 ForEach(Array(lines.enumerated()), id: \.offset) { index, line in
-                    HStack(alignment: .firstTextBaseline, spacing: 0) {
-                        Text(String(index + 1))
-                            .foregroundStyle(Ledger.ink3)
-                            .frame(width: CGFloat(digits) * 8 + 16, alignment: .trailing)
-                            .padding(.trailing, 16)
-                        Text(line.characters.isEmpty ? AttributedString(" ") : line)
-                            .fixedSize()
+                    let marked = notes.cursor == index || notes.editing == index
+                    VStack(alignment: .leading, spacing: 0) {
+                        CodeRow(number: index + 1, line: line, digits: digits, marked: marked,
+                                background: marked ? Ledger.selected
+                                : changed.contains(index) ? Ledger.justChanged
+                                : focus == index + 1 ? Ledger.selected : Color.clear) {
+                            notes.start(at: index)
+                        }
+                        ForEach(Array(all.enumerated()).filter { $0.element.path == file.path && $0.element.lines.upperBound == index + 1 },
+                                id: \.offset) { position, note in
+                            CommentCard(text: note.text, inset: gutter) {
+                                model.fileNotes[file.root]?.remove(at: position)
+                                notes.start(at: index, draft: note.text)
+                            } delete: {
+                                model.fileNotes[file.root]?.remove(at: position)
+                            }
+                        }
+                        if notes.editing == index {
+                            CommentEditor(draft: $notes.draft, placeholder: "What should the agent know or change here?",
+                                          action: "Add note", inset: gutter) {
+                                notes.editing = nil
+                                done()
+                            } save: {
+                                save(on: index)
+                            }
+                        }
                     }
-                    .font(.system(size: 12.5, design: .monospaced))
-                    .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
-                    .padding(.vertical, 1)
-                    .background(changed.contains(index) ? Ledger.justChanged
-                                : focus == index + 1 ? Ledger.selected : Color.clear)
                 }
                 if cut {
                     Text("Only the first 1 MB is shown. Open the file to read the rest.")
@@ -457,8 +543,61 @@ private struct CodeLines: View {
         .onChange(of: focus, initial: true) {
             if let focus { proxy.scrollTo(focus - 1, anchor: .center) }
         }
+        .onChange(of: notes.cursor) {
+            if let cursor = notes.cursor { proxy.scrollTo(cursor) }
         }
         }
+        }
+    }
+
+    private func save(on index: Int) {
+        let text = notes.draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        model.fileNotes[file.root, default: []].append(
+            FileNote(path: file.path, lines: (index + 1)...(index + 1), quote: [String(lines[index].characters)], text: text))
+        notes.editing = nil
+        done()
+    }
+}
+
+/// One line of code: its number, with + on hover or under the cursor, and its text.
+private struct CodeRow: View {
+    let number: Int
+    let line: AttributedString
+    let digits: Int
+    let marked: Bool
+    let background: Color
+    let note: () -> Void
+    @StateObject private var hover = Flag()
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 0) {
+            Text(String(number))
+                .foregroundStyle(Ledger.ink3)
+                .frame(width: CGFloat(digits) * 8 + 16, alignment: .trailing)
+                .padding(.trailing, 16)
+                .overlay(alignment: .leading) {
+                    if hover.on || marked {
+                        Button(action: note) {
+                            Image(systemName: "plus.bubble.fill")
+                                .font(.system(size: 11))
+                                .foregroundStyle(Ledger.run)
+                                .frame(width: 20, height: 18)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .help("Leave a note on this line for the agent")
+                        .accessibilityLabel("Add a note on line \(number)")
+                    }
+                }
+            Text(line.characters.isEmpty ? AttributedString(" ") : line)
+                .fixedSize()
+        }
+        .font(.system(size: 12.5, design: .monospaced))
+        .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
+        .padding(.vertical, 1)
+        .background(background)
+        .onHover { hover.on = $0 }
     }
 }
 
@@ -838,28 +977,73 @@ private struct PDFPreview: NSViewRepresentable {
 }
 
 /// An HTML file drawn by a web view, with the checkout readable so its styles, scripts, and
-/// images load. Links to other sites open in the browser.
+/// images load. Links to other sites open in the browser. The page reports its scroll position
+/// and its errors back, so a reload keeps the place and the errors show under the page.
 private struct WebPreview: NSViewRepresentable {
     let file: FileRef
-    let reloads: Int
+    let content: PreviewContent
 
-    func makeCoordinator() -> Coordinator { Coordinator() }
+    func makeCoordinator() -> Coordinator { Coordinator(content: content) }
 
     func makeNSView(context: Context) -> WKWebView {
-        let view = WKWebView(frame: .zero)
+        let configuration = WKWebViewConfiguration()
+        configuration.userContentController.addUserScript(
+            WKUserScript(source: Self.script, injectionTime: .atDocumentStart, forMainFrameOnly: true))
+        configuration.userContentController.add(context.coordinator, name: "echo")
+        let view = WKWebView(frame: .zero, configuration: configuration)
         view.navigationDelegate = context.coordinator
         return view
     }
 
     func updateNSView(_ view: WKWebView, context: Context) {
         let coordinator = context.coordinator
-        guard coordinator.loaded.file != file || coordinator.loaded.reloads != reloads else { return }
-        coordinator.loaded = (file, reloads)
+        guard coordinator.loaded.file != file || coordinator.loaded.reloads != content.reloads else { return }
+        coordinator.loaded = (file, content.reloads)
         view.loadFileURL(file.url, allowingReadAccessTo: URL(fileURLWithPath: file.root))
     }
 
-    final class Coordinator: NSObject, WKNavigationDelegate {
+    private static let script = """
+    (function () {
+      const post = (kind, v) => window.webkit.messageHandlers.echo.postMessage({ kind: kind, v: v });
+      window.addEventListener('error', function (e) {
+        if (e.target && e.target !== window) { post('error', 'Failed to load ' + (e.target.src || e.target.href)); return; }
+        post('error', (e.message || 'Error') + (e.filename ? ' (' + e.filename.split('/').pop() + ':' + e.lineno + ')' : ''));
+      }, true);
+      window.addEventListener('unhandledrejection', function (e) {
+        post('error', 'Unhandled rejection: ' + (e.reason && e.reason.message || e.reason));
+      });
+      const consoleError = console.error;
+      console.error = function () {
+        post('error', Array.from(arguments).map(String).join(' '));
+        consoleError.apply(console, arguments);
+      };
+      let timer;
+      window.addEventListener('scroll', function () {
+        clearTimeout(timer);
+        timer = setTimeout(function () { post('scroll', [window.scrollX, window.scrollY]); }, 100);
+      }, { passive: true });
+    })();
+    """
+
+    final class Coordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
+        let content: PreviewContent
         var loaded: (file: FileRef?, reloads: Int) = (nil, -1)
+
+        init(content: PreviewContent) { self.content = content }
+
+        func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
+            guard let body = message.body as? [String: Any], let kind = body["kind"] as? String else { return }
+            if kind == "scroll", let at = (body["v"] as? [NSNumber])?.map(\.doubleValue), at.count == 2 {
+                content.webScroll = (at[0], at[1])
+            } else if kind == "error", let text = body["v"] as? String, content.pageErrors.last != text {
+                content.pageErrors = Array((content.pageErrors + [text]).suffix(20))
+            }
+        }
+
+        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            let (x, y) = content.webScroll
+            if x != 0 || y != 0 { webView.evaluateJavaScript("window.scrollTo(\(x), \(y))") }
+        }
 
         func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction,
                      decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
