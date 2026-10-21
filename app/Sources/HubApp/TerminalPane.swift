@@ -88,6 +88,12 @@ struct TerminalPane: NSViewRepresentable {
         private var generation = 0
         /// The grid size xterm last reported; 0 until the first layout.
         private var size = (rows: 0, cols: 0)
+        /// The layout has settled at least once, so `size` is the pane's real size and not the
+        /// web view's first guess; a terminal attaches only then, or its screen would be drawn at
+        /// the wrong size and redrawn a moment later.
+        private var sized = false
+        /// An attach is under way and has no socket yet.
+        private var connecting = false
 
         private var applied: TerminalAppearance?
         /// Whether the pane last had leave to hold the keyboard.
@@ -160,13 +166,20 @@ struct TerminalPane: NSViewRepresentable {
             writes.async { try? socket.write(data) }
         }
 
-        /// Attaches to `target`, unless already showing it. Returns whether it attached.
+        /// Shows `target`, unless already showing it. Returns whether it changed. It attaches at once
+        /// when the pane's size is known, else when the first layout settles.
         @discardableResult
         func show(_ target: TerminalTarget) -> Bool {
             guard target != self.target else { return false }
             detach()
             self.target = target
             run("echo.reset()")
+            if sized { connect(target) }
+            return true
+        }
+
+        private func connect(_ target: TerminalTarget) {
+            connecting = true
             generation += 1
             let generation = generation
             let (rows, cols) = size
@@ -177,6 +190,7 @@ struct TerminalPane: NSViewRepresentable {
                     let current = DispatchQueue.main.sync { () -> Bool in
                         guard let self, self.generation == generation else { return false }
                         self.socket = socket
+                        self.connecting = false
                         // A layout that landed while attaching has not reached the daemon yet.
                         if self.size.cols >= Self.minimumSize.cols, self.size != (rows, cols) {
                             let size = self.size
@@ -198,11 +212,11 @@ struct TerminalPane: NSViewRepresentable {
                 } catch {
                     DispatchQueue.main.async {
                         guard let self, self.generation == generation else { return }
+                        self.connecting = false
                         self.feed(Data("\u{1b}[2m\(error)\u{1b}[0m\r\n".utf8))
                     }
                 }
             }
-            return true
         }
 
         func detach() {
@@ -210,6 +224,7 @@ struct TerminalPane: NSViewRepresentable {
             socket?.shutdown()
             socket = nil
             target = nil
+            connecting = false
         }
 
         /// Smaller than this is a layout passing through, not a size to give the agent: shrinking
@@ -220,15 +235,24 @@ struct TerminalPane: NSViewRepresentable {
         private func sizeChanged(cols: Int, rows: Int) {
             guard cols >= Self.minimumSize.cols, rows >= Self.minimumSize.rows else { return }
             size = (rows, cols)
-            guard let target, socket != nil else { return }
-            // Only the size the layout settles on reaches the daemon.
+            // Only the size the layout settles on counts: it connects a terminal that waited for
+            // it, or reaches the daemon.
             pendingResize?.cancel()
-            let client = client
-            let resize = DispatchWorkItem {
+            let settle = DispatchWorkItem { [weak self] in self?.settled() }
+            pendingResize = settle
+            DispatchQueue.main.asyncAfter(deadline: .now() + (sized ? 0.2 : 0.1), execute: settle)
+        }
+
+        private func settled() {
+            sized = true
+            guard let target else { return }
+            if socket != nil {
+                let (rows, cols) = size
+                let client = client
                 DispatchQueue.global().async { try? client.resize(target, rows: rows, cols: cols) }
+            } else if !connecting {
+                connect(target)
             }
-            pendingResize = resize
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2, execute: resize)
         }
 
         func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {

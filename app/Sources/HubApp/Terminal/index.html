@@ -69,6 +69,12 @@
   term.onData(data => post({ type: 'in', data }));
   term.onResize(({ cols, rows }) => post({ type: 'resize', cols, rows }));
   new ResizeObserver(() => fit.fit()).observe(document.getElementById('t'));
+  // After a resize, redraw every row from scratch: the GPU renderer can keep stale glyphs.
+  let repaint;
+  term.onResize(() => {
+    clearTimeout(repaint);
+    repaint = setTimeout(() => { if (webgl) term.clearTextureAtlas(); term.refresh(0, term.rows - 1); }, 150);
+  });
 
   // Matches are drawn in the theme's own colours, so they show whether or not the pane has focus.
   let findColors;
