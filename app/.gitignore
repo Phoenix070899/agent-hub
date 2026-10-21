@@ -1,2 +1,4 @@
 .build/
 build/
+# libghostty, built by Ghostty/build.sh.
+Vendor/

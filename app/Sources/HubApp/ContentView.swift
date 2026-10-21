@@ -789,7 +789,7 @@ struct AgentPanel: View {
                 }
             }
             if agent.live {
-                LiveTerminal(target: .agent(id: agent.id), repo: repo)
+                LiveTerminal(target: .agent(id: agent.id))
             } else if agent.isOrchestrator {
                 StoppedPanel(repo: repo, agent: agent)
             } else {
@@ -811,13 +811,12 @@ struct AgentPanel: View {
 struct LiveTerminal: View {
     @EnvironmentObject private var model: AppModel
     let target: TerminalTarget
-    let repo: String
 
     var body: some View {
-        let shown = model.shownTarget(for: target)
+        let command = model.paneCommand(for: target)
         Group {
-            if let shown {
-                TerminalPane(target: shown, client: model.client, appearance: model.appearance,
+            if let command {
+                TerminalPane(target: target, command: command, client: model.client, appearance: model.appearance,
                              keyboard: !model.modalShown && model.preview == nil && !model.treeFocused,
                              focusRequest: model.terminalFocusRequest)
             } else {
@@ -831,9 +830,9 @@ struct LiveTerminal: View {
         .padding(.vertical, 6)
         .background { TerminalBackdrop(appearance: model.appearance) }
         .opacity(model.daemonDown ? 0.45 : 1)
-        // Runs again whenever the multiplexer shell changes, so one that exited is replaced.
-        .task(id: "\(target.label) \(shown?.label ?? "-") \(model.multiplexer.enabled)") {
-            model.ensureMux(target, repo: repo)
+        // Runs again whenever the multiplexer line goes, so a multiplexer the human quit is replaced.
+        .task(id: "\(target.label) \(command == nil) \(model.multiplexer.enabled)") {
+            model.ensureMux(target)
         }
     }
 }
@@ -1003,7 +1002,7 @@ struct WorkerPanel: View {
                 } else if model.workerView(repo, worker) == .compare, let fanout = worker.fanout {
                     CompareView(repo: repo, fanout: fanout)
                 } else if worker.isActive, worker.live, let number = worker.number {
-                    LiveTerminal(target: .worker(id: number), repo: repo)
+                    LiveTerminal(target: .worker(id: number))
                     HStack(spacing: 10) {
                         Image(systemName: "info.circle")
                         Text("Typing here is an Intervention. \(worker.id) does what you ask and tells the Orchestrator.")

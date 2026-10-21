@@ -42,8 +42,6 @@ pub struct Hub {
     /// The human's own shells in the Hub App's split panes: id to (repo, terminal). No watching,
     /// no messages; they live until they exit or are closed.
     shells: Mutex<HashMap<i64, (String, Arc<Live>)>>,
-    /// The multiplexer shell showing each agent or Worker (`a3`, `w21`), by shell id.
-    muxes: Mutex<HashMap<String, i64>>,
     tick: Mutex<u64>,
     changed: Condvar,
     usage: Mutex<Usage>,
@@ -153,7 +151,6 @@ pub fn run() -> Result<()> {
         agents: Mutex::new(HashMap::new()),
         agent_prompts: Mutex::new(HashMap::new()),
         shells: Mutex::new(HashMap::new()),
-        muxes: Mutex::new(HashMap::new()),
         tick: Mutex::new(0),
         changed: Condvar::new(),
         usage: Mutex::new(Usage::default()),
@@ -544,7 +541,6 @@ impl Hub {
         let live = Live::spawn(id, spawn, move |id| {
             if let Some(hub) = hub.upgrade() {
                 hub.shells.lock().unwrap().remove(&id);
-                hub.muxes.lock().unwrap().retain(|_, shell| *shell != id);
                 hub.notify();
             }
         })?;
@@ -553,12 +549,13 @@ impl Hub {
         Ok(id)
     }
 
-    /// The human's multiplexer around one agent's or Worker's terminal: `command` (e.g.
-    /// `tmux new-session -A -s {session} -c {dir} {command}`) runs in a login shell, with
-    /// `{session}` a stable name for the target, `{dir}` where it works, and `{command}` a
-    /// `hub attach --follow` that shows the target in the multiplexer's first pane. One shell per
-    /// target: asking again returns the same one while it lives.
-    fn open_mux(self: &Arc<Self>, p: &Value) -> Result<Value> {
+    /// The human's multiplexer around one agent's or Worker's terminal, as the line an Echo pane
+    /// runs in a login shell (`hub mux`): `command` (e.g.
+    /// `tmux new-session -A -s {session} -c {dir} {command}`) with `{session}` a stable name for
+    /// the target, `{dir}` where it works, and `{command}` a `hub attach --follow` that shows the
+    /// target in the multiplexer's first pane. The pane runs it itself, so no daemon shell and no
+    /// relay sit between Echo and the multiplexer.
+    fn mux_command(&self, p: &Value) -> Result<Value> {
         let template = str_param(p, "command")?;
         let (label, repo, dir) = if let Some(id) = p.get("agent").and_then(Value::as_i64) {
             let agent = db::agent(&self.db(), id)?;
@@ -573,35 +570,24 @@ impl Hub {
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
         let session = mux_session(&name, &label);
-        // A client that reconnects (Echo relaunched) gets the session too: ⌘W needs it.
-        if let Some(&shell) = self.muxes.lock().unwrap().get(&label) {
-            if self.shells.lock().unwrap().contains_key(&shell) {
-                return Ok(json!({ "shell": shell, "session": session }));
-            }
-        }
-        let mut attach = vec![
+        // The multiplexer's server may have been started elsewhere, so this daemon is named.
+        let attach = [
+            "env".to_string(),
+            format!("HUB_STATE={}", paths::state_dir().display()),
             std::env::current_exe()?.display().to_string(),
             "attach".into(),
             "--follow".into(),
-            label.clone(),
-        ];
-        // The multiplexer's server may have been started elsewhere, so this daemon is named.
-        attach.splice(
-            0..0,
-            ["env".to_string(), format!("HUB_STATE={}", paths::state_dir().display())],
-        );
-        let attach = attach
-            .iter()
-            .map(|word| shell_quote(word))
-            .collect::<Vec<_>>()
-            .join(" ");
+            label,
+        ]
+        .iter()
+        .map(|word| shell_quote(word))
+        .collect::<Vec<_>>()
+        .join(" ");
         let command = template
             .replace("{session}", &shell_quote(&session))
             .replace("{dir}", &shell_quote(&dir))
             .replace("{command}", &shell_quote(&attach));
-        let shell = self.spawn_shell(&repo, PathBuf::from(&dir), vec!["-l".into(), "-c".into(), command])?;
-        self.muxes.lock().unwrap().insert(label, shell);
-        Ok(json!({ "shell": shell, "session": session }))
+        Ok(json!({ "command": command, "session": session, "dir": dir }))
     }
 
     fn recover(&self) -> Result<()> {
@@ -639,7 +625,11 @@ impl Hub {
 
     fn dispatch(self: &Arc<Self>, method: &str, p: &Value, stream: &UnixStream) -> Result<Value> {
         match method {
-            "ping" => Ok(json!({ "pid": std::process::id() })),
+            // `exe` is the `hub` that Echo's terminal panes run (`hub attach --echo`).
+            "ping" => Ok(json!({
+                "pid": std::process::id(),
+                "exe": std::env::current_exe()?.display().to_string(),
+            })),
             "worker.start" => self.start_worker(p),
             "worker.list" => self.list_workers(str_param(p, "repo")?, p.get("agent").and_then(Value::as_i64)),
             "status" => self.status(str_param(p, "repo")?),
@@ -665,6 +655,11 @@ impl Hub {
                     live.write(&key_bytes(key.as_str().unwrap_or_default())?)?;
                     std::thread::sleep(Duration::from_millis(100));
                 }
+                Ok(json!({}))
+            }
+            // Bytes exactly as given, for what Echo types itself: dropped paths, notes, tmux keys.
+            "terminal.write" => {
+                self.terminal(p)?.write(str_param(p, "text")?.as_bytes())?;
                 Ok(json!({}))
             }
             "terminal.resize" => {
@@ -703,7 +698,7 @@ impl Hub {
             }
             "sessions.list" => self.list_sessions(),
             "shell.open" => self.open_shell(p),
-            "mux.open" => self.open_mux(p),
+            "mux.command" => self.mux_command(p),
             "shell.close" => {
                 if let Some((_, live)) = self.shells.lock().unwrap().get(&id_param(p, "shell")?) {
                     live.kill();
@@ -1810,7 +1805,7 @@ pub fn name_from_request(line: &str) -> Option<String> {
 }
 
 /// The human's shell: `HUB_SHELL`, else `$SHELL`, else zsh.
-fn user_shell() -> String {
+pub fn user_shell() -> String {
     std::env::var("HUB_SHELL")
         .or_else(|_| std::env::var("SHELL"))
         .unwrap_or_else(|_| "/bin/zsh".into())
@@ -1844,7 +1839,7 @@ fn shell_quote(word: &str) -> String {
     format!("'{}'", word.replace('\'', "'\\''"))
 }
 
-fn inherited_agent_vars() -> Vec<String> {
+pub fn inherited_agent_vars() -> Vec<String> {
     std::env::vars()
         .map(|(key, _)| key)
         .filter(|key| is_agent_var(key))

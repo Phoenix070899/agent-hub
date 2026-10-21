@@ -765,22 +765,6 @@ fn a_fan_out_runs_one_task_three_ways_and_the_pick_is_merged() {
 }
 
 #[test]
-fn a_reopened_multiplexer_shell_still_names_its_session() {
-    let hub = Hub::new("muxagain");
-    hub.ok(&["status"]);
-    let opened = hub.call(
-        "agent.open",
-        serde_json::json!({ "repo": hub.repo_key(), "kind": "claude", "name": "sleeper" }),
-    );
-    let agent = opened["result"]["agent"].as_i64().unwrap();
-    let params = serde_json::json!({ "agent": agent, "command": "sleep 30 # {session} {dir} {command}" });
-    let first = hub.call("mux.open", params.clone());
-    let again = hub.call("mux.open", params);
-    assert_eq!(again["result"]["shell"], first["result"]["shell"], "{again}");
-    assert_eq!(again["result"]["session"], format!("echo-repo-a{agent}"), "{again}");
-}
-
-#[test]
 fn an_orchestrator_in_its_own_worktree_keeps_its_workers_there() {
     let hub = Hub::new("place");
     hub.ok(&["status"]);
@@ -933,6 +917,18 @@ fn shells_open_in_the_repo_and_close() {
         assert!(n > 0, "{}", String::from_utf8_lossy(&seen));
         seen.extend_from_slice(&buf[..n]);
     }
+    // What Echo types itself reaches the shell as given, beside the attached stream.
+    let wrote = hub.call(
+        "terminal.write",
+        serde_json::json!({ "shell": id, "text": "echo typed:$((40+2))\n" }),
+    );
+    assert_eq!(wrote["ok"], true, "{wrote}");
+    read_until(&mut reader, &mut seen, "typed:42");
+    let ping = hub.call("ping", serde_json::json!({}));
+    assert!(
+        ping["result"]["exe"].as_str().is_some_and(|exe| exe.ends_with("hub")),
+        "{ping}"
+    );
 
     let mut events = UnixStream::connect(hub.state.join("hubd.sock")).unwrap();
     let request = serde_json::json!({ "method": "events", "params": { "repo": repo } });
@@ -964,102 +960,6 @@ fn read_until(reader: &mut impl Read, seen: &mut Vec<u8>, want: &str) {
         assert!(n > 0, "stream ended before {want:?}: {}", String::from_utf8_lossy(seen));
         seen.extend_from_slice(&buf[..n]);
     }
-}
-
-#[test]
-fn a_multiplexer_shows_an_agent_and_follows_it_through_restarts() {
-    let hub = Hub::new("mux");
-    let out = hub.run_with(&["status"], &[("HUB_SHELL", "/bin/sh")]);
-    assert!(out.status.success());
-    let repo = hub.repo_key();
-    let opened = hub.call(
-        "agent.open",
-        serde_json::json!({ "repo": repo, "kind": "claude", "name": "echo me" }),
-    );
-    let agent = opened["result"]["agent"].as_i64().unwrap();
-    // A stand-in for `tmux new-session -A -s {session} -c {dir} {command}`.
-    let command = "printf 'mux %s in %s\\n' {session} {dir}; sh -c {command}";
-    let mux = hub.call("mux.open", serde_json::json!({ "agent": agent, "command": command }));
-    assert_eq!(mux["ok"], true, "{mux}");
-    let shell = mux["result"]["shell"].as_i64().unwrap();
-    assert_eq!(mux["result"]["session"], format!("echo-repo-a{agent}"));
-    let again = hub.call("mux.open", serde_json::json!({ "agent": agent, "command": command }));
-    assert_eq!(again["result"]["shell"], shell, "one multiplexer shell per agent");
-
-    let mut stream = UnixStream::connect(hub.state.join("hubd.sock")).unwrap();
-    let request = serde_json::json!({ "method": "attach", "params": { "shell": shell, "rows": 30, "cols": 100 } });
-    stream.write_all(format!("{request}\n").as_bytes()).unwrap();
-    stream.set_read_timeout(Some(Duration::from_secs(15))).unwrap();
-    let mut reader = BufReader::new(stream.try_clone().unwrap());
-    let mut line = String::new();
-    reader.read_line(&mut line).unwrap();
-    assert!(line.contains("\"ok\":true"), "{line}");
-    let mut seen = Vec::new();
-    read_until(&mut reader, &mut seen, &format!("mux echo-repo-a{agent} in {repo}"));
-    read_until(&mut reader, &mut seen, "Working");
-    stream.write_all(b"hello\r").unwrap();
-    read_until(&mut reader, &mut seen, "got: hello");
-
-    hub.call("agent.close", serde_json::json!({ "agent": agent }));
-    read_until(&mut reader, &mut seen, "picks it up again when it starts");
-    hub.call("agent.open", serde_json::json!({ "agent": agent }));
-    seen.clear();
-    read_until(&mut reader, &mut seen, "Working");
-    stream.write_all(b"again\r").unwrap();
-    read_until(&mut reader, &mut seen, "got: again");
-
-    hub.call("agent.forget", serde_json::json!({ "agent": agent }));
-    read_until(&mut reader, &mut seen, &format!("a{agent} is closed"));
-    hub.eventually("the multiplexer shell to exit", || {
-        snapshot(&hub)["shells"] == serde_json::json!([])
-    });
-}
-
-#[test]
-fn tmux_runs_the_agent_in_its_first_pane() {
-    if Command::new("tmux").arg("-V").output().is_err() {
-        eprintln!("tmux is not installed; skipping");
-        return;
-    }
-    let hub = Hub::new("tmux");
-    let out = hub.run_with(&["status"], &[("HUB_SHELL", "/bin/sh")]);
-    assert!(out.status.success());
-    let socket = format!("hubt{}", std::process::id());
-    let opened = hub.call(
-        "agent.open",
-        serde_json::json!({ "repo": hub.repo_key(), "kind": "claude", "name": "echo me" }),
-    );
-    let agent = opened["result"]["agent"].as_i64().unwrap();
-    // Echo's default, on a private tmux server.
-    let command = format!("tmux -L {socket} new-session -A -s {{session}} -c {{dir}} {{command}}");
-    let mux = hub.call("mux.open", serde_json::json!({ "agent": agent, "command": command }));
-    let shell = mux["result"]["shell"].as_i64().expect("a shell");
-
-    let mut stream = UnixStream::connect(hub.state.join("hubd.sock")).unwrap();
-    let request = serde_json::json!({ "method": "attach", "params": { "shell": shell, "rows": 30, "cols": 100 } });
-    stream.write_all(format!("{request}\n").as_bytes()).unwrap();
-    stream.set_read_timeout(Some(Duration::from_secs(15))).unwrap();
-    let mut reader = BufReader::new(stream.try_clone().unwrap());
-    let mut line = String::new();
-    reader.read_line(&mut line).unwrap();
-    let mut seen = Vec::new();
-    read_until(&mut reader, &mut seen, "Working");
-    stream.write_all(b"hello\r").unwrap();
-    read_until(&mut reader, &mut seen, "got: hello");
-    let panes = Command::new("tmux")
-        .args([
-            "-L",
-            &socket,
-            "list-panes",
-            "-t",
-            &format!("echo-repo-a{agent}"),
-            "-F",
-            "#{pane_current_command}",
-        ])
-        .output()
-        .unwrap();
-    let _ = Command::new("tmux").args(["-L", &socket, "kill-server"]).output();
-    assert!(panes.status.success(), "{}", String::from_utf8_lossy(&panes.stderr));
 }
 
 #[test]
@@ -1097,4 +997,219 @@ fn hub_opens_the_orchestrator_working_in_this_checkout() {
         "the repo's own checkout"
     );
     assert_eq!(session(serde_json::json!({})), first, "an older client");
+}
+
+#[test]
+fn an_attached_terminal_passes_its_resize_on() {
+    use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+    let hub = Hub::new("winch");
+    assert!(hub.run_with(&["status"], &[("HUB_SHELL", "/bin/sh")]).status.success());
+    let opened = hub.call("shell.open", serde_json::json!({ "repo": hub.repo_key() }));
+    let id = opened["result"]["shell"].as_i64().expect("a shell id");
+
+    // `hub attach --echo`, as an Echo pane runs it, in a terminal that grows after it attaches.
+    let size = |rows, cols| PtySize {
+        rows,
+        cols,
+        pixel_width: 0,
+        pixel_height: 0,
+    };
+    let pair = native_pty_system().openpty(size(16, 47)).unwrap();
+    let mut command = CommandBuilder::new(env!("CARGO_BIN_EXE_hub"));
+    command.args(["attach", "--echo", &format!("s{id}")]);
+    command.env("HUB_STATE", &hub.state);
+    let mut child = pair.slave.spawn_command(command).unwrap();
+    let mut output = pair.master.try_clone_reader().unwrap();
+    std::thread::spawn(move || std::io::copy(&mut output, &mut std::io::sink()));
+    hub.eventually("the pane to attach at its size", || {
+        hub.call(
+            "terminal.write",
+            serde_json::json!({ "shell": id, "text": "stty size\n" }),
+        );
+        screen_of(&hub, id).contains("16 47")
+    });
+    pair.master.resize(size(61, 144)).unwrap();
+    hub.eventually("the resize to reach the shell", || {
+        hub.call(
+            "terminal.write",
+            serde_json::json!({ "shell": id, "text": "stty size\n" }),
+        );
+        screen_of(&hub, id).contains("61 144")
+    });
+    child.kill().unwrap();
+}
+
+/// What a shell's terminal shows now: its redrawn screen, read without resizing it.
+fn screen_of(hub: &Hub, shell: i64) -> String {
+    let mut stream = UnixStream::connect(hub.state.join("hubd.sock")).unwrap();
+    let request = serde_json::json!({ "method": "attach", "params": { "shell": shell } });
+    stream.write_all(format!("{request}\n").as_bytes()).unwrap();
+    stream.set_read_timeout(Some(Duration::from_millis(500))).unwrap();
+    let mut seen = Vec::new();
+    let mut buf = [0u8; 4096];
+    while let Ok(n) = stream.read(&mut buf) {
+        if n == 0 {
+            break;
+        }
+        seen.extend_from_slice(&buf[..n]);
+    }
+    String::from_utf8_lossy(&seen).into_owned()
+}
+
+/// `hub mux` in a terminal of its own, as an Echo pane runs it: what it prints, and keys to type.
+struct MuxPane {
+    output: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    keys: Box<dyn Write + Send>,
+    child: Box<dyn portable_pty::Child + Send + Sync>,
+}
+
+impl MuxPane {
+    fn start(hub: &Hub, line: &str) -> MuxPane {
+        use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+        let pair = native_pty_system()
+            .openpty(PtySize {
+                rows: 30,
+                cols: 100,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .unwrap();
+        let mut command = CommandBuilder::new(env!("CARGO_BIN_EXE_hub"));
+        command.arg("mux");
+        command.env("HUB_STATE", &hub.state);
+        command.env("HUB_SHELL", "/bin/sh");
+        command.env("HUB_MUX", line);
+        let child = pair.slave.spawn_command(command).unwrap();
+        let output = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = std::sync::Arc::clone(&output);
+        let mut reader = pair.master.try_clone_reader().unwrap();
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 4096];
+            while let Ok(n) = reader.read(&mut buf) {
+                if n == 0 {
+                    break;
+                }
+                sink.lock().unwrap().extend_from_slice(&buf[..n]);
+            }
+        });
+        let keys = pair.master.take_writer().unwrap();
+        MuxPane { output, keys, child }
+    }
+
+    fn wait_for(&self, want: &str) {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            let seen = String::from_utf8_lossy(&self.output.lock().unwrap()).into_owned();
+            if seen.contains(want) {
+                return;
+            }
+            assert!(Instant::now() < deadline, "no {want:?} in {seen}");
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+
+    fn clear(&self) {
+        self.output.lock().unwrap().clear();
+    }
+
+    fn type_keys(&mut self, keys: &[u8]) {
+        self.keys.write_all(keys).unwrap();
+        self.keys.flush().unwrap();
+    }
+}
+
+#[test]
+fn a_multiplexer_line_names_its_session_and_dir() {
+    let hub = Hub::new("muxline");
+    hub.ok(&["status"]);
+    let opened = hub.call(
+        "agent.open",
+        serde_json::json!({ "repo": hub.repo_key(), "kind": "claude", "name": "sleeper" }),
+    );
+    let agent = opened["result"]["agent"].as_i64().unwrap();
+    let mux = hub.call(
+        "mux.command",
+        serde_json::json!({ "agent": agent, "command": "tmux new-session -A -s {session} -c {dir} {command}" }),
+    );
+    assert_eq!(mux["result"]["session"], format!("echo-repo-a{agent}"), "{mux}");
+    let line = mux["result"]["command"].as_str().unwrap();
+    assert!(
+        line.starts_with(&format!("tmux new-session -A -s echo-repo-a{agent} -c ")),
+        "{line}"
+    );
+    assert!(line.contains(&format!("attach --follow a{agent}")), "{line}");
+    assert!(
+        snapshot(&hub)["shells"] == serde_json::json!([]),
+        "no daemon shell runs it"
+    );
+}
+
+#[test]
+fn a_multiplexer_shows_an_agent_and_follows_it_through_restarts() {
+    let hub = Hub::new("mux");
+    let repo = hub.repo_key();
+    hub.ok(&["status"]);
+    let opened = hub.call(
+        "agent.open",
+        serde_json::json!({ "repo": repo, "kind": "claude", "name": "echo me" }),
+    );
+    let agent = opened["result"]["agent"].as_i64().unwrap();
+    // A stand-in for `tmux new-session -A -s {session} -c {dir} {command}`.
+    let command = "printf 'mux %s in %s\\n' {session} {dir}; sh -c {command}";
+    let mux = hub.call("mux.command", serde_json::json!({ "agent": agent, "command": command }));
+    let mut pane = MuxPane::start(&hub, mux["result"]["command"].as_str().unwrap());
+    pane.wait_for(&format!("mux echo-repo-a{agent} in {repo}"));
+    pane.wait_for("Working");
+    pane.type_keys(b"hello\r");
+    pane.wait_for("got: hello");
+
+    hub.call("agent.close", serde_json::json!({ "agent": agent }));
+    pane.wait_for("picks it up again when it starts");
+    hub.call("agent.open", serde_json::json!({ "agent": agent }));
+    pane.clear();
+    pane.wait_for("Working");
+    pane.type_keys(b"again\r");
+    pane.wait_for("got: again");
+
+    hub.call("agent.forget", serde_json::json!({ "agent": agent }));
+    pane.wait_for(&format!("a{agent} is closed"));
+    hub.eventually("the multiplexer to exit", || pane.child.try_wait().unwrap().is_some());
+}
+
+#[test]
+fn tmux_runs_the_agent_in_its_first_pane() {
+    if Command::new("tmux").arg("-V").output().is_err() {
+        eprintln!("tmux is not installed; skipping");
+        return;
+    }
+    let hub = Hub::new("tmux");
+    hub.ok(&["status"]);
+    let socket = format!("hubt{}", std::process::id());
+    let opened = hub.call(
+        "agent.open",
+        serde_json::json!({ "repo": hub.repo_key(), "kind": "claude", "name": "echo me" }),
+    );
+    let agent = opened["result"]["agent"].as_i64().unwrap();
+    // Echo's default, on a private tmux server.
+    let command = format!("tmux -L {socket} new-session -A -s {{session}} -c {{dir}} {{command}}");
+    let mux = hub.call("mux.command", serde_json::json!({ "agent": agent, "command": command }));
+    let mut pane = MuxPane::start(&hub, mux["result"]["command"].as_str().unwrap());
+    pane.wait_for("Working");
+    pane.type_keys(b"hello\r");
+    pane.wait_for("got: hello");
+    let panes = Command::new("tmux")
+        .args([
+            "-L",
+            &socket,
+            "list-panes",
+            "-t",
+            &format!("echo-repo-a{agent}"),
+            "-F",
+            "#{pane_current_command}",
+        ])
+        .output()
+        .unwrap();
+    let _ = Command::new("tmux").args(["-L", &socket, "kill-server"]).output();
+    let _ = pane.child.kill();
+    assert!(panes.status.success(), "{}", String::from_utf8_lossy(&panes.stderr));
 }

@@ -370,7 +370,7 @@ func row(_ id: String, phase: String, quiet: Int, model: String? = nil, effort: 
 @Test func terminalTargetsNameThemselvesLikeHubAttach() {
     #expect(TerminalTarget.agent(id: 3).label == "a3")
     #expect(TerminalTarget.worker(id: 21).label == "w21")
-    #expect(TerminalTarget.shell(id: 7).params["shell"] as? Int == 7)
+    #expect(TerminalTarget.worker(id: 21).params["id"] as? Int == 21)
 }
 
 @Test(.timeLimit(.minutes(1))) func readsALineThatArrivesInTwoReads() throws {
@@ -540,4 +540,16 @@ func row(_ id: String, phase: String, quiet: Int, model: String? = nil, effort: 
         return nil
     }
     #expect(numbers == [1, 2, 1, 2, 3, 3, 4])
+}
+
+@Test func theLookBecomesAGhosttyConfig() {
+    let plain = TerminalAppearance.orca.ghosttyConfig
+    #expect(plain.contains("font-family = JetBrainsMono Nerd Font\n"))
+    #expect(plain.contains("background = #0a0e14\n"))
+    #expect(plain.contains("palette = 15=#ffffff\n"))
+    #expect(plain.contains("background-opacity = 1\n"))
+    #expect(plain.contains("keybind = clear\n"), "Ghostty's own shortcuts would take Echo's")
+    var image = TerminalAppearance.orca
+    image.backgroundImage = "/tmp/a.png"
+    #expect(image.ghosttyConfig.contains("background-opacity = 0\n"))
 }

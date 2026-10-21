@@ -97,15 +97,12 @@ enum Multiplexer: String, CaseIterable, Identifiable {
     }
 }
 
-/// The multiplexer shell showing one agent or Worker.
+/// The multiplexer showing one agent or Worker, run by its terminal pane itself.
 struct MuxShell: Equatable {
-    let repo: String
-    let shell: Int
+    /// The line the pane runs in a login shell, with the session, folder, and attach filled in.
+    let command: String
     /// The multiplexer's own name for it, like `echo-lanh-a3`.
     var session: String?
-    let opened: Date
-    /// Whether a snapshot has listed it yet.
-    var seen = false
 }
 
 /// The app's state: every repo the daemon knows, each one's live snapshot, and the selection.
@@ -287,7 +284,7 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// The multiplexer shell showing each agent or Worker, once the daemon has started it.
+    /// The multiplexer line for each agent or Worker, once the daemon has filled it in.
     @Published private(set) var muxShells: [TerminalTarget: MuxShell] = [:]
     /// Targets whose multiplexer command failed: they show their plain terminal.
     @Published private(set) var muxFailed: Set<TerminalTarget> = []
@@ -680,7 +677,6 @@ final class AppModel: ObservableObject {
             Notifier.post(need, repo: repo, agent: need.agent.flatMap { snapshot.agent($0) })
         }
         trackers[repo] = tracker
-        forgetEndedMuxes(in: repo, shells: snapshot.shells)
         // A report that arrives while its Worker is on screen has been seen; only as it arrives,
         // so Mark as Unread on the Worker being looked at holds.
         if case .worker(repo, let id)? = selection, let worker = snapshot.workers.first(where: { $0.id == id }),
@@ -712,47 +708,39 @@ final class AppModel: ObservableObject {
 
     // MARK: Multiplexer
 
-    /// What a terminal view attaches to: the multiplexer around `target` when that is on and
-    /// running, `target` itself when it is off or failed, nil while the multiplexer starts.
-    func shownTarget(for target: TerminalTarget) -> TerminalTarget? {
-        guard multiplexer.enabled, !muxFailed.contains(target) else { return target }
-        return muxShells[target].map { .shell(id: $0.shell) }
+    /// What a terminal pane runs for `target`: the multiplexer line when that is on, `.attach`
+    /// (the target itself) when it is off or failed, nil while the line is being fetched.
+    func paneCommand(for target: TerminalTarget) -> PaneCommand? {
+        guard multiplexer.enabled, !muxFailed.contains(target) else { return .attach }
+        return muxShells[target].map { .mux($0.command) }
     }
 
     /// Starts the multiplexer around `target` unless it runs, is starting, or failed.
-    func ensureMux(_ target: TerminalTarget, repo: String) {
+    func ensureMux(_ target: TerminalTarget) {
         guard multiplexer.enabled, !muxFailed.contains(target), muxShells[target] == nil,
               !muxPending.contains(target) else { return }
         muxPending.insert(target)
         let command = multiplexer.command
         background { client in
-            try client.openMux(target, command: command)
-        } then: { opened in
+            try client.muxCommand(target, command: command)
+        } then: { mux in
             self.muxPending.remove(target)
-            self.muxShells[target] = MuxShell(repo: repo, shell: opened.shell, session: opened.session, opened: Date())
+            self.muxShells[target] = MuxShell(command: mux.command, session: mux.session)
         } failed: {
             self.muxPending.remove(target)
             self.muxFailed.insert(target)
         }
     }
 
-    /// Drops multiplexer shells that exited (the human quit the multiplexer, or it could not
-    /// start); the view then starts a new one. One that exits right away marks the command as
-    /// failing for that target, so it shows its plain terminal instead of retrying forever.
-    private func forgetEndedMuxes(in repo: String, shells: [Int]?) {
-        guard let shells else { return }
-        let alive = Set(shells)
-        for (target, mux) in muxShells where mux.repo == repo {
-            let age = Date().timeIntervalSince(mux.opened)
-            if alive.contains(mux.shell) {
-                if !mux.seen { muxShells[target]?.seen = true }
-            } else if mux.seen || age > 3 {
-                muxShells[target] = nil
-                if age < 5 {
-                    muxFailed.insert(target)
-                    error = "The multiplexer command exited right away, so \(target.label) shows its own terminal. Check the command in Settings."
-                }
-            }
+    /// The multiplexer in `target`'s pane exited after `seconds`: the human quit it, so the
+    /// pane starts a new one; or it could not start, so `target` shows its own terminal rather
+    /// than retrying forever.
+    func muxExited(_ target: TerminalTarget, after seconds: Double) {
+        guard muxShells[target] != nil else { return }
+        muxShells[target] = nil
+        if seconds < 5 {
+            muxFailed.insert(target)
+            error = "The multiplexer command exited right away, so \(target.label) shows its own terminal. Check the command in Settings."
         }
     }
 
