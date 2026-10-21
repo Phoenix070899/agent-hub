@@ -192,12 +192,14 @@ struct FilePreviewPanel: View {
                     .padding(24)
             }
         case .pdf(let document):
-            PDFPreview(document: document)
+            // A web view or PDF view is an AppKit view that opacity does not hide, so it is only
+            // in the tree while its tab is shown (the page loads again on return).
+            if active { PDFPreview(document: document) }
         case .text(let lines, let cut):
             CodeLines(lines: lines, changed: content.changed, cut: cut, focus: active ? model.previewLine : nil)
         case .html(let lines, let cut):
             if content.rendered {
-                WebPreview(file: file, reloads: content.reloads)
+                if active { WebPreview(file: file, reloads: content.reloads) }
             } else {
                 CodeLines(lines: lines, changed: content.changed, cut: cut, focus: active ? model.previewLine : nil)
             }
