@@ -164,10 +164,15 @@ final class AppModel: ObservableObject {
         (UserDefaults.standard.dictionary(forKey: "openFolders") as? [String: [String]] ?? [:]).mapValues(Set.init) {
         didSet { UserDefaults.standard.set(openFolderMap.mapValues { Array($0) }, forKey: "openFolders") }
     }
-    /// The file shown over the terminal; Esc goes back.
+    /// The file shown over the terminal; nil is the Terminal tab. Esc goes back to it.
     @Published var preview: FileRef? {
-        didSet { previewLine = nil }
+        didSet {
+            previewLine = nil
+            if let preview, !openPreviews.contains(preview) { openPreviews.append(preview) }
+        }
     }
+    /// Every file with a tab, in the order they were opened; they stay open until closed.
+    @Published private(set) var openPreviews: [FileRef] = []
     /// The line a text search hit opened the preview at, 1-based.
     @Published private(set) var previewLine: Int?
     /// The ledger's and the Files column's widths, as the human dragged them.
@@ -181,6 +186,17 @@ final class AppModel: ObservableObject {
     private static func width(_ key: String, or fallback: CGFloat) -> CGFloat {
         let saved = UserDefaults.standard.double(forKey: key)
         return saved > 0 ? CGFloat(saved) : fallback
+    }
+
+    /// Closes a file's tab; if it was the one shown, the next tab in that checkout (else the
+    /// one before, else the terminal) takes over.
+    func closePreview(_ file: FileRef) {
+        let tabs = openPreviews.filter { $0.root == file.root }
+        let next = tabs.firstIndex(of: file).flatMap { index in
+            index + 1 < tabs.count ? tabs[index + 1] : index > 0 ? tabs[index - 1] : nil
+        }
+        openPreviews.removeAll { $0 == file }
+        if preview == file { preview = next }
     }
 
     func showPreview(_ file: FileRef, line: Int) {

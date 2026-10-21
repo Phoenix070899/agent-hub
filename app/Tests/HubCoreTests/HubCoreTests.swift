@@ -164,6 +164,7 @@ Binary files a/logo.png and /dev/null differ
 @Test func filesAreToldApartForPreview() {
     #expect(fileKind(path: "a.png", head: Data()) == .image)
     #expect(fileKind(path: "a.pdf", head: Data()) == .pdf)
+    #expect(fileKind(path: "index.html", head: Data()) == .html)
     #expect(fileKind(path: "a.bin", head: Data([0x41, 0x00, 0x42])) == .binary)
     #expect(fileKind(path: "README.md", head: Data("# hi".utf8)) == .markdown)
     #expect(fileKind(path: "main.rs", head: Data("fn main() {}".utf8)) == .text)

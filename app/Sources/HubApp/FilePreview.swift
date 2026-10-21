@@ -3,22 +3,25 @@ import Highlightr
 import HubCore
 import PDFKit
 import SwiftUI
+import WebKit
 
-/// A file over the terminal, under a "Terminal | file" tab strip: code with line numbers and
-/// colours, Markdown rendered, images and PDFs as they look. Esc goes back to the terminal, which
-/// stays attached underneath. It reads the file again whenever the checkout changes.
+/// A file over the terminal, under the "Terminal | file | file" tab strip: code with line numbers
+/// and colours, Markdown rendered, images and PDFs as they look. Esc goes back to the terminal,
+/// which stays attached underneath, and the file keeps its tab. A file that is not the one shown
+/// stays loaded but hidden. It reads the file again whenever the checkout changes.
 struct FilePreviewPanel: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.colorScheme) private var scheme
     let file: FileRef
     @ObservedObject var files: CheckoutFiles
+    /// This file's tab is the one shown.
+    let active: Bool
     @StateObject private var content = PreviewContent()
     @StateObject private var notes = NotesState()
     @FocusState private var focused: Bool
 
     var body: some View {
         VStack(spacing: 0) {
-            tabs
             header
             Divider().overlay(Ledger.rule)
             body(of: content.state)
@@ -26,6 +29,9 @@ struct FilePreviewPanel: View {
                 .background(Ledger.paper)
             notesBar
         }
+        .opacity(active ? 1 : 0)
+        .disabled(!active)
+        .accessibilityHidden(!active)
         .focusable()
         .focused($focused)
         .focusEffectDisabled()
@@ -41,7 +47,7 @@ struct FilePreviewPanel: View {
         // In rendered Markdown, ↑ and ↓ pick a block and Return leaves a note on it. Keys typed in
         // a note bubble up here too; while one is being written, they are its own.
         .onKeyPress(keys: [.downArrow, .upArrow, .return]) { press in
-            guard notesOpen, notes.editing == nil, press.modifiers.isDisjoint(with: [.command, .option, .control]),
+            guard active, notesOpen, notes.editing == nil, press.modifiers.isDisjoint(with: [.command, .option, .control]),
                   case .markdown(let blocks, _, _, _) = content.state, !blocks.isEmpty else { return .ignored }
             if press.key == .return {
                 guard let cursor = notes.cursor else { return .ignored }
@@ -54,60 +60,24 @@ struct FilePreviewPanel: View {
         }
         // ⇧Tab gives the keyboard back to the tree.
         .onKeyPress(.tab) {
-            guard NSEvent.modifierFlags.contains(.shift), model.filesShown, notes.editing == nil else { return .ignored }
+            guard active, NSEvent.modifierFlags.contains(.shift), model.filesShown, notes.editing == nil else { return .ignored }
             model.filesFocusRequest += 1
             return .handled
         }
-        .onChange(of: model.previewFocusRequest) { focused = true }
+        .onChange(of: model.previewFocusRequest) { if active { focused = true } }
+        .onChange(of: active) { if active, !model.treeFocused { focused = true } }
         .onChange(of: file) {
             notes.cursor = nil
             notes.editing = nil
         }
         // From the tree, the tree keeps the keyboard (Space, arrows, Esc); from Quick Open, Esc
         // needs the preview to hold it.
-        .onAppear { if !model.treeFocused { focused = true } }
+        .onAppear { if active, !model.treeFocused { focused = true } }
         // A search hit points at a line, which only the source shows.
-        .onChange(of: model.previewLine, initial: true) { if model.previewLine != nil { content.rendered = false } }
+        .onChange(of: model.previewLine, initial: true) { if active, model.previewLine != nil { content.rendered = false } }
         .task(id: "\(file.root)|\(file.path)|\(files.generation)|\(scheme == .dark)") {
             await content.load(file, dark: scheme == .dark)
         }
-    }
-
-    private var tabs: some View {
-        HStack(spacing: 2) {
-            Button { model.preview = nil } label: {
-                HStack(spacing: 6) {
-                    Image(systemName: "terminal").font(.system(size: 11))
-                    Text("Terminal")
-                }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 6)
-                .foregroundStyle(Ledger.ink2)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            HStack(spacing: 8) {
-                Text(file.name).foregroundStyle(Ledger.ink)
-                Button { model.preview = nil } label: {
-                    Image(systemName: "xmark").font(.system(size: 9, weight: .bold))
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(Ledger.ink3)
-                .accessibilityLabel("Close \(file.name)")
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 6)
-            .background(Ledger.paper, in: UnevenRoundedRectangle(topLeadingRadius: 6, topTrailingRadius: 6))
-            Spacer(minLength: 8)
-            Text("Esc returns to the terminal")
-                .font(.system(size: 12))
-                .foregroundStyle(Ledger.ink3)
-                .padding(.trailing, 6)
-        }
-        .font(.system(size: 13, weight: .medium))
-        .padding(.top, 6)
-        .padding(.horizontal, 8)
-        .background(Ledger.band)
     }
 
     /// Notes can be written on the file: Markdown, shown rendered.
@@ -171,7 +141,7 @@ struct FilePreviewPanel: View {
                     .foregroundStyle(mark == .modified || mark == .renamed ? Ledger.changed : mark == .deleted ? Ledger.fail : Ledger.done)
             }
             Spacer(minLength: 8)
-            if case .markdown = content.state {
+            if content.state.hasRenderedView {
                 Picker("View", selection: $content.rendered) {
                     Text("Rendered").tag(true)
                     Text("Source").tag(false)
@@ -183,6 +153,11 @@ struct FilePreviewPanel: View {
             Button("Reveal in Finder") { model.revealInFinder(file) }
                 .buttonStyle(.ledgerLink)
                 .fixedSize()
+            if case .html = content.state {
+                Button("Open in browser") { NSWorkspace.shared.open(file.url) }
+                    .buttonStyle(.ledgerLink)
+                    .fixedSize()
+            }
             Button("Open") { model.openInEditor(file) }
                 .buttonStyle(.ledgerLink)
                 .fixedSize()
@@ -219,13 +194,19 @@ struct FilePreviewPanel: View {
         case .pdf(let document):
             PDFPreview(document: document)
         case .text(let lines, let cut):
-            CodeLines(lines: lines, changed: content.changed, cut: cut, focus: model.previewLine)
+            CodeLines(lines: lines, changed: content.changed, cut: cut, focus: active ? model.previewLine : nil)
+        case .html(let lines, let cut):
+            if content.rendered {
+                WebPreview(file: file, reloads: content.reloads)
+            } else {
+                CodeLines(lines: lines, changed: content.changed, cut: cut, focus: active ? model.previewLine : nil)
+            }
         case .markdown(let blocks, let spans, let lines, let cut):
             if content.rendered {
                 MarkdownView(blocks: blocks, spans: spans, source: lines.map { String($0.characters) },
                              file: file, notes: notes) { focused = true }
             } else {
-                CodeLines(lines: lines, changed: content.changed, cut: cut, focus: model.previewLine)
+                CodeLines(lines: lines, changed: content.changed, cut: cut, focus: active ? model.previewLine : nil)
             }
         }
     }
@@ -246,6 +227,63 @@ struct FilePreviewPanel: View {
     }
 }
 
+/// The strip over the main panel: the Terminal, then a tab for each open file of this checkout.
+struct PreviewTabs: View {
+    @EnvironmentObject private var model: AppModel
+    let files: [FileRef]
+
+    var body: some View {
+        HStack(spacing: 2) {
+            tab(active: model.preview == nil) {
+                Button { model.preview = nil } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "terminal").font(.system(size: 11))
+                        Text("Terminal")
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+            ForEach(files, id: \.self) { file in
+                tab(active: model.preview == file) {
+                    HStack(spacing: 8) {
+                        Button { model.preview = file } label: {
+                            Text(file.name).lineLimit(1).contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .help(file.path)
+                        Button { model.closePreview(file) } label: {
+                            Image(systemName: "xmark").font(.system(size: 9, weight: .bold))
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(Ledger.ink3)
+                        .accessibilityLabel("Close \(file.name)")
+                    }
+                }
+            }
+            Spacer(minLength: 8)
+            if model.preview != nil {
+                Text("Esc returns to the terminal")
+                    .font(.system(size: 12))
+                    .foregroundStyle(Ledger.ink3)
+                    .padding(.trailing, 6)
+            }
+        }
+        .font(.system(size: 13, weight: .medium))
+        .padding(.top, 6)
+        .padding(.horizontal, 8)
+        .background(Ledger.band)
+    }
+
+    private func tab<Content: View>(active: Bool, @ViewBuilder _ content: () -> Content) -> some View {
+        content()
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+            .foregroundStyle(active ? Ledger.ink : Ledger.ink2)
+            .background(active ? Ledger.paper : Color.clear, in: UnevenRoundedRectangle(topLeadingRadius: 6, topTrailingRadius: 6))
+    }
+}
+
 /// Reads and colours the previewed file off the main thread.
 @MainActor
 final class PreviewContent: ObservableObject {
@@ -258,11 +296,23 @@ final class PreviewContent: ObservableObject {
         case text([AttributedString], cut: Bool)
         /// The blocks, the source lines each was read from, and the source coloured.
         case markdown([MarkdownBlock], [ClosedRange<Int>], [AttributedString], cut: Bool)
+        /// The source coloured; the page itself is drawn by the web view from the file.
+        case html([AttributedString], cut: Bool)
+
+        /// Markdown and HTML can show rendered or as source.
+        var hasRenderedView: Bool {
+            switch self {
+            case .markdown, .html: true
+            default: false
+            }
+        }
     }
 
     @Published var state: State = .loading
     /// Markdown shows rendered unless the human picked Source.
     @Published var rendered = true
+    /// Counts reads, so the web view loads the page again when the file changes.
+    @Published var reloads = 0
     /// Lines that just changed, highlighted for a moment.
     @Published var changed: Set<Int> = []
 
@@ -289,6 +339,7 @@ final class PreviewContent: ObservableObject {
                 let text = String(decoding: data.prefix(Self.limit), as: UTF8.self)
                 let plain = text.components(separatedBy: "\n")
                 let lines = Self.colour(text, path: path, dark: dark) ?? plain.map { AttributedString($0) }
+                if kind == .html { return (.html(lines, cut: cut), plain) }
                 if kind == .markdown {
                     let read = parseMarkdownLines(text)
                     return (.markdown(read.blocks, read.lines, lines, cut: cut), plain)
@@ -309,6 +360,7 @@ final class PreviewContent: ObservableObject {
         }
         shown = read.1.map { (path, $0) }
         state = read.0
+        reloads += 1
     }
 
     /// The file coloured by Highlightr, one AttributedString per line; nil for plain text.
@@ -350,7 +402,7 @@ final class PreviewContent: ObservableObject {
             "json": "json", "yml": "yaml", "yaml": "yaml", "toml": "ini", "ini": "ini", "md": "markdown",
             "markdown": "markdown", "sh": "bash", "zsh": "bash", "bash": "bash", "go": "go", "java": "java",
             "kt": "kotlin", "rb": "ruby", "c": "c", "h": "c", "m": "objectivec", "cpp": "cpp", "hpp": "cpp",
-            "cc": "cpp", "css": "css", "scss": "scss", "html": "xml", "xml": "xml", "plist": "xml",
+            "cc": "cpp", "css": "css", "scss": "scss", "html": "xml", "htm": "xml", "xml": "xml", "plist": "xml",
             "svg": "xml", "sql": "sql", "lua": "lua", "php": "php", "cs": "csharp", "dart": "dart",
             "ex": "elixir", "exs": "elixir", "hs": "haskell", "scala": "scala", "vue": "xml",
         ]
@@ -779,5 +831,41 @@ private struct PDFPreview: NSViewRepresentable {
 
     func updateNSView(_ view: PDFView, context: Context) {
         if view.document !== document { view.document = document }
+    }
+}
+
+/// An HTML file drawn by a web view, with the checkout readable so its styles, scripts, and
+/// images load. Links to other sites open in the browser.
+private struct WebPreview: NSViewRepresentable {
+    let file: FileRef
+    let reloads: Int
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    func makeNSView(context: Context) -> WKWebView {
+        let view = WKWebView(frame: .zero)
+        view.navigationDelegate = context.coordinator
+        return view
+    }
+
+    func updateNSView(_ view: WKWebView, context: Context) {
+        let coordinator = context.coordinator
+        guard coordinator.loaded.file != file || coordinator.loaded.reloads != reloads else { return }
+        coordinator.loaded = (file, reloads)
+        view.loadFileURL(file.url, allowingReadAccessTo: URL(fileURLWithPath: file.root))
+    }
+
+    final class Coordinator: NSObject, WKNavigationDelegate {
+        var loaded: (file: FileRef?, reloads: Int) = (nil, -1)
+
+        func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction,
+                     decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+            if let url = action.request.url, action.navigationType == .linkActivated, !url.isFileURL {
+                NSWorkspace.shared.open(url)
+                decisionHandler(.cancel)
+            } else {
+                decisionHandler(.allow)
+            }
+        }
     }
 }

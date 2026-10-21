@@ -727,26 +727,33 @@ struct MainPanel: View {
     @EnvironmentObject private var model: AppModel
 
     var body: some View {
-        Group {
-            switch model.selection {
-            case .agent(let repo, let id)?:
-                if let agent = model.agents(repo).first(where: { $0.id == id }) {
-                    AgentPanel(repo: repo, agent: agent)
-                } else {
-                    ContentUnavailableView("That session is closed", systemImage: "questionmark.square.dashed",
-                                           description: Text("Pick another agent in the ledger."))
+        let tabs = model.openPreviews.filter { $0.root == model.selectedCheckout }
+        VStack(spacing: 0) {
+            if !tabs.isEmpty { PreviewTabs(files: tabs) }
+            Group {
+                switch model.selection {
+                case .agent(let repo, let id)?:
+                    if let agent = model.agents(repo).first(where: { $0.id == id }) {
+                        AgentPanel(repo: repo, agent: agent)
+                    } else {
+                        ContentUnavailableView("That session is closed", systemImage: "questionmark.square.dashed",
+                                               description: Text("Pick another agent in the ledger."))
+                    }
+                case .worker(let repo, let id)?:
+                    WorkerPanel(repo: repo, id: id)
+                case nil:
+                    FirstLaunch()
                 }
-            case .worker(let repo, let id)?:
-                WorkerPanel(repo: repo, id: id)
-            case nil:
-                FirstLaunch()
             }
-        }
-        // A previewed file covers the panel; the terminal stays attached underneath.
-        .overlay {
-            if let file = model.preview, file.root == model.selectedCheckout {
-                FilePreviewPanel(file: file, files: model.checkoutFiles(file.root))
-                    .background(Ledger.paper)
+            // Previewed files cover the panel; the terminal stays attached underneath, and each
+            // file keeps its scroll and view while another tab is shown.
+            .overlay {
+                ZStack {
+                    ForEach(tabs, id: \.self) { file in
+                        FilePreviewPanel(file: file, files: model.checkoutFiles(file.root), active: model.preview == file)
+                            .background(Ledger.paper)
+                    }
+                }
             }
         }
         .ledgerSheet()

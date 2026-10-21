@@ -160,6 +160,7 @@ public func folderHasChanges(_ folder: String, in marks: [String: GitMark]) -> B
 public enum FileKind: Equatable, Sendable {
     case text
     case markdown
+    case html
     case image
     case pdf
     case binary
@@ -172,6 +173,7 @@ public func fileKind(path: String, head: Data) -> FileKind {
     // A NUL in the first 8 KB means a binary file, as git decides.
     if head.prefix(8192).contains(0) { return .binary }
     if ["md", "markdown", "mdx"].contains(ext) { return .markdown }
+    if ["html", "htm"].contains(ext) { return .html }
     return .text
 }
 
