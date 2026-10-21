@@ -29,6 +29,7 @@ struct FilePreviewPanel: View {
                 .background(Ledger.paper)
             notesBar
         }
+        .background(Ledger.paper)
         .opacity(active ? 1 : 0)
         .disabled(!active)
         .accessibilityHidden(!active)

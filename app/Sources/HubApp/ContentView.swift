@@ -751,7 +751,6 @@ struct MainPanel: View {
                 ZStack {
                     ForEach(tabs, id: \.self) { file in
                         FilePreviewPanel(file: file, files: model.checkoutFiles(file.root), active: model.preview == file)
-                            .background(Ledger.paper)
                     }
                 }
             }
