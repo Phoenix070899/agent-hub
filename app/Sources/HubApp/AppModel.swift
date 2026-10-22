@@ -156,6 +156,10 @@ final class AppModel: ObservableObject {
             for files in checkouts.values { files.start(showIgnored: showIgnoredFiles) }
         }
     }
+    /// Text search reads ignored files too; off by default, as build folders make it slow.
+    @Published var searchIgnoredFiles = UserDefaults.standard.bool(forKey: "searchIgnoredFiles") {
+        didSet { UserDefaults.standard.set(searchIgnoredFiles, forKey: "searchIgnoredFiles") }
+    }
     /// Each checkout's open folders, remembered across selections and relaunches.
     @Published var openFolderMap: [String: Set<String>] =
         (UserDefaults.standard.dictionary(forKey: "openFolders") as? [String: [String]] ?? [:]).mapValues(Set.init) {

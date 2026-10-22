@@ -140,19 +140,27 @@ final class CheckoutFiles: ObservableObject {
 
 extension CheckoutFiles {
     /// Lines holding `text`, case-insensitively, in tracked and untracked text files; ignored
-    /// files too when they are shown. At most 20 per file.
-    nonisolated static func grep(_ root: String, _ text: String, ignored: Bool) -> [GrepHit] {
+    /// files too when asked. At most 20 per file. Cancelling the task stops git.
+    nonisolated static func grep(_ root: String, _ text: String, ignored: Bool) async -> [GrepHit] {
         var args = ["grep", "-n", "--null", "-I", "-i", "-F", "--untracked", "--max-count", "20"]
         if ignored { args.append("--no-exclude-standard") }
         args += ["-e", text, "--"]
-        // git grep exits 1 when nothing matches, which reads as no output.
-        return parseGrep(Git.run(root, args).output ?? "")
+        let stopper = ProcessStopper()
+        return await withTaskCancellationHandler {
+            await Task.detached(priority: .userInitiated) {
+                // git grep exits 1 when nothing matches, which reads as no output.
+                parseGrep(Git.run(root, args, stopper: stopper).output ?? "")
+            }.value
+        } onCancel: {
+            stopper.stop()
+        }
     }
 }
 
 enum Git {
     /// Runs git in `dir`; nil output when it fails, with what it printed on stderr.
-    nonisolated static func run(_ dir: String, _ args: [String]) -> (output: String?, error: String?) {
+    /// A `stopper` can end it early, which reads as a failure.
+    nonisolated static func run(_ dir: String, _ args: [String], stopper: ProcessStopper? = nil) -> (output: String?, error: String?) {
         let process = Process()
         let out = Pipe()
         let err = Pipe()
@@ -160,7 +168,13 @@ enum Git {
         process.arguments = ["-C", dir] + args
         process.standardOutput = out
         process.standardError = err
-        do { try process.run() } catch { return (nil, "\(error)") }
+        do {
+            if let stopper {
+                guard try stopper.launch(process) else { return (nil, "stopped") }
+            } else {
+                try process.run()
+            }
+        } catch { return (nil, "\(error)") }
         let data = out.fileHandleForReading.readDataToEndOfFile()
         let problem = err.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()

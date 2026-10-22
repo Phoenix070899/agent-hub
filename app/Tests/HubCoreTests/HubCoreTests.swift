@@ -431,6 +431,35 @@ func row(_ id: String, phase: String, quiet: Int, model: String? = nil, effort: 
     #expect(searchFiles("s", in: paths, limit: 2).count == 2)
 }
 
+@Test func fileSearchInATreeMatchesSearchInItsPaths() {
+    let paths = ["docs/README.md", "src/Search.swift", "src/search/index.ts", "app/research.txt"]
+    let tree = FileTree(paths: paths)
+    for query in ["search", "SRC swift", "readme", "x"] {
+        #expect(searchFiles(query, in: tree) == searchFiles(query, in: tree.files))
+    }
+}
+
+@Test func aStoppedProcessEndsAndOneStoppedFirstNeverStarts() throws {
+    let early = ProcessStopper()
+    early.stop()
+    let unstarted = Process()
+    unstarted.executableURL = URL(fileURLWithPath: "/bin/sleep")
+    unstarted.arguments = ["5"]
+    #expect(try !early.launch(unstarted))
+    #expect(!unstarted.isRunning)
+
+    let stopper = ProcessStopper()
+    let sleeping = Process()
+    sleeping.executableURL = URL(fileURLWithPath: "/bin/sleep")
+    sleeping.arguments = ["5"]
+    let start = Date()
+    #expect(try stopper.launch(sleeping))
+    stopper.stop()
+    sleeping.waitUntilExit()
+    #expect(Date().timeIntervalSince(start) < 2)
+    #expect(sleeping.terminationReason == .uncaughtSignal)
+}
+
 @Test func grepOutputReadsAsHitsPerFile() {
     let output = "src/a.swift\u{0}12\u{0}    let search = 1\nsrc/a.swift\u{0}40\u{0}search()\nREADME.md\u{0}3\u{0}Search here\n"
     let hits = parseGrep(output)
