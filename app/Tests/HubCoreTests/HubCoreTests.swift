@@ -164,6 +164,7 @@ Binary files a/logo.png and /dev/null differ
 @Test func filesAreToldApartForPreview() {
     #expect(fileKind(path: "a.png", head: Data()) == .image)
     #expect(fileKind(path: "a.pdf", head: Data()) == .pdf)
+    #expect(fileKind(path: "index.html", head: Data()) == .html)
     #expect(fileKind(path: "a.bin", head: Data([0x41, 0x00, 0x42])) == .binary)
     #expect(fileKind(path: "README.md", head: Data("# hi".utf8)) == .markdown)
     #expect(fileKind(path: "main.rs", head: Data("fn main() {}".utf8)) == .text)
@@ -276,8 +277,8 @@ func row(_ id: String, phase: String, quiet: Int, model: String? = nil, effort: 
 @Test func decodesModelsAndProgress() throws {
     let line = """
     {"repo":"/r","orchestrator":{"live":true,"model":"claude-opus-5-5"},"workers":[{"id":"w14","profile":"naruto",\
-    "title":"Fix rerank","state":"running","phase":"running","quietSeconds":120,"place":"worktree demo-rerank",\
-    "branch":"demo-rerank","live":true,"blocker":null,"openQuestions":[],"finalReport":null,\
+    "title":"Fix rerank","state":"running","phase":"running","quietSeconds":120,"place":"worktree lanh-rerank",\
+    "branch":"lanh-rerank","live":true,"blocker":null,"openQuestions":[],"finalReport":null,\
     "model":"claude-sonnet-5-5","effort":"high","progress":"41 of 44 tests passing"}],"needs":[]}
     """
     let snapshot = try JSONDecoder().decode(Snapshot.self, from: Data(line.utf8))
@@ -369,7 +370,7 @@ func row(_ id: String, phase: String, quiet: Int, model: String? = nil, effort: 
 @Test func terminalTargetsNameThemselvesLikeHubAttach() {
     #expect(TerminalTarget.agent(id: 3).label == "a3")
     #expect(TerminalTarget.worker(id: 21).label == "w21")
-    #expect(TerminalTarget.shell(id: 7).params["shell"] as? Int == 7)
+    #expect(TerminalTarget.worker(id: 21).params["id"] as? Int == 21)
 }
 
 @Test(.timeLimit(.minutes(1))) func readsALineThatArrivesInTwoReads() throws {
@@ -428,6 +429,35 @@ func row(_ id: String, phase: String, quiet: Int, model: String? = nil, effort: 
     #expect(searchFiles("src swift", in: paths) == ["src/Search.swift"], "every word must match")
     #expect(searchFiles("  ", in: paths).isEmpty)
     #expect(searchFiles("s", in: paths, limit: 2).count == 2)
+}
+
+@Test func fileSearchInATreeMatchesSearchInItsPaths() {
+    let paths = ["docs/README.md", "src/Search.swift", "src/search/index.ts", "app/research.txt"]
+    let tree = FileTree(paths: paths)
+    for query in ["search", "SRC swift", "readme", "x"] {
+        #expect(searchFiles(query, in: tree) == searchFiles(query, in: tree.files))
+    }
+}
+
+@Test func aStoppedProcessEndsAndOneStoppedFirstNeverStarts() throws {
+    let early = ProcessStopper()
+    early.stop()
+    let unstarted = Process()
+    unstarted.executableURL = URL(fileURLWithPath: "/bin/sleep")
+    unstarted.arguments = ["5"]
+    #expect(try !early.launch(unstarted))
+    #expect(!unstarted.isRunning)
+
+    let stopper = ProcessStopper()
+    let sleeping = Process()
+    sleeping.executableURL = URL(fileURLWithPath: "/bin/sleep")
+    sleeping.arguments = ["5"]
+    let start = Date()
+    #expect(try stopper.launch(sleeping))
+    stopper.stop()
+    sleeping.waitUntilExit()
+    #expect(Date().timeIntervalSince(start) < 2)
+    #expect(sleeping.terminationReason == .uncaughtSignal)
 }
 
 @Test func grepOutputReadsAsHitsPerFile() {
@@ -539,4 +569,16 @@ func row(_ id: String, phase: String, quiet: Int, model: String? = nil, effort: 
         return nil
     }
     #expect(numbers == [1, 2, 1, 2, 3, 3, 4])
+}
+
+@Test func theLookBecomesAGhosttyConfig() {
+    let plain = TerminalAppearance.orca.ghosttyConfig
+    #expect(plain.contains("font-family = JetBrainsMono Nerd Font\n"))
+    #expect(plain.contains("background = #0a0e14\n"))
+    #expect(plain.contains("palette = 15=#ffffff\n"))
+    #expect(plain.contains("background-opacity = 1\n"))
+    #expect(plain.contains("keybind = clear\n"), "Ghostty's own shortcuts would take Echo's")
+    var image = TerminalAppearance.orca
+    image.backgroundImage = "/tmp/a.png"
+    #expect(image.ghosttyConfig.contains("background-opacity = 0\n"))
 }

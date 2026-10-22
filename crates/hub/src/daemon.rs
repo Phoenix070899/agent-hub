@@ -39,11 +39,6 @@ pub struct Hub {
     agents: Mutex<HashMap<i64, Arc<Live>>>,
     /// When each Normal session's waiting permission prompt was first seen, by agent id.
     agent_prompts: Mutex<HashMap<i64, i64>>,
-    /// The human's own shells in the Hub App's split panes: id to (repo, terminal). No watching,
-    /// no messages; they live until they exit or are closed.
-    shells: Mutex<HashMap<i64, (String, Arc<Live>)>>,
-    /// The multiplexer shell showing each agent or Worker (`a3`, `w21`), by shell id.
-    muxes: Mutex<HashMap<String, i64>>,
     tick: Mutex<u64>,
     changed: Condvar,
     usage: Mutex<Usage>,
@@ -152,8 +147,6 @@ pub fn run() -> Result<()> {
         live: Mutex::new(HashMap::new()),
         agents: Mutex::new(HashMap::new()),
         agent_prompts: Mutex::new(HashMap::new()),
-        shells: Mutex::new(HashMap::new()),
-        muxes: Mutex::new(HashMap::new()),
         tick: Mutex::new(0),
         changed: Condvar::new(),
         usage: Mutex::new(Usage::default()),
@@ -272,15 +265,8 @@ impl Hub {
     }
 
     /// The terminal a request names: `{"id": n}` for a Worker, `{"agent": n}` for an Orchestrator
-    /// or Normal session, `{"orchestrator": repo}` for the repo's first Orchestrator, `{"shell": n}`
-    /// for a shell.
+    /// or Normal session, `{"orchestrator": repo}` for the repo's first Orchestrator.
     fn terminal(&self, p: &Value) -> Result<Arc<Live>> {
-        if let Some(id) = p.get("shell").and_then(Value::as_i64) {
-            return match self.shells.lock().unwrap().get(&id) {
-                Some((_, live)) => Ok(Arc::clone(live)),
-                None => bail!("shell {id} is not open"),
-            };
-        }
         if let Some(id) = p.get("agent").and_then(Value::as_i64) {
             return self.agent_live(id);
         }
@@ -518,47 +504,13 @@ impl Hub {
         Ok(true)
     }
 
-    /// A login shell in the repo, the human's own: their `$SHELL` (`HUB_SHELL` overrides it).
-    fn open_shell(self: &Arc<Self>, p: &Value) -> Result<Value> {
-        let repo = repo::root(Path::new(str_param(p, "repo")?))?;
-        let key = repo.display().to_string();
-        let id = self.spawn_shell(&key, repo, vec!["-l".into()])?;
-        Ok(json!({ "shell": id }))
-    }
-
-    /// Starts the human's shell with `args` in `cwd`, listed under `repo`; it lives until it exits.
-    fn spawn_shell(self: &Arc<Self>, repo: &str, cwd: PathBuf, args: Vec<String>) -> Result<i64> {
-        let id = db::new_shell(&self.db(), repo)?;
-        let env = vec![
-            ("TERM".to_string(), "xterm-256color".to_string()),
-            ("COLORTERM".into(), "truecolor".into()),
-        ];
-        let spawn = Spawn {
-            program: user_shell(),
-            args,
-            cwd,
-            env,
-            env_remove: inherited_agent_vars(),
-        };
-        let hub: Weak<Hub> = Arc::downgrade(self);
-        let live = Live::spawn(id, spawn, move |id| {
-            if let Some(hub) = hub.upgrade() {
-                hub.shells.lock().unwrap().remove(&id);
-                hub.muxes.lock().unwrap().retain(|_, shell| *shell != id);
-                hub.notify();
-            }
-        })?;
-        self.shells.lock().unwrap().insert(id, (repo.to_string(), live));
-        self.notify();
-        Ok(id)
-    }
-
-    /// The human's multiplexer around one agent's or Worker's terminal: `command` (e.g.
-    /// `tmux new-session -A -s {session} -c {dir} {command}`) runs in a login shell, with
-    /// `{session}` a stable name for the target, `{dir}` where it works, and `{command}` a
-    /// `hub attach --follow` that shows the target in the multiplexer's first pane. One shell per
-    /// target: asking again returns the same one while it lives.
-    fn open_mux(self: &Arc<Self>, p: &Value) -> Result<Value> {
+    /// The human's multiplexer around one agent's or Worker's terminal, as the line an Echo pane
+    /// runs in a login shell (`hub mux`): `command` (e.g.
+    /// `tmux new-session -A -s {session} -c {dir} {command}`) with `{session}` a stable name for
+    /// the target, `{dir}` where it works, and `{command}` a `hub attach --follow` that shows the
+    /// target in the multiplexer's first pane. The pane runs it itself, so no daemon shell and no
+    /// relay sit between Echo and the multiplexer.
+    fn mux_command(&self, p: &Value) -> Result<Value> {
         let template = str_param(p, "command")?;
         let (label, repo, dir) = if let Some(id) = p.get("agent").and_then(Value::as_i64) {
             let agent = db::agent(&self.db(), id)?;
@@ -573,35 +525,24 @@ impl Hub {
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
         let session = mux_session(&name, &label);
-        // A client that reconnects (Echo relaunched) gets the session too: ⌘W needs it.
-        if let Some(&shell) = self.muxes.lock().unwrap().get(&label) {
-            if self.shells.lock().unwrap().contains_key(&shell) {
-                return Ok(json!({ "shell": shell, "session": session }));
-            }
-        }
-        let mut attach = vec![
+        // The multiplexer's server may have been started elsewhere, so this daemon is named.
+        let attach = [
+            "env".to_string(),
+            format!("HUB_STATE={}", paths::state_dir().display()),
             std::env::current_exe()?.display().to_string(),
             "attach".into(),
             "--follow".into(),
-            label.clone(),
-        ];
-        // The multiplexer's server may have been started elsewhere, so this daemon is named.
-        attach.splice(
-            0..0,
-            ["env".to_string(), format!("HUB_STATE={}", paths::state_dir().display())],
-        );
-        let attach = attach
-            .iter()
-            .map(|word| shell_quote(word))
-            .collect::<Vec<_>>()
-            .join(" ");
+            label,
+        ]
+        .iter()
+        .map(|word| shell_quote(word))
+        .collect::<Vec<_>>()
+        .join(" ");
         let command = template
             .replace("{session}", &shell_quote(&session))
             .replace("{dir}", &shell_quote(&dir))
             .replace("{command}", &shell_quote(&attach));
-        let shell = self.spawn_shell(&repo, PathBuf::from(&dir), vec!["-l".into(), "-c".into(), command])?;
-        self.muxes.lock().unwrap().insert(label, shell);
-        Ok(json!({ "shell": shell, "session": session }))
+        Ok(json!({ "command": command, "session": session, "dir": dir }))
     }
 
     fn recover(&self) -> Result<()> {
@@ -639,7 +580,11 @@ impl Hub {
 
     fn dispatch(self: &Arc<Self>, method: &str, p: &Value, stream: &UnixStream) -> Result<Value> {
         match method {
-            "ping" => Ok(json!({ "pid": std::process::id() })),
+            // `exe` is the `hub` that Echo's terminal panes run (`hub attach --echo`).
+            "ping" => Ok(json!({
+                "pid": std::process::id(),
+                "exe": std::env::current_exe()?.display().to_string(),
+            })),
             "worker.start" => self.start_worker(p),
             "worker.list" => self.list_workers(str_param(p, "repo")?, p.get("agent").and_then(Value::as_i64)),
             "status" => self.status(str_param(p, "repo")?),
@@ -665,6 +610,11 @@ impl Hub {
                     live.write(&key_bytes(key.as_str().unwrap_or_default())?)?;
                     std::thread::sleep(Duration::from_millis(100));
                 }
+                Ok(json!({}))
+            }
+            // Bytes exactly as given, for what Echo types itself: dropped paths, notes, tmux keys.
+            "terminal.write" => {
+                self.terminal(p)?.write(str_param(p, "text")?.as_bytes())?;
                 Ok(json!({}))
             }
             "terminal.resize" => {
@@ -702,14 +652,7 @@ impl Hub {
                 Ok(json!({}))
             }
             "sessions.list" => self.list_sessions(),
-            "shell.open" => self.open_shell(p),
-            "mux.open" => self.open_mux(p),
-            "shell.close" => {
-                if let Some((_, live)) = self.shells.lock().unwrap().get(&id_param(p, "shell")?) {
-                    live.kill();
-                }
-                Ok(json!({}))
-            }
+            "mux.command" => self.mux_command(p),
             "usage.refresh" => {
                 self.refresh_usage();
                 Ok(json!({}))
@@ -851,9 +794,6 @@ impl Hub {
                 }
                 drop(db);
                 for live in self.agents.lock().unwrap().values() {
-                    live.kill();
-                }
-                for (_, live) in self.shells.lock().unwrap().values() {
                     live.kill();
                 }
                 let _ = std::fs::remove_file(paths::socket());
@@ -1491,20 +1431,6 @@ impl Hub {
         Ok(needs)
     }
 
-    /// The repo's open shells, oldest first.
-    fn shells_of(&self, repo: &str) -> Vec<i64> {
-        let mut ids: Vec<i64> = self
-            .shells
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|(_, (of, _))| of == repo)
-            .map(|(id, _)| *id)
-            .collect();
-        ids.sort();
-        ids
-    }
-
     /// Everything the app draws for one repo: its agents, their Workers, and what needs the human.
     fn snapshot(&self, repo: &str) -> Result<Value> {
         // Read before the json! below: its other parts take the database lock themselves.
@@ -1517,7 +1443,6 @@ impl Hub {
                 "model": first.and_then(|a| a.model.clone()),
             },
             "agents": agents.iter().map(|a| self.agent_view(a)).collect::<Vec<_>>(),
-            "shells": self.shells_of(repo),
             "workers": self.rows(repo, true)?,
             "needs": self.needs(repo)?,
             "usage": self.usage.lock().unwrap().view(),
@@ -1810,13 +1735,13 @@ pub fn name_from_request(line: &str) -> Option<String> {
 }
 
 /// The human's shell: `HUB_SHELL`, else `$SHELL`, else zsh.
-fn user_shell() -> String {
+pub fn user_shell() -> String {
     std::env::var("HUB_SHELL")
         .or_else(|_| std::env::var("SHELL"))
         .unwrap_or_else(|_| "/bin/zsh".into())
 }
 
-/// A multiplexer session name for a target, e.g. `echo-demo-a3`: letters, digits, `-` and `_`
+/// A multiplexer session name for a target, e.g. `echo-lanh-a3`: letters, digits, `-` and `_`
 /// only, since tmux treats `.` and `:` as separators.
 fn mux_session(repo_name: &str, label: &str) -> String {
     let clean: String = repo_name
@@ -1844,7 +1769,7 @@ fn shell_quote(word: &str) -> String {
     format!("'{}'", word.replace('\'', "'\\''"))
 }
 
-fn inherited_agent_vars() -> Vec<String> {
+pub fn inherited_agent_vars() -> Vec<String> {
     std::env::vars()
         .map(|(key, _)| key)
         .filter(|key| is_agent_var(key))
@@ -1898,7 +1823,7 @@ mod tests {
 
     #[test]
     fn mux_sessions_are_safe_names() {
-        assert_eq!(mux_session("demo", "a3"), "echo-demo-a3");
+        assert_eq!(mux_session("lanh", "a3"), "echo-lanh-a3");
         assert_eq!(mux_session("my.repo:v2", "w21"), "echo-my-repo-v2-w21");
     }
 

@@ -52,27 +52,40 @@ struct SettingsView: View {
                         }
                     }
                 }
-                if let path = model.appearance.backgroundImage {
-                    Slider(value: $model.appearance.backgroundImageDim, in: 0.3...0.95) {
+                // Always shown, so the controls can be found before an image is chosen.
+                Group {
+                    LabeledContent {
+                        HStack(spacing: 10) {
+                            Slider(value: $model.appearance.backgroundImageDim, in: 0.3...0.95)
+                            Text("\(Int((model.appearance.backgroundImageDim * 100).rounded()))%")
+                                .monospacedDigit()
+                                .foregroundStyle(.secondary)
+                                .frame(width: 40, alignment: .trailing)
+                        }
+                    } label: {
                         Text("Dim")
                     }
-                    Slider(value: $model.appearance.backgroundImageBlur, in: 0...30) {
+                    LabeledContent {
+                        HStack(spacing: 10) {
+                            Slider(value: $model.appearance.backgroundImageBlur, in: 0...30)
+                            Text("\(Int(model.appearance.backgroundImageBlur.rounded())) pt")
+                                .monospacedDigit()
+                                .foregroundStyle(.secondary)
+                                .frame(width: 40, alignment: .trailing)
+                        }
+                    } label: {
                         Text("Blur")
                     }
+                }
+                .disabled(model.appearance.backgroundImage == nil)
+                if let path = model.appearance.backgroundImage {
                     if !FileManager.default.fileExists(atPath: path) {
                         Text("The image is gone; terminals show the theme background.")
                             .font(.caption)
                             .foregroundStyle(.orange)
                     }
                 }
-                Text("Shown behind every terminal. Text and coloured cells stay solid; dim or blur it until the text reads easily.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            Section("Terminal rendering") {
-                Toggle("Draw terminals with the GPU (Metal)", isOn: $model.gpuRendering)
-                Text("SwiftTerm's Metal renderer, still marked experimental. It falls back to the standard drawing if Metal is unavailable.")
+                Text("Choose an image to show behind every terminal. Text and coloured cells stay solid; dim or blur the image until the text reads easily.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -137,13 +150,13 @@ struct SettingsView: View {
     private var help: String {
         switch model.multiplexer.kind {
         case .tmux:
-            return "Each agent or Worker gets its own tmux session, like echo-demo-a3, with it in the first pane. Split and add windows beside it as usual (⌘D splits right, ⇧⌘D down). Ctrl-] in the agent's pane stops showing it there."
+            return "Each agent or Worker gets its own tmux session, like echo-lanh-a3, with it in the first pane. Split and add windows beside it as usual (⌘D splits right, ⇧⌘D down). Ctrl-] in the agent's pane stops showing it there."
         case .screen:
-            return "Each agent or Worker gets its own screen session, like echo-demo-a3. Use screen's own keys to split; ⌘D is for tmux only."
+            return "Each agent or Worker gets its own screen session, like echo-lanh-a3. Use screen's own keys to split; ⌘D is for tmux only."
         case .none:
             return "Each agent and Worker shows in a plain terminal, without splits or extra windows."
         case .custom:
-            return "Runs in a login shell. {session} is a name per agent or Worker, like echo-demo-a3; {dir} is where it works; {command} shows it and must run in the first pane."
+            return "Runs in a login shell. {session} is a name per agent or Worker, like echo-lanh-a3; {dir} is where it works; {command} shows it and must run in the first pane."
         }
     }
 

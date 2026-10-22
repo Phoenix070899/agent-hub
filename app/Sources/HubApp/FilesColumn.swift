@@ -77,6 +77,8 @@ private struct FilesTree: View {
                         handledFocus.value = model.filesFocusRequest
                         focused = true
                     }
+                    // Selecting an agent or Worker in the ledger hands the keyboard to its terminal.
+                    .onChange(of: model.terminalFocusRequest) { focused = false }
                     .onChange(of: focused) { model.treeFocused = focused }
                     .onDisappear { model.treeFocused = false }
                     .onChange(of: cursor) {
@@ -388,7 +390,7 @@ private struct FileSearchResults: View {
     private static let hitLimit = 300
 
     var body: some View {
-        let named = searchFiles(query, in: files.tree.files)
+        let named = found.named
         let hits = found.hits
         let byFile = Dictionary(grouping: hits, by: \.path)
         let order = hits.map(\.path).reduce(into: [String]()) { if $0.last != $1 { $0.append($1) } }
@@ -401,7 +403,21 @@ private struct FileSearchResults: View {
                         model.preview = FileRef(root: root, path: path)
                     }
                 }
-                section("Text", count: hits.count)
+                section("Text", count: hits.count) {
+                    Button { model.searchIgnoredFiles.toggle() } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: model.searchIgnoredFiles ? "checkmark.square.fill" : "square")
+                            Text("Ignored files")
+                        }
+                        .font(.system(size: 11.5))
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(model.searchIgnoredFiles ? Ledger.ink : Ledger.ink3)
+                    .help(model.searchIgnoredFiles ? "Stop searching text in ignored files" : "Search text in ignored files too (slower)")
+                    .accessibilityLabel("Search ignored files")
+                    .accessibilityValue(model.searchIgnoredFiles ? "On" : "Off")
+                }
                 if query.trimmingCharacters(in: .whitespaces).count < 2 {
                     note("Type 2 or more characters to search inside files.")
                 } else if hits.isEmpty {
@@ -421,8 +437,16 @@ private struct FileSearchResults: View {
             }
             .padding(.bottom, 8)
         }
+        // File names match on every keystroke, away from the main thread.
+        .task(id: "\(query)|\(files.generation)") {
+            let tree = files.tree
+            let query = query
+            let named = await Task.detached(priority: .userInitiated) { searchFiles(query, in: tree) }.value
+            guard !Task.isCancelled else { return }
+            found.named = named
+        }
         // Waits for a pause in typing, and searches again when the checkout changes.
-        .task(id: "\(query)|\(files.generation)|\(model.showIgnoredFiles)") {
+        .task(id: "\(query)|\(files.generation)|\(model.searchIgnoredFiles)") {
             let text = query.trimmingCharacters(in: .whitespaces)
             guard text.count >= 2 else {
                 found.hits = []
@@ -432,20 +456,20 @@ private struct FileSearchResults: View {
             try? await Task.sleep(for: .milliseconds(250))
             guard !Task.isCancelled else { return }
             let root = root
-            let ignored = model.showIgnoredFiles
-            let lines = await Task.detached(priority: .userInitiated) {
-                CheckoutFiles.grep(root, text, ignored: ignored)
-            }.value
+            let ignored = model.searchIgnoredFiles
+            let lines = await CheckoutFiles.grep(root, text, ignored: ignored)
             guard !Task.isCancelled else { return }
             found.hits = Array(lines.prefix(Self.hitLimit))
             found.searching = false
         }
     }
 
-    private func section(_ title: String, count: Int) -> some View {
+    private func section(_ title: String, count: Int, @ViewBuilder trailing: () -> some View = { EmptyView() }) -> some View {
         HStack(spacing: 6) {
             Text(title).fontWeight(.semibold)
             Text("\(count)").foregroundStyle(Ledger.ink3).monospacedDigit()
+            Spacer(minLength: 8)
+            trailing()
         }
         .font(.system(size: 12))
         .padding(.horizontal, 14)
@@ -463,6 +487,7 @@ private struct FileSearchResults: View {
 }
 
 final class SearchHits: ObservableObject {
+    @Published var named: [String] = []
     @Published var hits: [GrepHit] = []
     @Published var searching = false
 }

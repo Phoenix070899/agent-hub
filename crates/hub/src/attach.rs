@@ -1,9 +1,11 @@
 //! `hub attach`: this terminal becomes a Worker's or an agent's terminal until Ctrl-] or it ends.
 //! With `--follow` it stays put and reattaches whenever the agent starts again, which is how
-//! Echo shows an agent inside the human's multiplexer.
+//! Echo shows an agent inside the human's multiplexer. With `--echo` it is one of Echo's own
+//! terminal panes: Ctrl-] is typed like any key, and the screen stays when the terminal ends.
 
 use std::io::{BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
@@ -21,6 +23,8 @@ static ORIGINAL: OnceLock<libc::termios> = OnceLock::new();
 static CURRENT: Mutex<Option<UnixStream>> = Mutex::new(None);
 /// The attached terminal's params, for resizes.
 static TARGET: Mutex<Option<Value>> = Mutex::new(None);
+/// Running in an Echo pane (`--echo`).
+static ECHO: AtomicBool = AtomicBool::new(false);
 
 /// What `hub attach` names: `w12` (or `12`, `#12`) is a Worker, `a3` an agent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -39,7 +43,7 @@ impl Target {
         Ok(Target::Worker(id))
     }
 
-    fn params(self) -> Value {
+    pub fn params(self) -> Value {
         match self {
             Target::Worker(id) => json!({ "id": id }),
             Target::Agent(id) => json!({ "agent": id }),
@@ -134,12 +138,12 @@ fn forward_input(label: String, follow: bool) {
             let input = &buf[..n];
             let mut current = CURRENT.lock().unwrap();
             let Some(stream) = current.as_mut() else {
-                if input.contains(&DETACH) || input.contains(&CTRL_C) {
+                if !ECHO.load(Ordering::Relaxed) && (input.contains(&DETACH) || input.contains(&CTRL_C)) {
                     restore_and_exit(&format!("stopped following {label}"));
                 }
                 continue;
             };
-            if let Some(at) = input.iter().position(|&b| b == DETACH) {
+            if let Some(at) = input.iter().position(|&b| b == DETACH && !ECHO.load(Ordering::Relaxed)) {
                 let _ = stream.write_all(&input[..at]);
                 let note = if follow {
                     format!("stopped following {label}; it keeps running")
@@ -155,12 +159,39 @@ fn forward_input(label: String, follow: bool) {
     });
 }
 
-/// Passes this terminal's size on to whatever is attached.
+fn winch() -> libc::sigset_t {
+    let mut set: libc::sigset_t = unsafe { std::mem::zeroed() };
+    unsafe {
+        libc::sigemptyset(&mut set);
+        libc::sigaddset(&mut set, libc::SIGWINCH);
+    }
+    set
+}
+
+/// Passes this terminal's size on to whatever is attached once it has held for `SETTLE`, so a
+/// window being dragged resizes the agent once, not at every step. Call it before starting any
+/// other thread: SIGWINCH is blocked here so that only its own thread takes it.
 fn forward_resizes() {
-    std::thread::spawn(|| {
+    const SETTLE: Duration = Duration::from_millis(200);
+    // SIGWINCH is ignored by default, and macOS drops an ignored signal even while it is blocked,
+    // so `sigwait` would never see it; a handler that does nothing keeps it pending.
+    extern "C" fn pending(_: libc::c_int) {}
+    let set = winch();
+    unsafe {
+        libc::signal(libc::SIGWINCH, pending as *const () as libc::sighandler_t);
+        libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut());
+    }
+    let (changed, changes) = std::sync::mpsc::channel();
+    std::thread::spawn(move || loop {
+        let mut signal = 0;
+        if unsafe { libc::sigwait(&set, &mut signal) } != 0 || changed.send(()).is_err() {
+            return;
+        }
+    });
+    std::thread::spawn(move || {
         let mut last = size();
-        loop {
-            std::thread::sleep(Duration::from_millis(300));
+        while changes.recv().is_ok() {
+            while changes.recv_timeout(SETTLE).is_ok() {}
             let now = size();
             if now != last {
                 last = now;
@@ -197,11 +228,37 @@ fn pump((stream, mut reader): (UnixStream, BufReader<UnixStream>), params: &Valu
 /// ends or Ctrl-] detaches.
 pub fn run(target: Value, label: &str) -> Result<()> {
     let attached = connect(&target)?;
+    forward_resizes();
     raw_mode();
     forward_input(label.to_string(), false);
-    forward_resizes();
     pump(attached, &target);
     restore_and_exit(&format!("{label} ended"))
+}
+
+/// An Echo pane: attaches once, and when the terminal ends, or cannot be reached, says so and
+/// keeps the screen until Echo closes the pane.
+pub fn echo(target: Target) -> ! {
+    ECHO.store(true, Ordering::Relaxed);
+    let params = target.params();
+    forward_resizes();
+    raw_mode();
+    forward_input(target.label(), false);
+    match connect(&params) {
+        Ok(attached) => {
+            pump(attached, &params);
+            say_dim("terminal ended");
+        }
+        Err(error) => say_dim(&format!("{error:#}")),
+    }
+    loop {
+        std::thread::park();
+    }
+}
+
+fn say_dim(note: &str) {
+    let mut stdout = std::io::stdout();
+    let _ = write!(stdout, "\r\n\x1b[2m[{note}]\x1b[0m\r\n");
+    let _ = stdout.flush();
 }
 
 /// Shows `target` here for as long as it exists: when its terminal ends it waits, and attaches
@@ -209,9 +266,9 @@ pub fn run(target: Value, label: &str) -> Result<()> {
 pub fn follow(target: Target) -> Result<()> {
     let label = target.label();
     let params = target.params();
+    forward_resizes();
     raw_mode();
     forward_input(label.clone(), true);
-    forward_resizes();
     let mut first = true;
     loop {
         match connect(&params) {
@@ -253,5 +310,6 @@ mod tests {
         assert_eq!(Target::parse("a3").unwrap(), Target::Agent(3));
         assert!(Target::parse("ax").is_err());
         assert_eq!(Target::Agent(3).label(), "a3");
+        assert_eq!(Target::Agent(3).params(), json!({ "agent": 3 }));
     }
 }

@@ -25,6 +25,7 @@ details the ledger leaves out" ;;
   exit*) sleep 2; echo "fake agent giving up"; sleep 1; exit 1 ;;
   request*) echo "first request: $2" ;;
   echo*) while IFS= read -r line; do echo "got: $line"; done ;;
+  size*) while IFS= read -r line; do echo "size: $(stty size)"; done ;;
   prompt*)
     printf '────────\nBash command\n rm -rf junk\nDo you want to proceed?\n> 1. Yes\n  2. No\n'
     IFS= read -r line

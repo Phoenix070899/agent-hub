@@ -1,0 +1,143 @@
+diff --git a/build.zig b/build.zig
+index 7f03c71d6..162938af8 100644
+--- a/build.zig
++++ b/build.zig
+@@ -234,6 +234,10 @@ pub fn build(b: *std.Build) !void {
+                 lib_shared.install("ghostty-internal.so");
+                 lib_static.install("ghostty-internal.a");
+             }
++        } else {
++            // Echo: the native static library and its header, linked without an xcframework.
++            lib_shared.installHeader();
++            lib_static.install("libghostty.a");
+         }
+     }
+ 
+diff --git a/src/apprt/embedded.zig b/src/apprt/embedded.zig
+index 697f0a786..55d9c4275 100644
+--- a/src/apprt/embedded.zig
++++ b/src/apprt/embedded.zig
+@@ -515,6 +515,21 @@ pub const Surface = struct {
+             .cursor_pos = .{ .x = -1, .y = -1 },
+         };
+ 
++        // Echo: start at the view's real size, so the command's terminal starts at it too rather
++        // than at 800x600 and a resize a moment later.
++        if (comptime builtin.target.os.tag == .macos) {
++            if (self.platform == .macos) {
++                const Rect = extern struct { x: f64, y: f64, width: f64, height: f64 };
++                const bounds = self.platform.macos.nsview.getProperty(Rect, "bounds");
++                const width = bounds.width * opts.scale_factor;
++                const height = bounds.height * opts.scale_factor;
++                if (width >= 1 and height >= 1) self.size = .{
++                    .width = @intFromFloat(width),
++                    .height = @intFromFloat(height),
++                };
++            }
++        }
++
+         // Add ourselves to the list of surfaces on the app.
+         try app.core_app.addSurface(self);
+         errdefer app.core_app.deleteSurface(self);
+@@ -568,7 +583,14 @@ pub const Surface = struct {
+         if (opts.command) |c_command| {
+             const cmd = std.mem.sliceTo(c_command, 0);
+             if (cmd.len > 0) {
+-                config.command = .{ .shell = cmd };
++                // Echo: `direct:` runs the command as given, with no shell and no login(1).
++                var command: configpkg.Command = .{ .shell = cmd };
++                if (std.mem.startsWith(u8, cmd, "direct:")) {
++                    command.parseCLI(config.arenaAlloc(), cmd) catch {
++                        command = .{ .shell = cmd };
++                    };
++                }
++                config.command = command;
+                 config.@"wait-after-command" = true;
+             }
+         }
+diff --git a/src/build/MetallibStep.zig b/src/build/MetallibStep.zig
+index 81c7a4a9f..56332c79b 100644
+--- a/src/build/MetallibStep.zig
++++ b/src/build/MetallibStep.zig
+@@ -40,30 +40,11 @@ pub fn create(b: *std.Build, opts: Options) ?*MetallibStep {
+         else => unreachable,
+     };
+ 
+-    const run_ir = RunStep.create(
+-        b,
+-        b.fmt("metal {s}", .{opts.name}),
+-    );
+-    run_ir.addArgs(&.{ "/usr/bin/xcrun", "-sdk", sdk, "metal", "-o" });
+-    const output_ir = run_ir.addOutputFileArg(b.fmt("{s}.ir", .{opts.name}));
+-    run_ir.addArgs(&.{"-c"});
+-    for (opts.sources) |source| run_ir.addFileArg(source);
+-    if (platform_version_arg) |arg| {
+-        run_ir.addArgs(&.{b.fmt(
+-            "{s}={s}",
+-            .{ arg, min_version },
+-        )});
+-    }
+-
+-    const run_lib = RunStep.create(
+-        b,
+-        b.fmt("metallib {s}", .{opts.name}),
+-    );
+-    run_lib.addArgs(&.{ "/usr/bin/xcrun", "-sdk", sdk, "metallib", "-o" });
+-    const output_lib = run_lib.addOutputFileArg(b.fmt("{s}.metallib", .{opts.name}));
+-    run_lib.addFileArg(output_ir);
+-    run_lib.step.dependOn(&run_ir.step);
+-
++    // Echo: no Metal compiler without Xcode; ship the source, compiled when the renderer starts.
++    _ = .{ sdk, platform_version_arg, min_version };
++    const copy = b.addWriteFiles();
++    const output_lib = copy.addCopyFile(opts.sources[0], "shaders.metal");
++    const run_lib = copy;
+     self.* = .{
+         .step = &run_lib.step,
+         .output = output_lib,
+diff --git a/src/renderer/metal/shaders.zig b/src/renderer/metal/shaders.zig
+index b14068f96..935e7edf8 100644
+--- a/src/renderer/metal/shaders.zig
++++ b/src/renderer/metal/shaders.zig
+@@ -336,21 +336,19 @@ pub const BgImage = extern struct {
+ fn initLibrary(device: objc.Object) !objc.Object {
+     const start: std.Io.Timestamp = .now(global.io(), .awake);
+ 
+-    const data = try macos.dispatch.Data.create(
++    // Echo: the shaders ship as source and compile here, as no Metal compiler is at build time.
++    const source = try macos.foundation.String.createWithBytes(
+         @embedFile("ghostty_metallib"),
+-        macos.dispatch.queue.getMain(),
+-        macos.dispatch.Data.DESTRUCTOR_DEFAULT,
++        .utf8,
++        false,
+     );
+-    defer data.release();
++    defer source.release();
+ 
+     var err: ?*anyopaque = null;
+     const library = device.msgSend(
+         objc.Object,
+-        objc.sel("newLibraryWithData:error:"),
+-        .{
+-            data,
+-            &err,
+-        },
++        objc.sel("newLibraryWithSource:options:error:"),
++        .{ source, @as(?*anyopaque, null), &err },
+     );
+     try checkError(err);
+ 
+diff --git a/src/termio/Exec.zig b/src/termio/Exec.zig
+index df57e0f4f..2286a99a9 100644
+--- a/src/termio/Exec.zig
++++ b/src/termio/Exec.zig
+@@ -1850,6 +1850,8 @@ fn execCommand(
+     // the proper environment variables set, a login shell, and proper
+     // hushlogin behavior.
+     if (comptime builtin.target.os.tag.isDarwin()) darwin: {
++        // Echo: a direct command is run as given, without login(1) and its banner.
++        if (command == .direct) break :darwin;
+         const passwd = passwdpkg.get(alloc) catch |err| {
+             log.warn("failed to read passwd, not using a login shell err={}", .{err});
+             break :darwin;

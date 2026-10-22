@@ -72,21 +72,18 @@ public struct Snapshot: Decodable, Equatable, Sendable {
     public let orchestrator: Orchestrator
     /// Every open agent, oldest first; nil from a daemon older than agents.
     public let agents: [Agent]?
-    /// The repo's open shells, multiplexer shells included.
-    public let shells: [Int]?
     public let workers: [WorkerRow]
     public let needs: [Need]
     /// Account-wide; every session's snapshot carries the same.
     public let usage: Usage?
 
     public init(
-        repo: String, orchestrator: Orchestrator, agents: [Agent]? = nil, shells: [Int]? = nil, workers: [WorkerRow],
+        repo: String, orchestrator: Orchestrator, agents: [Agent]? = nil, workers: [WorkerRow],
         needs: [Need], usage: Usage? = nil
     ) {
         self.repo = repo
         self.orchestrator = orchestrator
         self.agents = agents
-        self.shells = shells
         self.workers = workers
         self.needs = needs
         self.usage = usage
@@ -313,24 +310,20 @@ public enum TerminalTarget: Hashable, Sendable {
     /// An Orchestrator or a Normal session.
     case agent(id: Int)
     case worker(id: Int)
-    /// A shell the daemon runs for the human, e.g. the multiplexer around an agent.
-    case shell(id: Int)
 
     /// The daemon's way of naming it in `attach` and `terminal.resize`.
     public var params: [String: Any] {
         switch self {
         case .agent(let id): return ["agent": id]
         case .worker(let id): return ["id": id]
-        case .shell(let id): return ["shell": id]
         }
     }
 
-    /// `a3`, `w21`, `s7`: how `hub attach` and multiplexer session names call it.
+    /// `a3`, `w21`: how `hub attach` and multiplexer session names call it.
     public var label: String {
         switch self {
         case .agent(let id): return "a\(id)"
         case .worker(let id): return "w\(id)"
-        case .shell(let id): return "s\(id)"
         }
     }
 }

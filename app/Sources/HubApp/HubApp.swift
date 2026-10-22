@@ -21,7 +21,8 @@ struct HubApp: App {
         .commands {
             // ⌘W closes the tmux pane in focus, or the window when no tmux view is showing.
             CommandGroup(replacing: .saveItem) {
-                Button(model.canSplit ? "Close Pane" : "Close") { model.closePane() }
+                Button(model.preview != nil && model.preview?.root == model.selectedCheckout ? "Close Tab"
+                       : model.canSplit ? "Close Pane" : "Close") { model.closePane() }
                     .keyboardShortcut("w")
             }
             CommandGroup(replacing: .newItem) {
@@ -51,6 +52,12 @@ struct HubApp: App {
                     .keyboardShortcut("]", modifiers: [.command, .shift])
                 Button("Previous Repo") { model.cycleSession(forward: false) }
                     .keyboardShortcut("[", modifiers: [.command, .shift])
+                Button("Next Tab") { model.cyclePreview(forward: true) }
+                    .keyboardShortcut(.tab, modifiers: .control)
+                    .disabled(model.openPreviews.isEmpty)
+                Button("Previous Tab") { model.cyclePreview(forward: false) }
+                    .keyboardShortcut(.tab, modifiers: [.control, .shift])
+                    .disabled(model.openPreviews.isEmpty)
                 Divider()
                 Button("Open in Editor") { model.fileInFocus.map(model.openInEditor) }
                     .keyboardShortcut("o")
