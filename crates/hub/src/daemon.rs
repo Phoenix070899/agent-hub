@@ -39,9 +39,6 @@ pub struct Hub {
     agents: Mutex<HashMap<i64, Arc<Live>>>,
     /// When each Normal session's waiting permission prompt was first seen, by agent id.
     agent_prompts: Mutex<HashMap<i64, i64>>,
-    /// The human's own shells in the Hub App's split panes: id to (repo, terminal). No watching,
-    /// no messages; they live until they exit or are closed.
-    shells: Mutex<HashMap<i64, (String, Arc<Live>)>>,
     tick: Mutex<u64>,
     changed: Condvar,
     usage: Mutex<Usage>,
@@ -150,7 +147,6 @@ pub fn run() -> Result<()> {
         live: Mutex::new(HashMap::new()),
         agents: Mutex::new(HashMap::new()),
         agent_prompts: Mutex::new(HashMap::new()),
-        shells: Mutex::new(HashMap::new()),
         tick: Mutex::new(0),
         changed: Condvar::new(),
         usage: Mutex::new(Usage::default()),
@@ -269,15 +265,8 @@ impl Hub {
     }
 
     /// The terminal a request names: `{"id": n}` for a Worker, `{"agent": n}` for an Orchestrator
-    /// or Normal session, `{"orchestrator": repo}` for the repo's first Orchestrator, `{"shell": n}`
-    /// for a shell.
+    /// or Normal session, `{"orchestrator": repo}` for the repo's first Orchestrator.
     fn terminal(&self, p: &Value) -> Result<Arc<Live>> {
-        if let Some(id) = p.get("shell").and_then(Value::as_i64) {
-            return match self.shells.lock().unwrap().get(&id) {
-                Some((_, live)) => Ok(Arc::clone(live)),
-                None => bail!("shell {id} is not open"),
-            };
-        }
         if let Some(id) = p.get("agent").and_then(Value::as_i64) {
             return self.agent_live(id);
         }
@@ -515,40 +504,6 @@ impl Hub {
         Ok(true)
     }
 
-    /// A login shell in the repo, the human's own: their `$SHELL` (`HUB_SHELL` overrides it).
-    fn open_shell(self: &Arc<Self>, p: &Value) -> Result<Value> {
-        let repo = repo::root(Path::new(str_param(p, "repo")?))?;
-        let key = repo.display().to_string();
-        let id = self.spawn_shell(&key, repo, vec!["-l".into()])?;
-        Ok(json!({ "shell": id }))
-    }
-
-    /// Starts the human's shell with `args` in `cwd`, listed under `repo`; it lives until it exits.
-    fn spawn_shell(self: &Arc<Self>, repo: &str, cwd: PathBuf, args: Vec<String>) -> Result<i64> {
-        let id = db::new_shell(&self.db(), repo)?;
-        let env = vec![
-            ("TERM".to_string(), "xterm-256color".to_string()),
-            ("COLORTERM".into(), "truecolor".into()),
-        ];
-        let spawn = Spawn {
-            program: user_shell(),
-            args,
-            cwd,
-            env,
-            env_remove: inherited_agent_vars(),
-        };
-        let hub: Weak<Hub> = Arc::downgrade(self);
-        let live = Live::spawn(id, spawn, move |id| {
-            if let Some(hub) = hub.upgrade() {
-                hub.shells.lock().unwrap().remove(&id);
-                hub.notify();
-            }
-        })?;
-        self.shells.lock().unwrap().insert(id, (repo.to_string(), live));
-        self.notify();
-        Ok(id)
-    }
-
     /// The human's multiplexer around one agent's or Worker's terminal, as the line an Echo pane
     /// runs in a login shell (`hub mux`): `command` (e.g.
     /// `tmux new-session -A -s {session} -c {dir} {command}`) with `{session}` a stable name for
@@ -697,14 +652,7 @@ impl Hub {
                 Ok(json!({}))
             }
             "sessions.list" => self.list_sessions(),
-            "shell.open" => self.open_shell(p),
             "mux.command" => self.mux_command(p),
-            "shell.close" => {
-                if let Some((_, live)) = self.shells.lock().unwrap().get(&id_param(p, "shell")?) {
-                    live.kill();
-                }
-                Ok(json!({}))
-            }
             "usage.refresh" => {
                 self.refresh_usage();
                 Ok(json!({}))
@@ -846,9 +794,6 @@ impl Hub {
                 }
                 drop(db);
                 for live in self.agents.lock().unwrap().values() {
-                    live.kill();
-                }
-                for (_, live) in self.shells.lock().unwrap().values() {
                     live.kill();
                 }
                 let _ = std::fs::remove_file(paths::socket());
@@ -1486,20 +1431,6 @@ impl Hub {
         Ok(needs)
     }
 
-    /// The repo's open shells, oldest first.
-    fn shells_of(&self, repo: &str) -> Vec<i64> {
-        let mut ids: Vec<i64> = self
-            .shells
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|(_, (of, _))| of == repo)
-            .map(|(id, _)| *id)
-            .collect();
-        ids.sort();
-        ids
-    }
-
     /// Everything the app draws for one repo: its agents, their Workers, and what needs the human.
     fn snapshot(&self, repo: &str) -> Result<Value> {
         // Read before the json! below: its other parts take the database lock themselves.
@@ -1512,7 +1443,6 @@ impl Hub {
                 "model": first.and_then(|a| a.model.clone()),
             },
             "agents": agents.iter().map(|a| self.agent_view(a)).collect::<Vec<_>>(),
-            "shells": self.shells_of(repo),
             "workers": self.rows(repo, true)?,
             "needs": self.needs(repo)?,
             "usage": self.usage.lock().unwrap().view(),

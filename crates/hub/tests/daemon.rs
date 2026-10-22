@@ -893,60 +893,26 @@ fn a_usage_read_that_prints_no_limits_is_retried() {
 }
 
 #[test]
-fn shells_open_in_the_repo_and_close() {
-    let hub = Hub::new("shell");
-    let out = hub.run_with(&["status"], &[("HUB_SHELL", "/bin/sh")]);
-    assert!(out.status.success());
-    let repo = hub.repo_key();
-    let opened = hub.call("shell.open", serde_json::json!({ "repo": repo }));
-    let id = opened["result"]["shell"].as_i64().expect("a shell id");
-
-    let mut stream = UnixStream::connect(hub.state.join("hubd.sock")).unwrap();
-    let request = serde_json::json!({ "method": "attach", "params": { "shell": id, "rows": 30, "cols": 100 } });
-    stream.write_all(format!("{request}\n").as_bytes()).unwrap();
-    stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
-    let mut reader = BufReader::new(stream.try_clone().unwrap());
-    let mut line = String::new();
-    reader.read_line(&mut line).unwrap();
-    assert!(line.contains("\"ok\":true"), "{line}");
-    stream.write_all(b"echo in:$(pwd)\n").unwrap();
-    let mut seen = Vec::new();
-    let mut buf = [0u8; 4096];
-    while !String::from_utf8_lossy(&seen).contains(&format!("in:{repo}")) {
-        let n = reader.read(&mut buf).expect("shell output");
-        assert!(n > 0, "{}", String::from_utf8_lossy(&seen));
-        seen.extend_from_slice(&buf[..n]);
-    }
-    // What Echo types itself reaches the shell as given, beside the attached stream.
-    let wrote = hub.call(
-        "terminal.write",
-        serde_json::json!({ "shell": id, "text": "echo typed:$((40+2))\n" }),
+fn what_echo_types_reaches_the_agent_as_given() {
+    let hub = Hub::new("write");
+    hub.ok(&["status"]);
+    let opened = hub.call(
+        "agent.open",
+        serde_json::json!({ "repo": hub.repo_key(), "kind": "claude", "name": "echo me" }),
     );
+    let agent = serde_json::json!({ "agent": opened["result"]["agent"] });
+    hub.eventually("the agent to start", || screen_of(&hub, &agent).contains("Working"));
+    let mut write = agent.clone();
+    write["text"] = serde_json::json!("typed by echo\r");
+    let wrote = hub.call("terminal.write", write);
     assert_eq!(wrote["ok"], true, "{wrote}");
-    read_until(&mut reader, &mut seen, "typed:42");
+    hub.eventually("the typed line", || {
+        screen_of(&hub, &agent).contains("got: typed by echo")
+    });
     let ping = hub.call("ping", serde_json::json!({}));
     assert!(
         ping["result"]["exe"].as_str().is_some_and(|exe| exe.ends_with("hub")),
         "{ping}"
-    );
-
-    let mut events = UnixStream::connect(hub.state.join("hubd.sock")).unwrap();
-    let request = serde_json::json!({ "method": "events", "params": { "repo": repo } });
-    events.write_all(format!("{request}\n").as_bytes()).unwrap();
-    let mut lines = BufReader::new(events).lines();
-    lines.next();
-    let snapshot: serde_json::Value = serde_json::from_str(&lines.next().unwrap().unwrap()).unwrap();
-    assert_eq!(snapshot["shells"], serde_json::json!([id]));
-
-    hub.call("shell.close", serde_json::json!({ "shell": id }));
-    hub.eventually("the shell to close", || {
-        let snapshot: serde_json::Value = serde_json::from_str(&lines.next().unwrap().unwrap()).unwrap();
-        snapshot["shells"] == serde_json::json!([])
-    });
-    let next = hub.call("shell.open", serde_json::json!({ "repo": repo }));
-    assert!(
-        next["result"]["shell"].as_i64().unwrap() > id,
-        "shell ids are never reused"
     );
 }
 
@@ -1003,9 +969,15 @@ fn hub_opens_the_orchestrator_working_in_this_checkout() {
 fn an_attached_terminal_passes_its_resize_on() {
     use portable_pty::{native_pty_system, CommandBuilder, PtySize};
     let hub = Hub::new("winch");
-    assert!(hub.run_with(&["status"], &[("HUB_SHELL", "/bin/sh")]).status.success());
-    let opened = hub.call("shell.open", serde_json::json!({ "repo": hub.repo_key() }));
-    let id = opened["result"]["shell"].as_i64().expect("a shell id");
+    hub.ok(&["status"]);
+    let opened = hub.call(
+        "agent.open",
+        serde_json::json!({ "repo": hub.repo_key(), "kind": "claude", "name": "size me" }),
+    );
+    let id = opened["result"]["agent"].as_i64().unwrap();
+    let agent = serde_json::json!({ "agent": id });
+    let mut enter = agent.clone();
+    enter["text"] = serde_json::json!("\r");
 
     // `hub attach --echo`, as an Echo pane runs it, in a terminal that grows after it attaches.
     let size = |rows, cols| PtySize {
@@ -1016,33 +988,27 @@ fn an_attached_terminal_passes_its_resize_on() {
     };
     let pair = native_pty_system().openpty(size(16, 47)).unwrap();
     let mut command = CommandBuilder::new(env!("CARGO_BIN_EXE_hub"));
-    command.args(["attach", "--echo", &format!("s{id}")]);
+    command.args(["attach", "--echo", &format!("a{id}")]);
     command.env("HUB_STATE", &hub.state);
     let mut child = pair.slave.spawn_command(command).unwrap();
     let mut output = pair.master.try_clone_reader().unwrap();
     std::thread::spawn(move || std::io::copy(&mut output, &mut std::io::sink()));
     hub.eventually("the pane to attach at its size", || {
-        hub.call(
-            "terminal.write",
-            serde_json::json!({ "shell": id, "text": "stty size\n" }),
-        );
-        screen_of(&hub, id).contains("16 47")
+        hub.call("terminal.write", enter.clone());
+        screen_of(&hub, &agent).contains("size: 16 47")
     });
     pair.master.resize(size(61, 144)).unwrap();
-    hub.eventually("the resize to reach the shell", || {
-        hub.call(
-            "terminal.write",
-            serde_json::json!({ "shell": id, "text": "stty size\n" }),
-        );
-        screen_of(&hub, id).contains("61 144")
+    hub.eventually("the resize to reach the agent", || {
+        hub.call("terminal.write", enter.clone());
+        screen_of(&hub, &agent).contains("size: 61 144")
     });
     child.kill().unwrap();
 }
 
-/// What a shell's terminal shows now: its redrawn screen, read without resizing it.
-fn screen_of(hub: &Hub, shell: i64) -> String {
+/// What a terminal shows now: its redrawn screen, read without resizing it.
+fn screen_of(hub: &Hub, target: &serde_json::Value) -> String {
     let mut stream = UnixStream::connect(hub.state.join("hubd.sock")).unwrap();
-    let request = serde_json::json!({ "method": "attach", "params": { "shell": shell } });
+    let request = serde_json::json!({ "method": "attach", "params": target });
     stream.write_all(format!("{request}\n").as_bytes()).unwrap();
     stream.set_read_timeout(Some(Duration::from_millis(500))).unwrap();
     let mut seen = Vec::new();
@@ -1138,10 +1104,6 @@ fn a_multiplexer_line_names_its_session_and_dir() {
         "{line}"
     );
     assert!(line.contains(&format!("attach --follow a{agent}")), "{line}");
-    assert!(
-        snapshot(&hub)["shells"] == serde_json::json!([]),
-        "no daemon shell runs it"
-    );
 }
 
 #[test]

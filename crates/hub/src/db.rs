@@ -113,11 +113,6 @@ pub fn open(path: &Path) -> Result<Connection> {
            answered_at integer
          );
          create index if not exists messages_undelivered on messages(repo, delivered_at);
-         create table if not exists shells (
-           id integer primary key,
-           repo text not null,
-           created_at integer not null
-         );
          create table if not exists sessions (
            id integer primary key,
            repo text not null unique,
@@ -506,15 +501,6 @@ pub fn set_agent_model(conn: &Connection, id: i64, model: &str) -> Result<()> {
 pub fn close_agent(conn: &Connection, id: i64) -> Result<()> {
     conn.execute("update agents set closed_at = ?2 where id = ?1", params![id, now()])?;
     Ok(())
-}
-
-/// A new shell id for the repo: ids are never reused, so a remembered layout never shows the wrong shell.
-pub fn new_shell(conn: &Connection, repo: &str) -> Result<i64> {
-    conn.execute(
-        "insert into shells (repo, created_at) values (?1, ?2)",
-        params![repo, now()],
-    )?;
-    Ok(conn.last_insert_rowid())
 }
 
 /// The Worker's newest message of a kind, if any.

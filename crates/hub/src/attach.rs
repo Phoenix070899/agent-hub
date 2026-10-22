@@ -26,13 +26,11 @@ static TARGET: Mutex<Option<Value>> = Mutex::new(None);
 /// Running in an Echo pane (`--echo`).
 static ECHO: AtomicBool = AtomicBool::new(false);
 
-/// What `hub attach` names: `w12` (or `12`, `#12`) is a Worker, `a3` an agent, `s7` a shell the
-/// daemon runs for Echo.
+/// What `hub attach` names: `w12` (or `12`, `#12`) is a Worker, `a3` an agent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Target {
     Worker(i64),
     Agent(i64),
-    Shell(i64),
 }
 
 impl Target {
@@ -40,9 +38,6 @@ impl Target {
         let bad = || format!("{text:?} is not a terminal like w12 or a3");
         if let Some(id) = text.strip_prefix('a') {
             return Ok(Target::Agent(id.parse().with_context(bad)?));
-        }
-        if let Some(id) = text.strip_prefix('s') {
-            return Ok(Target::Shell(id.parse().with_context(bad)?));
         }
         let id = text.trim_start_matches(['w', '#']).parse().with_context(bad)?;
         Ok(Target::Worker(id))
@@ -52,7 +47,6 @@ impl Target {
         match self {
             Target::Worker(id) => json!({ "id": id }),
             Target::Agent(id) => json!({ "agent": id }),
-            Target::Shell(id) => json!({ "shell": id }),
         }
     }
 
@@ -60,12 +54,10 @@ impl Target {
         match self {
             Target::Worker(id) => format!("w{id}"),
             Target::Agent(id) => format!("a{id}"),
-            Target::Shell(id) => format!("s{id}"),
         }
     }
 
-    /// Whether it has a live terminal now; `None` once it is gone for good, as a shell is once
-    /// it ends.
+    /// Whether it has a live terminal now; `None` once it is gone for good.
     fn live(self) -> Option<bool> {
         match self {
             Target::Worker(id) => Some(proto::call("worker.read", json!({ "id": id, "lines": 1 })).is_ok()),
@@ -78,7 +70,6 @@ impl Target {
                     .find(|a| a["id"].as_i64() == Some(id))
                     .map(|a| a["live"].as_bool() == Some(true))
             }
-            Target::Shell(_) => None,
         }
     }
 }
@@ -319,7 +310,6 @@ mod tests {
         assert_eq!(Target::parse("a3").unwrap(), Target::Agent(3));
         assert!(Target::parse("ax").is_err());
         assert_eq!(Target::Agent(3).label(), "a3");
-        assert_eq!(Target::parse("s7").unwrap(), Target::Shell(7));
-        assert_eq!(Target::Shell(7).params(), json!({ "shell": 7 }));
+        assert_eq!(Target::Agent(3).params(), json!({ "agent": 3 }));
     }
 }
