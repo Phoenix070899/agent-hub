@@ -555,15 +555,28 @@ struct AgentGroupView: View {
                                     if unread > 0 {
                                         Text("\(unread) unread").font(.system(size: 12)).foregroundStyle(Ledger.ink3)
                                     }
-                                    if !read.isEmpty {
-                                        Button("Clear read") { model.dismiss(read) }
-                                            .buttonStyle(.ledgerLink)
-                                            .help("Take the reports you have opened off this list")
-                                    }
                                     if group.settled.count > Self.doneShown {
                                         Button(showAllDone.on ? "Show fewer" : "Show all") { showAllDone.on.toggle() }
                                             .buttonStyle(.ledgerLink)
                                     }
+                                    Menu {
+                                        Button("Clear read") { model.dismiss(read) }
+                                            .disabled(read.isEmpty)
+                                            .help("Take the reports you have opened off this list")
+                                        Button("Clear all") { model.dismiss(group.settled) }
+                                            .help("Take every report off this list, read or not")
+                                    } label: {
+                                        Image(systemName: "ellipsis")
+                                            .rotationEffect(.degrees(90))
+                                            .font(.system(size: 12.5, weight: .medium))
+                                            .foregroundStyle(Ledger.run)
+                                            .frame(width: 16, height: 16)
+                                            .contentShape(Rectangle())
+                                    }
+                                    .menuStyle(.borderlessButton)
+                                    .menuIndicator(.hidden)
+                                    .fixedSize()
+                                    .help("More actions for this list")
                                 }
                             }
                             ForEach(showAllDone.on ? group.settled : Array(group.settled.prefix(Self.doneShown))) { worker in
@@ -714,26 +727,32 @@ struct MainPanel: View {
     @EnvironmentObject private var model: AppModel
 
     var body: some View {
-        Group {
-            switch model.selection {
-            case .agent(let repo, let id)?:
-                if let agent = model.agents(repo).first(where: { $0.id == id }) {
-                    AgentPanel(repo: repo, agent: agent)
-                } else {
-                    ContentUnavailableView("That session is closed", systemImage: "questionmark.square.dashed",
-                                           description: Text("Pick another agent in the ledger."))
+        let tabs = model.openPreviews.filter { $0.root == model.selectedCheckout }
+        VStack(spacing: 0) {
+            if !tabs.isEmpty { PreviewTabs(files: tabs) }
+            Group {
+                switch model.selection {
+                case .agent(let repo, let id)?:
+                    if let agent = model.agents(repo).first(where: { $0.id == id }) {
+                        AgentPanel(repo: repo, agent: agent)
+                    } else {
+                        ContentUnavailableView("That session is closed", systemImage: "questionmark.square.dashed",
+                                               description: Text("Pick another agent in the ledger."))
+                    }
+                case .worker(let repo, let id)?:
+                    WorkerPanel(repo: repo, id: id)
+                case nil:
+                    FirstLaunch()
                 }
-            case .worker(let repo, let id)?:
-                WorkerPanel(repo: repo, id: id)
-            case nil:
-                FirstLaunch()
             }
-        }
-        // A previewed file covers the panel; the terminal stays attached underneath.
-        .overlay {
-            if let file = model.preview, file.root == model.selectedCheckout {
-                FilePreviewPanel(file: file, files: model.checkoutFiles(file.root))
-                    .background(Ledger.paper)
+            // Previewed files cover the panel; the terminal stays attached underneath, and each
+            // file keeps its scroll and view while another tab is shown.
+            .overlay {
+                ZStack {
+                    ForEach(tabs, id: \.self) { file in
+                        FilePreviewPanel(file: file, files: model.checkoutFiles(file.root), active: model.preview == file)
+                    }
+                }
             }
         }
         .ledgerSheet()
@@ -770,7 +789,7 @@ struct AgentPanel: View {
                 }
             }
             if agent.live {
-                LiveTerminal(target: .agent(id: agent.id), repo: repo)
+                LiveTerminal(target: .agent(id: agent.id))
             } else if agent.isOrchestrator {
                 StoppedPanel(repo: repo, agent: agent)
             } else {
@@ -792,15 +811,14 @@ struct AgentPanel: View {
 struct LiveTerminal: View {
     @EnvironmentObject private var model: AppModel
     let target: TerminalTarget
-    let repo: String
 
     var body: some View {
-        let shown = model.shownTarget(for: target)
+        let command = model.paneCommand(for: target)
         Group {
-            if let shown {
-                TerminalPane(target: shown, client: model.client, appearance: model.appearance,
+            if let command {
+                TerminalPane(target: target, command: command, client: model.client, appearance: model.appearance,
                              keyboard: !model.modalShown && model.preview == nil && !model.treeFocused,
-                             gpu: model.gpuRendering)
+                             focusRequest: model.terminalFocusRequest)
             } else {
                 Text("Starting the multiplexer…")
                     .font(.system(size: 12.5))
@@ -812,9 +830,9 @@ struct LiveTerminal: View {
         .padding(.vertical, 6)
         .background { TerminalBackdrop(appearance: model.appearance) }
         .opacity(model.daemonDown ? 0.45 : 1)
-        // Runs again whenever the multiplexer shell changes, so one that exited is replaced.
-        .task(id: "\(target.label) \(shown?.label ?? "-") \(model.multiplexer.enabled)") {
-            model.ensureMux(target, repo: repo)
+        // Runs again whenever the multiplexer line goes, so a multiplexer the human quit is replaced.
+        .task(id: "\(target.label) \(command == nil) \(model.multiplexer.enabled)") {
+            model.ensureMux(target)
         }
     }
 }
@@ -834,6 +852,9 @@ struct TerminalBackdrop: View {
                 }
                 .clipped()
                 .overlay { background.opacity(appearance.backgroundImageDim) }
+                // The filled image spills past the panel; clipping hides that but still hit-tests
+                // it, which took clicks meant for the ledger and the Files column.
+                .allowsHitTesting(false)
         } else {
             background
         }
@@ -981,7 +1002,7 @@ struct WorkerPanel: View {
                 } else if model.workerView(repo, worker) == .compare, let fanout = worker.fanout {
                     CompareView(repo: repo, fanout: fanout)
                 } else if worker.isActive, worker.live, let number = worker.number {
-                    LiveTerminal(target: .worker(id: number), repo: repo)
+                    LiveTerminal(target: .worker(id: number))
                     HStack(spacing: 10) {
                         Image(systemName: "info.circle")
                         Text("Typing here is an Intervention. \(worker.id) does what you ask and tells the Orchestrator.")
@@ -1088,15 +1109,16 @@ enum Fact {
 }
 
 /// A settled Worker: its Final Report, read as a document rather than a closed terminal.
+/// Each section's text renders as Markdown, so lists, `code`, and emphasis read as written.
 struct FinalReportView: View {
     let worker: WorkerRow
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
+            VStack(alignment: .leading, spacing: 30) {
                 HStack(alignment: .firstTextBaseline) {
                     Text(worker.finalReport == nil ? "No Final Report" : "Final Report")
-                        .font(.system(size: 22, weight: .semibold))
+                        .font(.system(size: 30, weight: .bold))
                     Spacer(minLength: 8)
                     if let report = worker.finalReport {
                         Button("Copy report") {
@@ -1108,29 +1130,43 @@ struct FinalReportView: View {
                 }
                 if let report = worker.finalReport {
                     ForEach(Array(ReportSection.parse(report).enumerated()), id: \.offset) { _, section in
-                        VStack(alignment: .leading, spacing: 4) {
+                        VStack(alignment: .leading, spacing: 12) {
                             if let title = section.title {
-                                Text(title).font(.system(size: 14, weight: .semibold))
+                                VStack(alignment: .leading, spacing: 8) {
+                                    Text(title).font(.system(size: 19, weight: .semibold))
+                                    Rectangle().fill(Ledger.rule).frame(height: 1)
+                                }
                             }
-                            Text(section.body)
-                                .font(.system(size: 14))
-                                .lineSpacing(3)
-                                .foregroundStyle(section.title == "State" && worker.isTrouble ? Ledger.fail : Ledger.ink)
-                                .textSelection(.enabled)
-                                .fixedSize(horizontal: false, vertical: true)
+                            let blocks = parseMarkdown(section.body)
+                            VStack(alignment: .leading, spacing: 0) {
+                                ForEach(Array(blocks.enumerated()), id: \.offset) { index, block in
+                                    MarkdownBlockView(block: block, leading: 7, codeSize: 13.5)
+                                        .padding(.top, index == 0 ? 0 : Self.gap(blocks[index - 1], block))
+                                }
+                            }
+                            .foregroundStyle(section.title == "State" && worker.isTrouble ? Ledger.fail : Ledger.ink)
                         }
                     }
                 } else {
                     Text("\(worker.id) \(worker.phaseLabel.lowercased()) without sending one. The Orchestrator has been told.")
-                        .font(.system(size: 14))
+                        .lineSpacing(7)
                         .foregroundStyle(Ledger.ink2)
                 }
             }
-            .frame(maxWidth: 680, alignment: .leading)
-            .padding(.horizontal, 32)
-            .padding(.vertical, 26)
+            .font(.system(size: 15))
+            .foregroundStyle(Ledger.ink)
+            .textSelection(.enabled)
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(.horizontal, 40)
+            .padding(.vertical, 32)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
+    }
+
+    /// The file preview's spacing, opened up to match the report's larger text.
+    private static func gap(_ previous: MarkdownBlock, _ block: MarkdownBlock) -> CGFloat {
+        if case .bullet = previous, case .bullet = block { return 9 }
+        return MarkdownBlockView.gap(previous, block) + 4
     }
 }
 

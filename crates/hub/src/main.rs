@@ -110,9 +110,17 @@ enum Command {
         /// panes run this).
         #[arg(long)]
         follow: bool,
+        /// One of Echo's terminal panes: Ctrl-] does not detach, and the screen stays when the
+        /// terminal ends.
+        #[arg(long, hide = true, conflicts_with = "follow")]
+        echo: bool,
     },
     /// Open the Worker's terminal in a new Ghostty window.
     Open { worker: String },
+    /// Echo's multiplexer panes: runs the line in `HUB_MUX` (from the daemon's `mux.command`) in
+    /// a login shell, in place of this process.
+    #[command(hide = true)]
+    Mux,
 }
 
 #[derive(Subcommand)]
@@ -366,19 +374,29 @@ fn run(cli: Cli) -> Result<ExitCode> {
             println!("Final Report sent. Stop here and stay idle.");
         }
         Command::Notify => notify(),
-        Command::Attach { target, follow } => {
+        Command::Attach { target, follow, echo } => {
             let parsed = attach::Target::parse(&target)?;
-            if follow {
+            if echo {
+                attach::echo(parsed);
+            } else if follow {
                 attach::follow(parsed)?;
             } else {
-                let params = match parsed {
-                    attach::Target::Worker(id) => json!({ "id": id }),
-                    attach::Target::Agent(id) => json!({ "agent": id }),
-                };
-                attach::run(params, &target)?;
+                attach::run(parsed.params(), &target)?;
             }
         }
         Command::Open { worker } => open(parse_id(&worker)?)?,
+        Command::Mux => {
+            use std::os::unix::process::CommandExt;
+            let line = std::env::var("HUB_MUX").context("HUB_MUX names the multiplexer command to run")?;
+            let mut shell = std::process::Command::new(daemon::user_shell());
+            shell.args(["-l", "-c", &line]);
+            // What the agent that started Echo set must not reach the human's shells.
+            for key in daemon::inherited_agent_vars() {
+                shell.env_remove(key);
+            }
+            shell.env_remove("HUB_MUX");
+            return Err(shell.exec()).context("starting the multiplexer");
+        }
     }
     Ok(ExitCode::SUCCESS)
 }

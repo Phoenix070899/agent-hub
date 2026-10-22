@@ -17,6 +17,8 @@ final class CheckoutFiles: ObservableObject {
     @Published private(set) var generation = 0
 
     private var showIgnored = false
+    /// Ignored folders listed on demand; each re-read lists them again, as git does not.
+    private var filled: Set<String> = []
     private var stream: FSEventStreamRef?
     private var pending: DispatchWorkItem?
     private var reading = false
@@ -63,6 +65,10 @@ final class CheckoutFiles: ObservableObject {
             let name = branch.output?.trimmingCharacters(in: .whitespacesAndNewlines)
             await MainActor.run {
                 self.tree = tree
+                // Parents first, so a folder opened inside another ignored folder is found again.
+                for folder in self.filled.sorted(by: { $0.split(separator: "/").count < $1.split(separator: "/").count }) {
+                    self.fill(folder)
+                }
                 self.marks = marks
                 self.branch = (name?.isEmpty ?? true) ? nil : name
                 self.problem = problem
@@ -79,8 +85,17 @@ final class CheckoutFiles: ObservableObject {
     /// Lists an ignored folder's contents the first time it is opened; git lists it as one entry.
     func fillIfNeeded(_ folder: String) {
         guard tree.children[folder] == nil else { return }
+        fill(folder)
+    }
+
+    private func fill(_ folder: String) {
         let url = URL(fileURLWithPath: root).appendingPathComponent(folder)
-        let found = (try? FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: [.isDirectoryKey])) ?? []
+        guard let found = try? FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: [.isDirectoryKey])
+        else {
+            filled.remove(folder)
+            return
+        }
+        filled.insert(folder)
         tree.fill(folder, with: found.map {
             ($0.lastPathComponent, (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true)
         })
@@ -125,19 +140,27 @@ final class CheckoutFiles: ObservableObject {
 
 extension CheckoutFiles {
     /// Lines holding `text`, case-insensitively, in tracked and untracked text files; ignored
-    /// files too when they are shown. At most 20 per file.
-    nonisolated static func grep(_ root: String, _ text: String, ignored: Bool) -> [GrepHit] {
+    /// files too when asked. At most 20 per file. Cancelling the task stops git.
+    nonisolated static func grep(_ root: String, _ text: String, ignored: Bool) async -> [GrepHit] {
         var args = ["grep", "-n", "--null", "-I", "-i", "-F", "--untracked", "--max-count", "20"]
         if ignored { args.append("--no-exclude-standard") }
         args += ["-e", text, "--"]
-        // git grep exits 1 when nothing matches, which reads as no output.
-        return parseGrep(Git.run(root, args).output ?? "")
+        let stopper = ProcessStopper()
+        return await withTaskCancellationHandler {
+            await Task.detached(priority: .userInitiated) {
+                // git grep exits 1 when nothing matches, which reads as no output.
+                parseGrep(Git.run(root, args, stopper: stopper).output ?? "")
+            }.value
+        } onCancel: {
+            stopper.stop()
+        }
     }
 }
 
 enum Git {
     /// Runs git in `dir`; nil output when it fails, with what it printed on stderr.
-    nonisolated static func run(_ dir: String, _ args: [String]) -> (output: String?, error: String?) {
+    /// A `stopper` can end it early, which reads as a failure.
+    nonisolated static func run(_ dir: String, _ args: [String], stopper: ProcessStopper? = nil) -> (output: String?, error: String?) {
         let process = Process()
         let out = Pipe()
         let err = Pipe()
@@ -145,7 +168,13 @@ enum Git {
         process.arguments = ["-C", dir] + args
         process.standardOutput = out
         process.standardError = err
-        do { try process.run() } catch { return (nil, "\(error)") }
+        do {
+            if let stopper {
+                guard try stopper.launch(process) else { return (nil, "stopped") }
+            } else {
+                try process.run()
+            }
+        } catch { return (nil, "\(error)") }
         let data = out.fileHandleForReading.readDataToEndOfFile()
         let problem = err.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()

@@ -20,6 +20,7 @@ When a change makes a new choice a later session could undo by accident, record 
 
 - Rust: `~/.cargo/bin/cargo test` (cargo is not on the default PATH); `cargo fmt --check` must pass.
 - Swift: `make -C app test` (plain `swift test` misses the Swift Testing macro plugin); `make -C app app` builds `app/build/Echo.app`.
+- Both first build libghostty into `app/Vendor/` (`app/Ghostty/build.sh`, a few minutes once); it needs `brew install zig` at the version the script names.
 - Only the Command Line Tools are installed: SwiftUI's `@State` macro does not build, so local view state is an `ObservableObject` held in `@StateObject` (`Flag`, `Draft`, and the like); `@FocusState` works.
 
 ## Testing Echo end to end

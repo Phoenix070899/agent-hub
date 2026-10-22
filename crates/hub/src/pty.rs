@@ -93,14 +93,17 @@ impl Live {
         Ok(live)
     }
 
+    /// Hands the bytes to every attached client before parsing them, so they never wait on the
+    /// parser; the parser lock is held throughout, so a new subscriber's snapshot and its first
+    /// chunk still line up.
     fn output(&self, bytes: &[u8]) {
         let mut parser = self.parser.lock().unwrap();
-        parser.process(bytes);
         let chunk = Arc::new(bytes.to_vec());
         self.subscribers
             .lock()
             .unwrap()
             .retain(|subscriber| subscriber.send(Arc::clone(&chunk)).is_ok());
+        parser.process(bytes);
     }
 
     pub fn is_alive(&self) -> bool {

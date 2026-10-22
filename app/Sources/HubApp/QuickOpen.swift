@@ -138,6 +138,11 @@ struct QuickOpen: View {
                                        detail: "Command, files .gitignore covers") {
                 model.showIgnoredFiles.toggle()
             })
+            items.append(QuickOpenItem(id: "search ignored", icon: "text.magnifyingglass",
+                                       title: model.searchIgnoredFiles ? "Stop Searching Ignored Files" : "Search Ignored Files",
+                                       detail: "Command, text search in files .gitignore covers") {
+                model.searchIgnoredFiles.toggle()
+            })
         }
         // The selected checkout's files, after everything else, so a command or agent of the
         // same name still comes first.

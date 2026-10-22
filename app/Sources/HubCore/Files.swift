@@ -22,6 +22,8 @@ public struct FileEntry: Equatable, Identifiable, Sendable {
 public struct FileTree: Equatable, Sendable {
     public private(set) var children: [String: [FileEntry]] = [:]
     public private(set) var files: [String] = []
+    /// `files` lowercased once, so a search does not lowercase every path per keystroke.
+    public private(set) var lowercasedFiles: [String] = []
     /// Paths git ignores; a folder's contents are ignored with it.
     public private(set) var ignored: Set<String> = []
 
@@ -46,6 +48,7 @@ public struct FileTree: Equatable, Sendable {
         }
         children = entries
         files = paths.filter { !$0.hasSuffix("/") }.sorted()
+        lowercasedFiles = files.map { $0.lowercased() }
     }
 
     /// Whether git ignores `path`, itself or through a folder above it.
@@ -87,13 +90,20 @@ public struct FileTree: Equatable, Sendable {
 /// Paths holding every word of `query`, case-insensitively: those whose name starts with the
 /// last word first, then whose name holds it, then the rest; shorter paths first within each.
 public func searchFiles(_ query: String, in paths: [String], limit: Int = 50) -> [String] {
+    searchFiles(query, in: paths, lowercased: paths.map { $0.lowercased() }, limit: limit)
+}
+
+public func searchFiles(_ query: String, in tree: FileTree, limit: Int = 50) -> [String] {
+    searchFiles(query, in: tree.files, lowercased: tree.lowercasedFiles, limit: limit)
+}
+
+private func searchFiles(_ query: String, in paths: [String], lowercased: [String], limit: Int) -> [String] {
     let words = query.lowercased().split(whereSeparator: \.isWhitespace).map(String.init)
     guard let last = words.last else { return [] }
-    let ranked: [(rank: Int, path: String)] = paths.compactMap { path in
-        let lower = path.lowercased()
-        guard words.allSatisfy(lower.contains) else { return nil }
-        let name = lower.split(separator: "/").last.map(String.init) ?? lower
-        return (name.hasPrefix(last) ? 0 : name.contains(last) ? 1 : 2, path)
+    var ranked: [(rank: Int, path: String)] = []
+    for (path, lower) in zip(paths, lowercased) where words.allSatisfy(lower.contains) {
+        let name = lower.lastIndex(of: "/").map { lower[lower.index(after: $0)...] } ?? lower[...]
+        ranked.append((name.hasPrefix(last) ? 0 : name.contains(last) ? 1 : 2, path))
     }
     return ranked
         .sorted { ($0.rank, $0.path.count, $0.path) < ($1.rank, $1.path.count, $1.path) }
@@ -160,6 +170,7 @@ public func folderHasChanges(_ folder: String, in marks: [String: GitMark]) -> B
 public enum FileKind: Equatable, Sendable {
     case text
     case markdown
+    case html
     case image
     case pdf
     case binary
@@ -172,6 +183,7 @@ public func fileKind(path: String, head: Data) -> FileKind {
     // A NUL in the first 8 KB means a binary file, as git decides.
     if head.prefix(8192).contains(0) { return .binary }
     if ["md", "markdown", "mdx"].contains(ext) { return .markdown }
+    if ["html", "htm"].contains(ext) { return .html }
     return .text
 }
 

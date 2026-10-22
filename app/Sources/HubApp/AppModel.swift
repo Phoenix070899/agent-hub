@@ -47,7 +47,7 @@ enum WindowLook: String, CaseIterable, Identifiable, Codable {
 /// split and add windows beside it.
 struct MultiplexerSettings: Codable, Equatable {
     var enabled = true
-    /// Run in a login shell with `{session}` (e.g. `echo-demo-a3`), `{dir}` and `{command}` (what
+    /// Run in a login shell with `{session}` (e.g. `echo-lanh-a3`), `{dir}` and `{command}` (what
     /// shows the agent in the first pane) filled in, each already shell-quoted.
     var command = MultiplexerSettings.tmux
     /// Picked "Custom command", even while the command still reads like a preset. Optional, so
@@ -97,15 +97,12 @@ enum Multiplexer: String, CaseIterable, Identifiable {
     }
 }
 
-/// The multiplexer shell showing one agent or Worker.
+/// The multiplexer showing one agent or Worker, run by its terminal pane itself.
 struct MuxShell: Equatable {
-    let repo: String
-    let shell: Int
-    /// The multiplexer's own name for it, like `echo-demo-a3`.
+    /// The line the pane runs in a login shell, with the session, folder, and attach filled in.
+    let command: String
+    /// The multiplexer's own name for it, like `echo-lanh-a3`.
     var session: String?
-    let opened: Date
-    /// Whether a snapshot has listed it yet.
-    var seen = false
 }
 
 /// The app's state: every repo the daemon knows, each one's live snapshot, and the selection.
@@ -159,14 +156,49 @@ final class AppModel: ObservableObject {
             for files in checkouts.values { files.start(showIgnored: showIgnoredFiles) }
         }
     }
+    /// Text search reads ignored files too; off by default, as build folders make it slow.
+    @Published var searchIgnoredFiles = UserDefaults.standard.bool(forKey: "searchIgnoredFiles") {
+        didSet { UserDefaults.standard.set(searchIgnoredFiles, forKey: "searchIgnoredFiles") }
+    }
     /// Each checkout's open folders, remembered across selections and relaunches.
     @Published var openFolderMap: [String: Set<String>] =
         (UserDefaults.standard.dictionary(forKey: "openFolders") as? [String: [String]] ?? [:]).mapValues(Set.init) {
         didSet { UserDefaults.standard.set(openFolderMap.mapValues { Array($0) }, forKey: "openFolders") }
     }
-    /// The file shown over the terminal; Esc goes back.
+    /// The file shown over the terminal; nil is the Terminal tab. Esc goes back to it.
     @Published var preview: FileRef? {
-        didSet { previewLine = nil }
+        didSet {
+            previewLine = nil
+            if let preview, !openPreviews.contains(preview) { openPreviews.append(preview) }
+        }
+    }
+    /// Every file with a tab, in the order shown; they stay open until closed, and across relaunches
+    /// (a file that is gone drops out).
+    @Published private(set) var openPreviews: [FileRef] = AppModel.savedPreviews() {
+        didSet { UserDefaults.standard.set(openPreviews.map { [$0.root, $0.path] }, forKey: "openPreviews") }
+    }
+
+    private static func savedPreviews() -> [FileRef] {
+        (UserDefaults.standard.array(forKey: "openPreviews") as? [[String]] ?? []).compactMap { pair in
+            guard pair.count == 2 else { return nil }
+            let file = FileRef(root: pair[0], path: pair[1])
+            return FileManager.default.fileExists(atPath: file.url.path) ? file : nil
+        }
+    }
+
+    /// ⌃Tab and ⌃⇧Tab: the next or previous tab of this checkout, the Terminal first.
+    func cyclePreview(forward: Bool) {
+        let tabs: [FileRef?] = [nil] + openPreviews.filter { $0.root == selectedCheckout }
+        guard tabs.count > 1 else { return }
+        let at = tabs.firstIndex { $0 == preview } ?? 0
+        preview = tabs[(at + (forward ? 1 : -1) + tabs.count) % tabs.count]
+    }
+
+    /// Dropping a tab on another takes that tab's place.
+    func moveTab(_ file: FileRef, onto target: FileRef) {
+        guard let from = openPreviews.firstIndex(of: file), let to = openPreviews.firstIndex(of: target), from != to else { return }
+        openPreviews.remove(at: from)
+        openPreviews.insert(file, at: to)
     }
     /// The line a text search hit opened the preview at, 1-based.
     @Published private(set) var previewLine: Int?
@@ -181,6 +213,17 @@ final class AppModel: ObservableObject {
     private static func width(_ key: String, or fallback: CGFloat) -> CGFloat {
         let saved = UserDefaults.standard.double(forKey: key)
         return saved > 0 ? CGFloat(saved) : fallback
+    }
+
+    /// Closes a file's tab; if it was the one shown, the next tab in that checkout (else the
+    /// one before, else the terminal) takes over.
+    func closePreview(_ file: FileRef) {
+        let tabs = openPreviews.filter { $0.root == file.root }
+        let next = tabs.firstIndex(of: file).flatMap { index in
+            index + 1 < tabs.count ? tabs[index + 1] : index > 0 ? tabs[index - 1] : nil
+        }
+        openPreviews.removeAll { $0 == file }
+        if preview == file { preview = next }
     }
 
     func showPreview(_ file: FileRef, line: Int) {
@@ -235,12 +278,6 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// Terminals drawn by SwiftTerm's Metal renderer instead of Core Graphics. SwiftTerm calls it
-    /// experimental, so it is a setting; it falls back to Core Graphics if Metal fails.
-    @Published var gpuRendering: Bool = UserDefaults.standard.bool(forKey: "gpuRendering") {
-        didSet { UserDefaults.standard.set(gpuRendering, forKey: "gpuRendering") }
-    }
-
     @Published var multiplexer: MultiplexerSettings =
         AppModel.load(MultiplexerSettings.self, key: "multiplexer") ?? MultiplexerSettings()
     {
@@ -251,7 +288,7 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// The multiplexer shell showing each agent or Worker, once the daemon has started it.
+    /// The multiplexer line for each agent or Worker, once the daemon has filled it in.
     @Published private(set) var muxShells: [TerminalTarget: MuxShell] = [:]
     /// Targets whose multiplexer command failed: they show their plain terminal.
     @Published private(set) var muxFailed: Set<TerminalTarget> = []
@@ -354,6 +391,10 @@ final class AppModel: ObservableObject {
     /// showing the agent itself is never closed; tmux would drop the agent's view with it. Away
     /// from tmux, ⌘W closes the window as usual.
     func closePane() {
+        if let file = preview, file.root == selectedCheckout {
+            closePreview(file)
+            return
+        }
         guard canSplit, let target = selectedTarget, let session = muxShells[target]?.session else {
             NSApp.keyWindow?.performClose(nil)
             return
@@ -537,8 +578,13 @@ final class AppModel: ObservableObject {
         background(quiet: true) { client in try client.branches(repo: repo) } then: { done($0) }
     }
 
+    /// Bumped on every selection, the one already shown included, so its terminal takes the
+    /// keyboard: clicking the selected agent is how the human says "let me type here".
+    @Published private(set) var terminalFocusRequest = 0
+
     func select(_ selection: Selection) {
         self.selection = selection
+        terminalFocusRequest += 1
         lastSelection[selection.repo] = selection
         if case .worker(let repo, let id) = selection,
            let worker = snapshot(repo).workers.first(where: { $0.id == id }) {
@@ -635,7 +681,6 @@ final class AppModel: ObservableObject {
             Notifier.post(need, repo: repo, agent: need.agent.flatMap { snapshot.agent($0) })
         }
         trackers[repo] = tracker
-        forgetEndedMuxes(in: repo, shells: snapshot.shells)
         // A report that arrives while its Worker is on screen has been seen; only as it arrives,
         // so Mark as Unread on the Worker being looked at holds.
         if case .worker(repo, let id)? = selection, let worker = snapshot.workers.first(where: { $0.id == id }),
@@ -667,47 +712,39 @@ final class AppModel: ObservableObject {
 
     // MARK: Multiplexer
 
-    /// What a terminal view attaches to: the multiplexer around `target` when that is on and
-    /// running, `target` itself when it is off or failed, nil while the multiplexer starts.
-    func shownTarget(for target: TerminalTarget) -> TerminalTarget? {
-        guard multiplexer.enabled, !muxFailed.contains(target) else { return target }
-        return muxShells[target].map { .shell(id: $0.shell) }
+    /// What a terminal pane runs for `target`: the multiplexer line when that is on, `.attach`
+    /// (the target itself) when it is off or failed, nil while the line is being fetched.
+    func paneCommand(for target: TerminalTarget) -> PaneCommand? {
+        guard multiplexer.enabled, !muxFailed.contains(target) else { return .attach }
+        return muxShells[target].map { .mux($0.command) }
     }
 
     /// Starts the multiplexer around `target` unless it runs, is starting, or failed.
-    func ensureMux(_ target: TerminalTarget, repo: String) {
+    func ensureMux(_ target: TerminalTarget) {
         guard multiplexer.enabled, !muxFailed.contains(target), muxShells[target] == nil,
               !muxPending.contains(target) else { return }
         muxPending.insert(target)
         let command = multiplexer.command
         background { client in
-            try client.openMux(target, command: command)
-        } then: { opened in
+            try client.muxCommand(target, command: command)
+        } then: { mux in
             self.muxPending.remove(target)
-            self.muxShells[target] = MuxShell(repo: repo, shell: opened.shell, session: opened.session, opened: Date())
+            self.muxShells[target] = MuxShell(command: mux.command, session: mux.session)
         } failed: {
             self.muxPending.remove(target)
             self.muxFailed.insert(target)
         }
     }
 
-    /// Drops multiplexer shells that exited (the human quit the multiplexer, or it could not
-    /// start); the view then starts a new one. One that exits right away marks the command as
-    /// failing for that target, so it shows its plain terminal instead of retrying forever.
-    private func forgetEndedMuxes(in repo: String, shells: [Int]?) {
-        guard let shells else { return }
-        let alive = Set(shells)
-        for (target, mux) in muxShells where mux.repo == repo {
-            let age = Date().timeIntervalSince(mux.opened)
-            if alive.contains(mux.shell) {
-                if !mux.seen { muxShells[target]?.seen = true }
-            } else if mux.seen || age > 3 {
-                muxShells[target] = nil
-                if age < 5 {
-                    muxFailed.insert(target)
-                    error = "The multiplexer command exited right away, so \(target.label) shows its own terminal. Check the command in Settings."
-                }
-            }
+    /// The multiplexer in `target`'s pane exited after `seconds`: the human quit it, so the
+    /// pane starts a new one; or it could not start, so `target` shows its own terminal rather
+    /// than retrying forever.
+    func muxExited(_ target: TerminalTarget, after seconds: Double) {
+        guard muxShells[target] != nil else { return }
+        muxShells[target] = nil
+        if seconds < 5 {
+            muxFailed.insert(target)
+            error = "The multiplexer command exited right away, so \(target.label) shows its own terminal. Check the command in Settings."
         }
     }
 

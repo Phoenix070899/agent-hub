@@ -105,3 +105,44 @@ public struct TerminalAppearance: Codable, Equatable, Sendable {
                   backgroundImageBlur: try c.decodeIfPresent(Double.self, forKey: .backgroundImageBlur) ?? 0)
     }
 }
+
+extension TerminalAppearance {
+    /// The look as a libghostty config file. Ghostty's own key bindings are cleared, so Echo's
+    /// shortcuts reach its menus; only copy, paste, select all, find, and the line-editing keys
+    /// Terminal.app has stay with the terminal.
+    public var ghosttyConfig: String {
+        var lines = [
+            "font-family = \(fontName.replacingOccurrences(of: "\"", with: ""))",
+            "font-size = \(fontSize)",
+            "background = \(theme.background)",
+            "foreground = \(theme.foreground)",
+            "cursor-color = \(theme.cursor)",
+            "selection-background = \(theme.selection)",
+        ]
+        lines += theme.ansi.prefix(16).enumerated().map { "palette = \($0.offset)=\($0.element)" }
+        lines += [
+            // With an image, the default background is clear and the image behind the pane shows
+            // through; coloured cells, the cursor, and selections stay solid.
+            "background-opacity = \(backgroundImage == nil ? 1 : 0)",
+            "macos-option-as-alt = true",
+            "cursor-style-blink = false",
+            "shell-integration = none",
+            "term = xterm-256color",
+            "confirm-close-surface = false",
+            "clipboard-read = deny",
+            "clipboard-write = allow",
+            "clipboard-paste-protection = false",
+            "window-padding-x = 0",
+            "window-padding-y = 0",
+            "keybind = clear",
+            "keybind = super+c=copy_to_clipboard",
+            "keybind = super+v=paste_from_clipboard",
+            "keybind = super+a=select_all",
+            "keybind = super+f=start_search",
+            "keybind = super+left=text:\\x01",
+            "keybind = super+right=text:\\x05",
+            "keybind = super+backspace=text:\\x15",
+        ]
+        return lines.joined(separator: "\n") + "\n"
+    }
+}
