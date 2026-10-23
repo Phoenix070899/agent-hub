@@ -6,6 +6,8 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::RecvTimeoutError;
 use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::time::{Duration, Instant};
 
@@ -37,6 +39,9 @@ pub struct Hub {
     live: Mutex<HashMap<i64, Arc<Live>>>,
     /// Each live agent's terminal (Orchestrators and Normal sessions), by agent id.
     agents: Mutex<HashMap<i64, Arc<Live>>>,
+    /// A login shell in each agent's checkout, by agent id: its terminal while the agent itself
+    /// is not running, and a Terminal agent's only one. Started when first attached.
+    shells: Mutex<HashMap<i64, Arc<Live>>>,
     /// When each Normal session's waiting permission prompt was first seen, by agent id.
     agent_prompts: Mutex<HashMap<i64, i64>>,
     tick: Mutex<u64>,
@@ -90,6 +95,7 @@ fn run_usage(program: &str) -> Result<Vec<Value>> {
     while child.try_wait()?.is_none() {
         if Instant::now() >= deadline {
             let _ = child.kill();
+            let _ = child.wait();
             bail!("`claude -p /usage` took over a minute");
         }
         std::thread::sleep(Duration::from_millis(200));
@@ -146,6 +152,7 @@ pub fn run() -> Result<()> {
         db: Mutex::new(conn),
         live: Mutex::new(HashMap::new()),
         agents: Mutex::new(HashMap::new()),
+        shells: Mutex::new(HashMap::new()),
         agent_prompts: Mutex::new(HashMap::new()),
         tick: Mutex::new(0),
         changed: Condvar::new(),
@@ -266,9 +273,9 @@ impl Hub {
 
     /// The terminal a request names: `{"id": n}` for a Worker, `{"agent": n}` for an Orchestrator
     /// or Normal session, `{"orchestrator": repo}` for the repo's first Orchestrator.
-    fn terminal(&self, p: &Value) -> Result<Arc<Live>> {
+    fn terminal(self: &Arc<Self>, p: &Value) -> Result<Arc<Live>> {
         if let Some(id) = p.get("agent").and_then(Value::as_i64) {
-            return self.agent_live(id);
+            return self.agent_live(id).or_else(|_| self.shell(id));
         }
         match p.get("orchestrator").and_then(Value::as_str) {
             Some(repo) => {
@@ -291,6 +298,48 @@ impl Hub {
 
     fn agent_is_live(&self, id: i64) -> bool {
         self.agents.lock().unwrap().contains_key(&id)
+    }
+
+    /// The agent's shell, started in its checkout when it has none.
+    fn shell(self: &Arc<Self>, id: i64) -> Result<Arc<Live>> {
+        let mut shells = self.shells.lock().unwrap();
+        if let Some(live) = shells.get(&id).filter(|live| live.is_alive()) {
+            return Ok(Arc::clone(live));
+        }
+        let agent = db::agent(&self.db(), id)?;
+        let mut env = self.agent_env(None, None)?;
+        env.push(("SHELL".into(), login_shell()));
+        let spawn = Spawn {
+            program: login_shell(),
+            args: vec!["-l".into()],
+            cwd: PathBuf::from(agent.home()),
+            env,
+            // The terminal app that started the daemon is not this one: macOS's zshrc would
+            // restore that app's saved session into it.
+            env_remove: inherited_agent_vars()
+                .into_iter()
+                .chain(["TERM_PROGRAM", "TERM_PROGRAM_VERSION", "TERM_SESSION_ID"].map(String::from))
+                .collect(),
+        };
+        let hub: Weak<Hub> = Arc::downgrade(self);
+        let live = Live::spawn(id, spawn, move |id| {
+            if let Some(hub) = hub.upgrade() {
+                // Only this shell: a newer one may have taken its place.
+                let mut shells = hub.shells.lock().unwrap();
+                if shells.get(&id).is_some_and(|live| !live.is_alive()) {
+                    shells.remove(&id);
+                }
+            }
+        })?;
+        shells.insert(id, Arc::clone(&live));
+        Ok(live)
+    }
+
+    /// Ends the agent's shell, so whoever follows the agent attaches to it when it starts.
+    fn stop_shell(&self, id: i64) {
+        if let Some(live) = self.shells.lock().unwrap().remove(&id) {
+            live.kill();
+        }
     }
 
     /// `session.open`, as `hub` and older clients call it: starts the Orchestrator working in
@@ -322,7 +371,8 @@ impl Hub {
     }
 
     /// Starts an agent: an existing one by `agent` id (resuming its Claude session), or a new
-    /// `kind` (orchestrator or claude) in `repo` with an optional `name` and `model`.
+    /// `kind` (orchestrator, claude, or terminal) in `repo` with an optional `name` and `model`.
+    /// A Terminal agent runs nothing of its own: attaching to it starts its shell.
     fn open_agent(self: &Arc<Self>, p: &Value) -> Result<Value> {
         let picked = |key: &str| {
             p.get(key)
@@ -345,8 +395,13 @@ impl Hub {
                 let place = if let Some(branch) = picked("branch") {
                     Some((repo::checkout(&root, &branch)?, branch))
                 } else if let Some(branch) = picked("new_branch") {
-                    let base = picked("base").unwrap_or_else(|| "HEAD".into());
-                    Some((repo::new_branch_worktree(&root, &branch, &base)?, branch))
+                    // A branch that already exists is worked on where it is, not made again.
+                    if repo::branches(&root)?.1.iter().any(|b| b.name == branch) {
+                        Some((repo::checkout(&root, &branch)?, branch))
+                    } else {
+                        let base = picked("base").unwrap_or_else(|| "HEAD".into());
+                        Some((repo::new_branch_worktree(&root, &branch, &base)?, branch))
+                    }
                 } else {
                     None
                 };
@@ -378,7 +433,7 @@ impl Hub {
             json!({ "repo": agent.repo, "agent": agent.id, "kind": agent.kind, "started": started,
                     "resumed": resumed, "model": agent.model, "name": agent.name })
         };
-        if self.agent_is_live(id) {
+        if self.agent_is_live(id) || agent.kind == db::agent_kind::TERMINAL {
             return Ok(view(false, false));
         }
         let mut extra: Vec<String> = p
@@ -439,6 +494,8 @@ impl Hub {
             }
         })?;
         self.agents.lock().unwrap().insert(agent.id, Arc::clone(&live));
+        // Only once the agent is live: an attach before that would start a new shell in its place.
+        self.stop_shell(agent.id);
         let hub = Arc::clone(self);
         std::thread::spawn(move || hub.watch_agent(live));
         self.notify();
@@ -482,7 +539,8 @@ impl Hub {
             "kind": agent.kind,
             "name": agent.name,
             "model": agent.model,
-            "live": self.agent_is_live(agent.id),
+            // A Terminal is always ready: attaching starts its shell.
+            "live": self.agent_is_live(agent.id) || agent.kind == db::agent_kind::TERMINAL,
             "branch": agent.branch,
             "cwd": agent.cwd,
             "head": repo::head_branch(Path::new(agent.home())),
@@ -638,6 +696,7 @@ impl Hub {
             "agent.forget" => {
                 let id = id_param(p, "agent")?;
                 self.stop_agent(id);
+                self.stop_shell(id);
                 db::close_agent(&self.db(), id)?;
                 self.notify();
                 Ok(json!({}))
@@ -794,6 +853,9 @@ impl Hub {
                 }
                 drop(db);
                 for live in self.agents.lock().unwrap().values() {
+                    live.kill();
+                }
+                for live in self.shells.lock().unwrap().values() {
                     live.kill();
                 }
                 let _ = std::fs::remove_file(paths::socket());
@@ -1334,13 +1396,13 @@ impl Hub {
                 _ if blocker.is_some() || !open.is_empty() => "needs you",
                 _ => "running",
             };
-            rows.push(json!({
+            let quiet_since = worker.last_message_at.unwrap_or(worker.created_at);
+            let mut row = json!({
                 "id": format!("w{}", worker.id),
                 "profile": worker.profile,
                 "title": worker.title,
                 "state": row_state,
                 "phase": worker.state,
-                "quietSeconds": (now - worker.last_message_at.unwrap_or(worker.created_at)).max(0),
                 "place": place(Path::new(repo), Path::new(&worker.cwd)),
                 "branch": worker.branch,
                 // Where it works, for Echo's Files column.
@@ -1355,7 +1417,14 @@ impl Hub {
                 "progress": progress,
                 "settledAt": worker.settled_at,
                 "fanout": worker.fanout,
-            }));
+            });
+            // Echo counts the quiet time up itself, so an unchanged repo sends an unchanged snapshot.
+            if for_echo {
+                row["quietSince"] = json!(quiet_since);
+            } else {
+                row["quietSeconds"] = json!((now - quiet_since).max(0));
+            }
+            rows.push((quiet_since, row));
         }
         let order = |row: &Value| match row["state"].as_str() {
             Some("needs you") => 0,
@@ -1363,8 +1432,8 @@ impl Hub {
             Some("failed") => 2,
             _ => 3,
         };
-        rows.sort_by_key(|row| (order(row), row["quietSeconds"].as_i64().unwrap_or(0)));
-        Ok(rows)
+        rows.sort_by_key(|(quiet_since, row)| (order(row), std::cmp::Reverse(*quiet_since)));
+        Ok(rows.into_iter().map(|(_, row)| row).collect())
     }
 
     /// What needs the human now: open questions and waiting permission prompts, oldest first.
@@ -1500,6 +1569,7 @@ impl Hub {
             Err(error) => return proto::write_line(&mut stream, &proto::err(&error)),
         };
         proto::write_line(&mut stream, &proto::ok(json!({ "repo": repo })))?;
+        let mut last = None;
         loop {
             let stale = self
                 .usage
@@ -1511,8 +1581,13 @@ impl Hub {
                 self.refresh_usage();
             }
             let seen = *self.tick.lock().unwrap();
-            if proto::write_line(&mut stream, &self.snapshot(&repo)?).is_err() {
-                return Ok(());
+            let snapshot = self.snapshot(&repo)?;
+            // Each line redraws Echo's window, so an unchanged snapshot is not sent again.
+            if last.as_ref() != Some(&snapshot) {
+                if proto::write_line(&mut stream, &snapshot).is_err() {
+                    return Ok(());
+                }
+                last = Some(snapshot);
             }
             let deadline = Instant::now() + Duration::from_secs(5);
             loop {
@@ -1612,7 +1687,7 @@ impl Hub {
         }
     }
 
-    fn attach(&self, p: &Value, mut reader: BufReader<UnixStream>, mut stream: UnixStream) -> Result<()> {
+    fn attach(self: &Arc<Self>, p: &Value, mut reader: BufReader<UnixStream>, mut stream: UnixStream) -> Result<()> {
         let live = match self.terminal(p) {
             Ok(live) => live,
             Err(error) => return proto::write_line(&mut stream, &proto::err(&error)),
@@ -1629,17 +1704,29 @@ impl Hub {
         out.write_all(b"\x1b[H\x1b[2J")?;
         out.write_all(&snapshot)?;
         out.flush()?;
+        // Set once the client leaves, so the writer stops waiting on a quiet terminal's output.
+        let detached = Arc::new(AtomicBool::new(false));
+        let gone = Arc::clone(&detached);
         std::thread::spawn(move || {
-            for chunk in chunks {
-                if out.write_all(&chunk).and_then(|_| out.flush()).is_err() {
-                    break;
+            loop {
+                match chunks.recv_timeout(Duration::from_secs(1)) {
+                    Ok(chunk) => {
+                        if out.write_all(&chunk).and_then(|_| out.flush()).is_err() {
+                            break;
+                        }
+                    }
+                    Err(RecvTimeoutError::Timeout) if !gone.load(Ordering::SeqCst) => {}
+                    Err(_) => break,
                 }
             }
             let _ = out.shutdown(std::net::Shutdown::Both);
         });
-        // An unnamed agent takes its name from the first line the human types into it.
+        // An unnamed agent takes its name from the first line the human types into it, not into
+        // its shell.
         let mut naming = match p.get("agent").and_then(Value::as_i64) {
-            Some(id) if db::agent(&self.db(), id).is_ok_and(|a| a.name.is_none()) => Some((id, LineReader::default())),
+            Some(id) if self.agent_is_live(id) && db::agent(&self.db(), id).is_ok_and(|a| a.name.is_none()) => {
+                Some((id, LineReader::default()))
+            }
             _ => None,
         };
         let mut buf = [0u8; 4096];
@@ -1660,6 +1747,7 @@ impl Hub {
                 }
             }
         }
+        detached.store(true, Ordering::SeqCst);
         let _ = stream.shutdown(std::net::Shutdown::Both);
         Ok(())
     }
@@ -1767,6 +1855,14 @@ fn shell_quote(word: &str) -> String {
         return word.to_string();
     }
     format!("'{}'", word.replace('\'', "'\\''"))
+}
+
+/// The human's shell, as the daemon inherited it.
+fn login_shell() -> String {
+    std::env::var("SHELL")
+        .ok()
+        .filter(|shell| !shell.is_empty())
+        .unwrap_or_else(|| "/bin/zsh".into())
 }
 
 pub fn inherited_agent_vars() -> Vec<String> {

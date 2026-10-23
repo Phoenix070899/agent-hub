@@ -263,10 +263,10 @@ fn run(cli: Cli) -> Result<ExitCode> {
                     } else {
                         "stopped"
                     };
-                    let kind = if agent["kind"] == "claude" {
-                        "Normal"
-                    } else {
-                        "Orchestrator"
+                    let kind = match agent["kind"].as_str() {
+                        Some("claude") => "Normal",
+                        Some("terminal") => "Terminal",
+                        _ => "Orchestrator",
                     };
                     println!(
                         "  a{:<4} {live:<8} {kind:<13} {}",

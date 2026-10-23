@@ -4,7 +4,7 @@
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -13,7 +13,12 @@ use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, Pt
 
 pub const ROWS: u16 = 45;
 pub const COLS: u16 = 160;
-const SCROLLBACK: usize = 2000;
+/// Only the visible screen is ever read or redrawn; the attached terminal keeps its own history.
+const SCROLLBACK: usize = 0;
+/// Output chunks (16 KiB at most) queued for one attached client. A client that falls this far
+/// behind, like a stopped `hub attach`, is let go rather than held in memory without limit; it
+/// attaches again to a fresh screen.
+const BACKLOG: usize = 1024;
 
 pub struct Spawn {
     pub program: String,
@@ -29,7 +34,7 @@ pub struct Live {
     master: Mutex<Box<dyn MasterPty + Send>>,
     writer: Mutex<Box<dyn Write + Send>>,
     parser: Mutex<vt100::Parser>,
-    subscribers: Mutex<Vec<Sender<Arc<Vec<u8>>>>>,
+    subscribers: Mutex<Vec<SyncSender<Arc<Vec<u8>>>>>,
     killer: Mutex<Box<dyn ChildKiller + Send + Sync>>,
     /// The blocker kind already reported for the current stretch, cleared when work resumes.
     pub blocker: Mutex<Option<String>>,
@@ -102,7 +107,7 @@ impl Live {
         self.subscribers
             .lock()
             .unwrap()
-            .retain(|subscriber| subscriber.send(Arc::clone(&chunk)).is_ok());
+            .retain(|subscriber| subscriber.try_send(Arc::clone(&chunk)).is_ok());
         parser.process(bytes);
     }
 
@@ -144,7 +149,7 @@ impl Live {
     /// The screen as escape codes that redraw it, and every byte of output after it.
     pub fn subscribe(&self) -> (Vec<u8>, Receiver<Arc<Vec<u8>>>) {
         let parser = self.parser.lock().unwrap();
-        let (sender, receiver) = mpsc::channel();
+        let (sender, receiver) = mpsc::sync_channel(BACKLOG);
         self.subscribers.lock().unwrap().push(sender);
         (parser.screen().state_formatted(), receiver)
     }

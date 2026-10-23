@@ -558,9 +558,30 @@ fn events_stream_a_snapshot_on_every_change() {
             assert_eq!(snapshot["needs"][0]["kind"], "question");
             assert_eq!(snapshot["needs"][0]["body"], "Which color?");
             assert_eq!(snapshot["workers"][0]["state"], "needs you");
+            // Echo counts the quiet time up from here; `hub status` still gets seconds.
+            assert!(snapshot["workers"][0]["quietSince"].is_i64(), "{snapshot}");
+            assert!(snapshot["workers"][0].get("quietSeconds").is_none(), "{snapshot}");
             break;
         }
     }
+    let status = hub.call("status", serde_json::json!({ "repo": hub.repo_key() }));
+    assert!(status["result"]["workers"][0]["quietSeconds"].is_i64(), "{status}");
+}
+
+#[test]
+fn events_send_nothing_while_the_repo_is_unchanged() {
+    let hub = Hub::new("unchanged");
+    hub.ok(&["status"]);
+    let mut stream = UnixStream::connect(hub.state.join("hubd.sock")).unwrap();
+    let request = serde_json::json!({ "method": "events", "params": { "repo": hub.repo_key() } });
+    stream.write_all(format!("{request}\n").as_bytes()).unwrap();
+    // Longer than the 5-second resend, so a repeated snapshot would arrive.
+    stream.set_read_timeout(Some(Duration::from_secs(7))).unwrap();
+    let mut lines = BufReader::new(stream).lines();
+    lines.next();
+    // The first snapshot, then the usage refresh it starts may change it once or twice.
+    let quiet = (0..5).any(|_| lines.next().unwrap().is_err());
+    assert!(quiet, "an unchanged repo kept sending snapshots");
 }
 
 #[test]
@@ -1125,8 +1146,14 @@ fn a_multiplexer_shows_an_agent_and_follows_it_through_restarts() {
     pane.type_keys(b"hello\r");
     pane.wait_for("got: hello");
 
+    // Stopped, it shows its shell until it starts again.
     hub.call("agent.close", serde_json::json!({ "agent": agent }));
-    pane.wait_for("picks it up again when it starts");
+    pane.clear();
+    hub.eventually("the shell to take its place", || {
+        pane.type_keys(b"echo shell-$((2+3))\r");
+        std::thread::sleep(Duration::from_millis(300));
+        String::from_utf8_lossy(&pane.output.lock().unwrap()).contains("shell-5")
+    });
     hub.call("agent.open", serde_json::json!({ "agent": agent }));
     pane.clear();
     pane.wait_for("Working");
@@ -1174,4 +1201,97 @@ fn tmux_runs_the_agent_in_its_first_pane() {
     let _ = Command::new("tmux").args(["-L", &socket, "kill-server"]).output();
     let _ = pane.child.kill();
     assert!(panes.status.success(), "{}", String::from_utf8_lossy(&panes.stderr));
+}
+
+#[test]
+fn a_terminal_agent_is_a_shell_in_its_repo() {
+    let hub = Hub::new("term");
+    hub.ok(&["status"]);
+    let opened = hub.call(
+        "agent.open",
+        serde_json::json!({ "repo": hub.repo_key(), "kind": "terminal" }),
+    );
+    assert_eq!(opened["result"]["started"], false, "{opened}");
+    let agent = serde_json::json!({ "agent": opened["result"]["agent"] });
+    let mut write = agent.clone();
+    write["text"] = serde_json::json!("echo in-$(basename \"$PWD\")-$((1+1))\r");
+    hub.eventually("the shell to run the line", || {
+        hub.call("terminal.write", write.clone());
+        screen_of(&hub, &agent).contains("in-repo-2")
+    });
+    let agents = hub.call("sessions.list", serde_json::json!({}))["result"]["sessions"][0]["agents"].clone();
+    assert_eq!(agents[0]["kind"], "terminal", "{agents}");
+    assert_eq!(agents[0]["live"], true, "always ready: {agents}");
+}
+
+#[test]
+fn a_stopped_agent_shows_a_shell_until_it_starts_again() {
+    let hub = Hub::new("fallback");
+    hub.ok(&["status"]);
+    let opened = hub.call(
+        "agent.open",
+        serde_json::json!({ "repo": hub.repo_key(), "kind": "claude", "name": "echo me" }),
+    );
+    let id = opened["result"]["agent"].clone();
+    let agent = serde_json::json!({ "agent": id });
+    hub.eventually("the agent to start", || screen_of(&hub, &agent).contains("Working"));
+    hub.call("agent.close", agent.clone());
+    let live = || {
+        hub.call("sessions.list", serde_json::json!({}))["result"]["sessions"][0]["agents"][0]["live"]
+            .as_bool()
+            .unwrap()
+    };
+    hub.eventually("the agent to stop", || !live());
+    let mut write = agent.clone();
+    write["text"] = serde_json::json!("echo shell-$((2+3))\r");
+    hub.eventually("its shell to run the line", || {
+        hub.call("terminal.write", write.clone());
+        screen_of(&hub, &agent).contains("shell-5")
+    });
+    let resumed = hub.call("agent.open", agent.clone());
+    assert_eq!(resumed["result"]["started"], true, "{resumed}");
+    hub.eventually("the agent to replace its shell", || {
+        let screen = screen_of(&hub, &agent);
+        screen.contains("Working") && !screen.contains("shell-5")
+    });
+}
+
+#[test]
+fn a_new_branch_that_exists_is_worked_on_where_it_is() {
+    let hub = Hub::new("reuse");
+    hub.ok(&["status"]);
+    let open = || {
+        let opened = hub.call(
+            "agent.open",
+            serde_json::json!({ "repo": hub.repo_key(), "kind": "orchestrator", "new_branch": "feat/login", "base": "main" }),
+        );
+        assert_eq!(opened["ok"], true, "{opened}");
+        opened["result"]["agent"].as_i64().unwrap()
+    };
+    let (first, second) = (open(), open());
+    let agents = hub.call("sessions.list", serde_json::json!({}))["result"]["sessions"][0]["agents"].clone();
+    let home = |id: i64| {
+        let cwd = agents.as_array().unwrap().iter().find(|a| a["id"] == id).unwrap()["cwd"].clone();
+        std::fs::canonicalize(cwd.as_str().unwrap_or_else(|| panic!("{agents}"))).unwrap()
+    };
+    assert_eq!(home(first), home(second), "{agents}");
+
+    // A branch checked out in the repo itself is worked on there.
+    git(&hub.repo, &["branch", "feat/here"]);
+    git(&hub.repo, &["checkout", "-q", "feat/here"]);
+    let opened = hub.call(
+        "agent.open",
+        serde_json::json!({ "repo": hub.repo_key(), "kind": "orchestrator", "new_branch": "feat/here" }),
+    );
+    let id = opened["result"]["agent"].as_i64().unwrap();
+    let agents = hub.call("sessions.list", serde_json::json!({}))["result"]["sessions"][0]["agents"].clone();
+    let agent = agents
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["id"] == id)
+        .unwrap()
+        .clone();
+    assert!(agent["cwd"].is_null(), "{agent}");
+    assert_eq!(agent["branch"], "feat/here", "{agent}");
 }

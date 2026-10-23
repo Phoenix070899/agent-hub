@@ -113,6 +113,9 @@ pub fn open(path: &Path) -> Result<Connection> {
            answered_at integer
          );
          create index if not exists messages_undelivered on messages(repo, delivered_at);
+         -- Every snapshot asks each Worker for its open questions and latest status and blocker.
+         create index if not exists messages_by_worker on messages(worker_id, kind);
+         create index if not exists workers_by_repo on workers(repo);
          create table if not exists sessions (
            id integer primary key,
            repo text not null unique,
@@ -392,6 +395,8 @@ pub mod agent_kind {
     pub const ORCHESTRATOR: &str = "orchestrator";
     /// A Normal session: one Claude Code terminal, just the human and the agent.
     pub const CLAUDE: &str = "claude";
+    /// A plain shell in the repo; it runs no agent.
+    pub const TERMINAL: &str = "terminal";
 }
 
 /// One of a repo's agents, on one Claude session for its whole life.
@@ -445,8 +450,8 @@ pub fn set_agent_place(conn: &Connection, id: i64, cwd: Option<&str>, branch: Op
 }
 
 pub fn insert_agent(conn: &Connection, repo: &str, kind: &str, name: Option<&str>, model: Option<&str>) -> Result<i64> {
-    if ![agent_kind::ORCHESTRATOR, agent_kind::CLAUDE].contains(&kind) {
-        bail!("an agent is an orchestrator or claude, not {kind:?}");
+    if ![agent_kind::ORCHESTRATOR, agent_kind::CLAUDE, agent_kind::TERMINAL].contains(&kind) {
+        bail!("an agent is an orchestrator, claude, or terminal, not {kind:?}");
     }
     conn.execute(
         "insert into agents (repo, kind, name, model, session_id, created_at) values (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -539,6 +544,27 @@ mod tests {
         .unwrap();
         let w = worker(&conn, id).unwrap();
         (conn, w)
+    }
+
+    #[test]
+    fn a_workers_messages_are_found_through_an_index() {
+        let (conn, w) = fixture();
+        for sql in [
+            "select id from messages where worker_id = ?1 and kind = 'question' and answered_at is null order by id",
+            "select id from messages where worker_id = ?1 and kind = 'status' order by id desc limit 1",
+        ] {
+            let plan: Vec<String> = conn
+                .prepare(&format!("explain query plan {sql}"))
+                .unwrap()
+                .query_map([w.id], |row| row.get(3))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap();
+            assert!(
+                plan.iter().any(|step| step.contains("messages_by_worker")),
+                "{sql}: {plan:?}"
+            );
+        }
     }
 
     #[test]

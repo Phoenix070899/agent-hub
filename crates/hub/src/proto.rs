@@ -96,7 +96,9 @@ fn spawn_daemon() -> Result<()> {
             Ok(())
         });
     }
-    command.spawn().context("starting the Hub Daemon")?;
+    let mut daemon = command.spawn().context("starting the Hub Daemon")?;
+    // Reaped when it exits, so a long-lived caller like `hub attach --follow` leaves no zombie.
+    std::thread::spawn(move || daemon.wait());
     Ok(())
 }
 

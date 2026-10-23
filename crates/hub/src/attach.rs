@@ -1,6 +1,7 @@
 //! `hub attach`: this terminal becomes a Worker's or an agent's terminal until Ctrl-] or it ends.
-//! With `--follow` it stays put and reattaches whenever the agent starts again, which is how
-//! Echo shows an agent inside the human's multiplexer. With `--echo` it is one of Echo's own
+//! With `--follow` it stays put and reattaches whenever the agent starts again, showing the
+//! agent's shell while it is stopped, which is how Echo shows an agent inside the human's
+//! multiplexer. With `--echo` it is one of Echo's own
 //! terminal panes: Ctrl-] is typed like any key, and the screen stays when the terminal ends.
 
 use std::io::{BufReader, Read, Write};
@@ -261,8 +262,9 @@ fn say_dim(note: &str) {
     let _ = stdout.flush();
 }
 
-/// Shows `target` here for as long as it exists: when its terminal ends it waits, and attaches
-/// again when it starts. Leaves once it is gone for good, or on Ctrl-].
+/// Shows `target` here for as long as it exists: when a Worker's terminal ends it waits, and
+/// attaches again when it starts; a stopped agent shows its shell meanwhile. Leaves once it is
+/// gone for good, or on Ctrl-].
 pub fn follow(target: Target) -> Result<()> {
     let label = target.label();
     let params = target.params();
@@ -278,7 +280,9 @@ pub fn follow(target: Target) -> Result<()> {
                     print!("\x1b[2J\x1b[H");
                 }
                 pump(attached, &params);
-                say(&format!("{label} stopped. This pane picks it up again when it starts."));
+                if matches!(target, Target::Worker(_)) {
+                    say(&format!("{label} stopped. This pane picks it up again when it starts."));
+                }
             }
             Err(_) if first => say(&format!(
                 "{label} is not running. This pane picks it up when it starts."
@@ -292,7 +296,8 @@ pub fn follow(target: Target) -> Result<()> {
                 None => restore_and_exit(&format!("{label} is closed")),
                 Some(true) => break,
                 Some(false) if matches!(target, Target::Worker(_)) => restore_and_exit(&format!("{label} ended")),
-                Some(false) => {}
+                // The agent's shell stands in until it starts again.
+                Some(false) => break,
             }
         }
     }
