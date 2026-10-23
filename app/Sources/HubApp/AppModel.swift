@@ -149,6 +149,10 @@ final class AppModel: ObservableObject {
     @Published var filesShown = UserDefaults.standard.bool(forKey: "filesShown") {
         didSet { UserDefaults.standard.set(filesShown, forKey: "filesShown") }
     }
+    /// What the Files column shows: the tree, git status, or the branch's commits; remembered.
+    @Published var filesTab = FilesTab(rawValue: UserDefaults.standard.string(forKey: "filesTab") ?? "") ?? .files {
+        didSet { UserDefaults.standard.set(filesTab.rawValue, forKey: "filesTab") }
+    }
     /// Files `.gitignore` covers, shown too.
     @Published var showIgnoredFiles = UserDefaults.standard.bool(forKey: "showIgnoredFiles") {
         didSet {

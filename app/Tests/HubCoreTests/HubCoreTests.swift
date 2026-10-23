@@ -160,6 +160,28 @@ Binary files a/logo.png and /dev/null differ
     #expect(smartCreateFrom("Magic link login", branches: branches) == .name("Magic link login"))
 }
 
+@Test func commitsReadFromGitLog() {
+    let output = "abc123\u{1F}abc\u{1F}Fix the gutter\u{1F}Dung\u{1F}2 hours ago\u{1E}\n"
+        + "def456\u{1F}def\u{1E}\n" // a record missing fields is skipped
+        + "fed789\u{1F}fed\u{1F}\u{1F}Bot\u{1F}3 days ago\u{1E}\n"
+    #expect(parseCommits(output) == [
+        Commit(hash: "abc123", short: "abc", subject: "Fix the gutter", author: "Dung", when: "2 hours ago"),
+        Commit(hash: "fed789", short: "fed", subject: "", author: "Bot", when: "3 days ago"),
+    ])
+    #expect(parseCommits("") == [])
+}
+
+@Test func aCommitsFilesReadFromNameStatus() {
+    let output = "M\0app/a.swift\0A\0new.md\0D\0gone.txt\0R087\0old/name.rs\0new/name.rs\0T\0link\0"
+    #expect(parseNameStatus(output) == [
+        ChangedFile(mark: .modified, path: "app/a.swift"),
+        ChangedFile(mark: .added, path: "new.md"),
+        ChangedFile(mark: .deleted, path: "gone.txt"),
+        ChangedFile(mark: .renamed, path: "new/name.rs"),
+        ChangedFile(mark: .modified, path: "link"),
+    ])
+}
+
 @Test func theBranchTabMakesABranchNoOneHasYet() {
     let branches = ["main", "fix/old"]
     #expect(branchCreateFrom(" ", picked: nil, branches: branches) == nil)

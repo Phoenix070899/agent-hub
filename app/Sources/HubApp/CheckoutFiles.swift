@@ -206,6 +206,40 @@ extension CheckoutFiles {
     }
 }
 
+extension CheckoutFiles {
+    /// The branch's own commits, the ones its base branch lacks, newest first; on the base
+    /// itself, detached, or with no base found, the latest 50, and `base` is nil.
+    nonisolated static func commits(_ root: String, branch: String?) async -> (base: String?, commits: [Commit]) {
+        await Task.detached(priority: .userInitiated) {
+            let base = baseBranch(root)
+            if let base, let branch, branch != base {
+                let output = Git.run(root, ["log", commitLogFormat, "-n", "300", "\(base)..HEAD"]).output ?? ""
+                return (base, parseCommits(output))
+            }
+            return (nil, parseCommits(Git.run(root, ["log", commitLogFormat, "-n", "50"]).output ?? ""))
+        }.value
+    }
+
+    /// The repo's main branch, as a local branch: the remote's default, else main, else master.
+    nonisolated private static func baseBranch(_ root: String) -> String? {
+        var names: [String] = []
+        if let remote = Git.run(root, ["symbolic-ref", "--short", "-q", "refs/remotes/origin/HEAD"]).output?
+            .trimmingCharacters(in: .whitespacesAndNewlines), remote.hasPrefix("origin/") {
+            names.append(String(remote.dropFirst("origin/".count)))
+        }
+        names += ["main", "master"]
+        return names.first { Git.run(root, ["rev-parse", "--verify", "-q", "refs/heads/\($0)"]).output != nil }
+    }
+
+    /// The files a commit touched; a merge lists what it brought onto its first parent.
+    nonisolated static func files(of commit: String, in root: String) async -> [ChangedFile] {
+        await Task.detached(priority: .userInitiated) {
+            let output = Git.run(root, ["show", "--format=", "--name-status", "-z", "--diff-merges=first-parent", commit]).output
+            return parseNameStatus(output ?? "")
+        }.value
+    }
+}
+
 enum Git {
     /// Runs git in `dir`; nil output when it fails, with what it printed on stderr.
     /// A `stopper` can end it early, which reads as a failure; `input` goes to its stdin. With

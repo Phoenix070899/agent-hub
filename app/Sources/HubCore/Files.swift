@@ -185,6 +185,71 @@ public func parseGitStatus(_ output: String) -> [String: GitMark] {
     return marks
 }
 
+/// A commit as the Commits tab lists it.
+public struct Commit: Equatable, Identifiable, Sendable {
+    public let hash: String
+    public let short: String
+    public let subject: String
+    public let author: String
+    /// When, as git says it relative to now: "3 hours ago".
+    public let when: String
+
+    public var id: String { hash }
+
+    public init(hash: String, short: String, subject: String, author: String, when: String) {
+        self.hash = hash
+        self.short = short
+        self.subject = subject
+        self.author = author
+        self.when = when
+    }
+}
+
+/// The `git log` format `parseCommits` reads: fields split by 0x1F, commits ended by 0x1E.
+public let commitLogFormat = "--format=%H%x1f%h%x1f%s%x1f%an%x1f%ar%x1e"
+
+/// `git log` in `commitLogFormat`, newest first.
+public func parseCommits(_ output: String) -> [Commit] {
+    output.split(separator: "\u{1E}").compactMap { record in
+        let fields = record.trimmingCharacters(in: .whitespacesAndNewlines).split(separator: "\u{1F}", omittingEmptySubsequences: false)
+        guard fields.count == 5, !fields[0].isEmpty else { return nil }
+        return Commit(hash: String(fields[0]), short: String(fields[1]), subject: String(fields[2]),
+                      author: String(fields[3]), when: String(fields[4]))
+    }
+}
+
+/// A file a commit touched, with its mark; a rename or copy is listed at its new path.
+public struct ChangedFile: Equatable, Sendable {
+    public let mark: GitMark
+    public let path: String
+
+    public init(mark: GitMark, path: String) {
+        self.mark = mark
+        self.path = path
+    }
+}
+
+/// `git show --name-status -z` read into the files a commit touched, in git's order.
+public func parseNameStatus(_ output: String) -> [ChangedFile] {
+    var files: [ChangedFile] = []
+    var fields = output.split(separator: "\0", omittingEmptySubsequences: true).map(String.init)[...]
+    while let status = fields.popFirst() {
+        guard let letter = status.first else { continue }
+        switch letter {
+        case "R", "C":
+            // The old path, then the new one.
+            _ = fields.popFirst()
+            guard let path = fields.popFirst() else { return files }
+            files.append(ChangedFile(mark: letter == "R" ? .renamed : .added, path: path))
+        default:
+            guard let path = fields.popFirst() else { return files }
+            let mark: GitMark = letter == "A" ? .added : letter == "D" ? .deleted : .modified
+            files.append(ChangedFile(mark: mark, path: path))
+        }
+    }
+    return files
+}
+
 /// Whether anything under `folder` has a mark, for the dot on a closed folder.
 public func folderHasChanges(_ folder: String, in marks: [String: GitMark]) -> Bool {
     let prefix = folder + "/"
