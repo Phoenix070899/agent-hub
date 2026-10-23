@@ -20,6 +20,8 @@ final class CheckoutFiles: ObservableObject {
     /// Ignored folders listed on demand; each re-read lists them again, as git does not.
     private var filled: Set<String> = []
     private var stream: FSEventStreamRef?
+    /// Folders git ignores, as the watcher names them, so a build writing inside one reads nothing.
+    private var ignoredFolders: Set<String> = []
     private var pending: DispatchWorkItem?
     private var reading = false
     private var readAgain = false
@@ -43,6 +45,8 @@ final class CheckoutFiles: ObservableObject {
             return
         }
         reading = true
+        // A changed .gitignore is read here too; learn the ignored folders again.
+        ignoredFolders = []
         let root = root
         let ignored = showIgnored
         Task.detached(priority: .userInitiated) {
@@ -102,19 +106,62 @@ final class CheckoutFiles: ObservableObject {
     }
 
     private func watch() {
-        var context = FSEventStreamContext(version: 0, info: Unmanaged.passUnretained(self).toOpaque(),
-                                           retain: nil, release: nil, copyDescription: nil)
-        let callback: FSEventStreamCallback = { _, info, _, _, _, _ in
+        // The stream holds this object until `stop()`, so a late event never reaches a freed one.
+        var context = FSEventStreamContext(
+            version: 0, info: Unmanaged.passUnretained(self).toOpaque(),
+            retain: { info in
+                guard let info else { return nil }
+                _ = Unmanaged<CheckoutFiles>.fromOpaque(info).retain()
+                return info
+            },
+            release: { info in
+                guard let info else { return }
+                Unmanaged<CheckoutFiles>.fromOpaque(info).release()
+            },
+            copyDescription: nil)
+        let callback: FSEventStreamCallback = { _, info, _, paths, _, _ in
             guard let info else { return }
             let files = Unmanaged<CheckoutFiles>.fromOpaque(info).takeUnretainedValue()
-            DispatchQueue.main.async { MainActor.assumeIsolated { files.changed() } }
+            let folders = unsafeBitCast(paths, to: NSArray.self) as? [String] ?? []
+            DispatchQueue.main.async { MainActor.assumeIsolated { files.changed(folders) } }
         }
+        let flags = kFSEventStreamCreateFlagNoDefer | kFSEventStreamCreateFlagUseCFTypes
         guard let stream = FSEventStreamCreate(nil, callback, &context, [root] as CFArray,
                                                FSEventStreamEventId(kFSEventStreamEventIdSinceNow), 0.3,
-                                               FSEventStreamCreateFlags(kFSEventStreamCreateFlagNoDefer)) else { return }
+                                               FSEventStreamCreateFlags(flags)) else { return }
         FSEventStreamSetDispatchQueue(stream, DispatchQueue.global(qos: .utility))
         FSEventStreamStart(stream)
         self.stream = stream
+    }
+
+    /// A change only inside ignored folders, like a build's output, reads nothing while they are hidden.
+    private func changed(_ folders: [String]) {
+        guard !showIgnored else { return changed() }
+        // The watcher names folders by their real path, with a trailing slash.
+        let base = URL(fileURLWithPath: root).withUnsafeFileSystemRepresentation { path in
+            guard let path, let real = realpath(path, nil) else { return root }
+            defer { free(real) }
+            return String(cString: real)
+        } + "/"
+        var unknown: [String] = []
+        for folder in folders {
+            guard folder.hasPrefix(base), folder.count > base.count else { return changed() }
+            let path = String(folder.dropFirst(base.count))
+            if path.hasPrefix(".git/") { return changed() }
+            if !ignoredFolders.contains(where: { path.hasPrefix($0) }) { unknown.append(path) }
+        }
+        guard !unknown.isEmpty else { return }
+        let root = root
+        Task.detached(priority: .utility) {
+            let input = unknown.joined(separator: "\0") + "\0"
+            // check-ignore exits 1 when nothing is ignored, which reads as no output.
+            let output = Git.run(root, ["check-ignore", "--stdin", "-z"], input: input).output ?? ""
+            let ignored = Set(output.split(separator: "\0").map(String.init))
+            await MainActor.run {
+                self.ignoredFolders.formUnion(ignored)
+                if unknown.contains(where: { !ignored.contains($0) }) { self.changed() }
+            }
+        }
     }
 
     /// Many events arrive at once while an agent writes; only the last one reads the folder.
@@ -129,7 +176,9 @@ final class CheckoutFiles: ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2, execute: read)
     }
 
+    /// Stops watching; a read already running still finishes.
     func stop() {
+        pending?.cancel()
         guard let stream else { return }
         FSEventStreamStop(stream)
         FSEventStreamInvalidate(stream)
@@ -140,8 +189,8 @@ final class CheckoutFiles: ObservableObject {
 
 extension CheckoutFiles {
     /// Lines holding `text`, case-insensitively, in tracked and untracked text files; ignored
-    /// files too when asked. At most 20 per file. Cancelling the task stops git.
-    nonisolated static func grep(_ root: String, _ text: String, ignored: Bool) async -> [GrepHit] {
+    /// files too when asked. At most 20 per file and `limit` in all. Cancelling the task stops git.
+    nonisolated static func grep(_ root: String, _ text: String, ignored: Bool, limit: Int) async -> [GrepHit] {
         var args = ["grep", "-n", "--null", "-I", "-i", "-F", "--untracked", "--max-count", "20"]
         if ignored { args.append("--no-exclude-standard") }
         args += ["-e", text, "--"]
@@ -149,7 +198,7 @@ extension CheckoutFiles {
         return await withTaskCancellationHandler {
             await Task.detached(priority: .userInitiated) {
                 // git grep exits 1 when nothing matches, which reads as no output.
-                parseGrep(Git.run(root, args, stopper: stopper).output ?? "")
+                parseGrep(Git.run(root, args, stopper: stopper, lines: limit).output ?? "")
             }.value
         } onCancel: {
             stopper.stop()
@@ -159,13 +208,22 @@ extension CheckoutFiles {
 
 enum Git {
     /// Runs git in `dir`; nil output when it fails, with what it printed on stderr.
-    /// A `stopper` can end it early, which reads as a failure.
-    nonisolated static func run(_ dir: String, _ args: [String], stopper: ProcessStopper? = nil) -> (output: String?, error: String?) {
+    /// A `stopper` can end it early, which reads as a failure; `input` goes to its stdin. With
+    /// `lines`, git is stopped once it has printed that many, which is enough.
+    nonisolated static func run(_ dir: String, _ args: [String], input: String? = nil,
+                                stopper: ProcessStopper? = nil, lines: Int? = nil) -> (output: String?, error: String?) {
         let process = Process()
         let out = Pipe()
         let err = Pipe()
+        let stdin = Pipe()
+        if input != nil { process.standardInput = stdin }
         process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
         process.arguments = ["-C", dir] + args
+        // Without this, `git status` takes .git/index.lock to refresh the index, which the watcher
+        // sees as a change and reads again: a loop that never settles.
+        var env = ProcessInfo.processInfo.environment
+        env["GIT_OPTIONAL_LOCKS"] = "0"
+        process.environment = env
         process.standardOutput = out
         process.standardError = err
         do {
@@ -175,12 +233,48 @@ enum Git {
                 try process.run()
             }
         } catch { return (nil, "\(error)") }
-        let data = out.fileHandleForReading.readDataToEndOfFile()
-        let problem = err.fileHandleForReading.readDataToEndOfFile()
+        if let input {
+            // Written alongside the reads below, so a long answer cannot block git while it waits.
+            DispatchQueue.global().async {
+                stdin.fileHandleForWriting.write(Data(input.utf8))
+                try? stdin.fileHandleForWriting.close()
+            }
+        }
+        // Read alongside stdout: git blocks once a pipe fills, so one read after the other can
+        // leave both sides waiting.
+        let problem = PipeContents()
+        DispatchQueue.global().async(group: problem.read) {
+            problem.data = err.fileHandleForReading.readDataToEndOfFile()
+        }
+        var data = Data()
+        if let lines {
+            var count = 0
+            while count < lines {
+                let chunk = out.fileHandleForReading.availableData
+                if chunk.isEmpty { break }
+                data.append(chunk)
+                count += chunk.reduce(0) { $1 == 0x0A ? $0 + 1 : $0 }
+            }
+            if count >= lines {
+                process.terminate()
+                process.waitUntilExit()
+                let end = data.split(separator: 0x0A, omittingEmptySubsequences: false).prefix(lines)
+                return (end.map { String(decoding: $0, as: UTF8.self) }.joined(separator: "\n"), nil)
+            }
+        } else {
+            data = out.fileHandleForReading.readDataToEndOfFile()
+        }
         process.waitUntilExit()
+        problem.read.wait()
         guard process.terminationStatus == 0 else {
-            return (nil, String(decoding: problem, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines))
+            return (nil, String(decoding: problem.data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines))
         }
         return (String(decoding: data, as: UTF8.self), nil)
     }
+}
+
+/// What a pipe held, read on another thread.
+private final class PipeContents: @unchecked Sendable {
+    let read = DispatchGroup()
+    var data = Data()
 }

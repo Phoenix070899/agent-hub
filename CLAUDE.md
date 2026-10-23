@@ -16,6 +16,11 @@ To overrule one, add a new decision file that supersedes it; never edit a commit
 When a change makes a new choice a later session could undo by accident, record it as a new decision file in the same change.
 `docs/decisions/README.md` has the rules and the format; one decision per file.
 
+## Bugs are lessons
+
+Before changing an area, read the `docs/bugs/` files whose Where line names it, and keep their lessons.
+Every bug you fix, or catch while building, gets a file there in the same change; `docs/bugs/README.md` has the rules and the format.
+
 ## Build and test
 
 - Rust: `~/.cargo/bin/cargo test` (cargo is not on the default PATH); `cargo fmt --check` must pass.

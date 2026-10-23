@@ -310,7 +310,7 @@ struct TryColumn: View {
         .background(Ledger.wash, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
         // Read again as it works and when it settles.
         .task(id: "\(worker.id) \(worker.phase) \(worker.progress ?? "")") {
-            if !alone { load() }
+            if !alone { await load() }
         }
         .confirmationDialog("Keep \(worker.id) and merge \(worker.branch ?? "")?", isPresented: $confirmKeep.on) {
             Button("Merge \(worker.id)") { model.keep(worker, repo: repo) }
@@ -380,15 +380,15 @@ struct TryColumn: View {
         }
     }
 
-    private func load() {
-        model.loadDiff(worker) { result in
-            switch result {
-            case .success(let read):
-                diff.files = parseDiff(read.diff)
-                diff.problem = nil
-            case .failure(let error):
-                diff.problem = "\(error)"
-            }
+    private func load() async {
+        do {
+            let read = try await model.loadDiff(worker)
+            guard !Task.isCancelled else { return }
+            diff.files = read.files
+            diff.problem = nil
+        } catch {
+            guard !Task.isCancelled else { return }
+            diff.problem = "\(error)"
         }
     }
 }

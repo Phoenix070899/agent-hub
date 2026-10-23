@@ -28,8 +28,9 @@ struct HubApp: App {
             CommandGroup(replacing: .newItem) {
                 Button("New Orchestrator…") { model.showNewSession(repo: model.selectedRepo, kind: .orchestrator) }
                     .keyboardShortcut("n")
-                Button("New Terminal…") { model.showNewSession(repo: model.selectedRepo, kind: .claude) }
+                Button("New Terminal") { model.openTerminal() }
                     .keyboardShortcut("n", modifiers: [.command, .shift])
+                    .disabled(model.selectedRepo == nil)
                 Button("Fan Out a Task…") { model.showFanOut() }
                     .keyboardShortcut("n", modifiers: [.command, .option])
                     .disabled(model.selectedRepo == nil)

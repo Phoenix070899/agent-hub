@@ -35,6 +35,14 @@ let snapshotLine = """
     #expect(tracker.fresh(in: snapshot.needs).isEmpty)
 }
 
+@Test func aWorkersQuietTimeCountsUpBetweenSnapshots() throws {
+    let worker = try JSONDecoder().decode(WorkerRow.self, from: Data(row("w1", phase: "running", quiet: 30).utf8))
+    #expect((30...31).contains(worker.quietFor()))
+    #expect((90...91).contains(worker.quietFor(at: Date().addingTimeInterval(60))))
+    let old = try JSONDecoder().decode(Snapshot.self, from: Data(snapshotLine.utf8))
+    #expect(old.workers[0].quietFor() == 75, "a daemon that sends seconds still reads")
+}
+
 @Test func agesAreShort() {
     #expect(formatAge(45) == "45s")
     #expect(formatAge(180) == "3m")
@@ -55,6 +63,15 @@ let snapshotLine = """
     #expect(quickOpenScore("rfu", "Rerank follow-ups") != nil)
     #expect(quickOpenScore("zzz", "Rerank follow-ups") == nil)
     #expect(quickOpenScore("", "anything") == 0)
+}
+
+@Test func quickOpenKeepsOnlyTheBestFiles() {
+    let tree = FileTree(paths: ["docs/readme.md", "src/reader.swift", "src/ui/View.swift", "reader/x.txt", "README.md"])
+    let found = quickOpenFiles("read", in: tree, limit: 3)
+    #expect(Set(found.map(\.path)) == ["src/reader.swift", "README.md", "docs/readme.md"])
+    #expect(found.allSatisfy { $0.score == quickOpenScore("read", "reader.swift") })
+    #expect(quickOpenFiles("read", in: tree, limit: 5).last?.path == "reader/x.txt", "a folder match ranks last")
+    #expect(quickOpenFiles("", in: tree, limit: 2).count == 2)
 }
 
 @Test func droppedPathsAreEscapedLikeTerminal() {
@@ -141,6 +158,15 @@ Binary files a/logo.png and /dev/null differ
     #expect(smartCreateFrom("https://github.com/o/r/issues/7", branches: branches) == .issue("https://github.com/o/r/issues/7"))
     #expect(smartCreateFrom("fix/old", branches: branches) == .branch("fix/old"))
     #expect(smartCreateFrom("Magic link login", branches: branches) == .name("Magic link login"))
+}
+
+@Test func theBranchTabMakesABranchNoOneHasYet() {
+    let branches = ["main", "fix/old"]
+    #expect(branchCreateFrom(" ", picked: nil, branches: branches) == nil)
+    #expect(branchCreateFrom("fix", picked: "fix/old", branches: branches) == .branch("fix/old"))
+    #expect(branchCreateFrom("main", picked: nil, branches: branches) == .branch("main"))
+    #expect(branchCreateFrom("fix/new", picked: nil, branches: branches) == .newBranch("fix/new"))
+    #expect(branchCreateFrom(" magic  link ", picked: nil, branches: branches) == .newBranch("magic-link"))
 }
 
 @Test func aFileTreeListsFoldersFirstAndOpensOnDemand() {
@@ -267,8 +293,9 @@ func row(_ id: String, phase: String, quiet: Int, model: String? = nil, effort: 
     let model = model.map { "\"\($0)\"" } ?? "null"
     let effort = effort.map { "\"\($0)\"" } ?? "null"
     let agent = agent.map(String.init) ?? "null"
+    let since = Int(Date().timeIntervalSince1970) - quiet
     return """
-    {"id":"\(id)","profile":"naruto","title":"t","state":"running","phase":"\(phase)","quietSeconds":\(quiet),\
+    {"id":"\(id)","profile":"naruto","title":"t","state":"running","phase":"\(phase)","quietSince":\(since),\
     "place":"in place","branch":null,"live":true,"blocker":null,"openQuestions":[],"finalReport":null,\
     "model":\(model),"effort":\(effort),"progress":null,"agent":\(agent)}
     """

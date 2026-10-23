@@ -141,6 +141,8 @@ struct NewSessionModal: View {
             if form.picked == nil { DispatchQueue.main.async { nameFocused = true } }
         }
         .onChange(of: form.picked) { loadBranches() }
+        // Closed while the issue is read: nothing starts.
+        .onDisappear { form.reading?.cancel() }
         .onExitCommand(perform: close)
     }
 
@@ -169,7 +171,7 @@ struct NewSessionModal: View {
     private func status(_ repo: String) -> String? {
         let agents = model.agents(repo)
         if agents.contains(where: { $0.live && $0.isOrchestrator }) { return "Orchestrator live" }
-        if agents.contains(where: \.live) { return "Claude Code live" }
+        if agents.contains(where: { $0.live && $0.kind == .claude }) { return "Claude Code live" }
         return agents.isEmpty ? nil : "stopped"
     }
 
@@ -206,6 +208,8 @@ struct NewSessionModal: View {
             close()
         case .branch(let branch)?:
             launch(picked, name: name, branch: branch)
+        case .newBranch(let branch)?:
+            launch(picked, name: name, newBranch: branch)
         case .name(let text)?:
             launch(picked, name: name.isEmpty ? text : name, newBranch: fanoutBranch(text))
         case .issue(let typed)?:
@@ -214,9 +218,10 @@ struct NewSessionModal: View {
                 return
             }
             form.starting = true
-            Task {
+            form.reading = Task {
                 do {
                     let issue = try await AppModel.fetchIssue(reference, in: picked)
+                    guard !Task.isCancelled else { return }
                     launch(picked, name: name.isEmpty ? issue.name : name,
                            newBranch: fanoutBranch("\(issue.number) \(issue.title)"), request: issue.request)
                 } catch {
@@ -259,6 +264,8 @@ final class NewSessionForm: ObservableObject {
     @Published var problem: String?
     /// True while the issue is read or the agent starts.
     @Published var starting = false
+    /// Reading the issue to start from.
+    var reading: Task<Void, Never>?
 
     /// Where the new agent works; nil means the repo's own checkout.
     var choice: CreateFrom? {
@@ -266,7 +273,7 @@ final class NewSessionForm: ObservableObject {
         switch tab {
         case .smart: return smartCreateFrom(text, branches: branches.map(\.name))
         case .github: return text.isEmpty ? nil : .issue(text)
-        case .branch: return pickedBranch.map(CreateFrom.branch)
+        case .branch: return branchCreateFrom(text, picked: pickedBranch, branches: branches.map(\.name))
         case .name: return text.isEmpty ? nil : .name(text)
         }
     }

@@ -457,9 +457,9 @@ private struct FileSearchResults: View {
             guard !Task.isCancelled else { return }
             let root = root
             let ignored = model.searchIgnoredFiles
-            let lines = await CheckoutFiles.grep(root, text, ignored: ignored)
+            let lines = await CheckoutFiles.grep(root, text, ignored: ignored, limit: Self.hitLimit)
             guard !Task.isCancelled else { return }
-            found.hits = Array(lines.prefix(Self.hitLimit))
+            found.hits = lines
             found.searching = false
         }
     }

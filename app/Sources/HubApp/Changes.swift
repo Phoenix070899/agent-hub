@@ -23,7 +23,7 @@ struct ChangesView: View {
             Divider().overlay(Ledger.rule)
             reviewBar
         }
-        .task(id: worker.id) { load() }
+        .task(id: worker.id) { await load() }
     }
 
     private var summary: some View {
@@ -42,7 +42,7 @@ struct ChangesView: View {
             }
             Spacer(minLength: 8)
             if state.loading { ProgressView().controlSize(.small) }
-            Button("Refresh", action: load)
+            Button("Refresh") { Task { await load() } }
                 .buttonStyle(.ledger)
                 .disabled(state.loading)
         }
@@ -231,20 +231,21 @@ struct ChangesView: View {
         .background(Ledger.paper)
     }
 
-    private func load() {
+    private func load() async {
         state.loading = true
-        model.loadDiff(worker) { result in
-            state.loading = false
-            state.loaded = true
-            switch result {
-            case .success(let read):
-                state.problem = nil
-                state.files = parseDiff(read.diff)
-                state.truncated = read.truncated
-            case .failure(let error):
-                state.problem = "\(error)"
-            }
+        do {
+            let read = try await model.loadDiff(worker)
+            // Another Worker is shown now; its own read fills the view.
+            guard !Task.isCancelled else { return }
+            state.problem = nil
+            state.files = read.files
+            state.truncated = read.truncated
+        } catch {
+            guard !Task.isCancelled else { return }
+            state.problem = "\(error)"
         }
+        state.loading = false
+        state.loaded = true
     }
 
     private func send(toWorker: Bool) {

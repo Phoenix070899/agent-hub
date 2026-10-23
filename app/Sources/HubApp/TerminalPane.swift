@@ -232,10 +232,13 @@ final class GhosttyRuntime {
         if let app { ghostty_app_tick(app) }
     }
 
-    /// Sets the font and colours of every terminal, only when they changed.
+    /// Sets the font and colours of every terminal, only when they changed: dragging the
+    /// background image's sliders changes the appearance but not what libghostty reads.
     func apply(_ appearance: TerminalAppearance) {
         guard appearance != applied, let app else { return }
+        let reload = appearance.ghosttyConfig != applied?.ghosttyConfig
         applied = appearance
+        guard reload else { return }
         let next = Self.makeConfig(appearance)
         ghostty_app_update_config(app, next)
         if let config { ghostty_config_free(config) }

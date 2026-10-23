@@ -111,6 +111,31 @@ private func searchFiles(_ query: String, in paths: [String], lowercased: [Strin
         .map(\.path)
 }
 
+/// Quick open's best files for `query`, best first, as Quick open scores a file: by its name,
+/// else, 10 lower, by "File in <folder>". Ties keep the tree's order. Stops early when cancelled.
+public func quickOpenFiles(_ query: String, in tree: FileTree, limit: Int) -> [(score: Int, path: String)] {
+    let query = query.lowercased().trimmingCharacters(in: .whitespaces)
+    guard !query.isEmpty else { return tree.files.prefix(limit).map { (0, $0) } }
+    var best: [(score: Int, path: String)] = []
+    for (index, (path, lower)) in zip(tree.files, tree.lowercasedFiles).enumerated() {
+        if index % 4096 == 0, Task.isCancelled { return [] }
+        let slash = lower.lastIndex(of: "/")
+        let name = slash.map { lower[lower.index(after: $0)...] } ?? lower[...]
+        let score: Int
+        if let byName = quickOpenScore(lowered: query, name) {
+            score = byName
+        } else {
+            let folder = slash.map { "file in " + lower[..<$0] } ?? "file"
+            guard let byFolder = quickOpenScore(lowered: query, folder) else { continue }
+            score = byFolder - 10
+        }
+        guard best.count < limit || score > best[best.count - 1].score else { continue }
+        best.insert((score, path), at: best.firstIndex { $0.score < score } ?? best.count)
+        if best.count > limit { best.removeLast() }
+    }
+    return best
+}
+
 /// One line `git grep` found.
 public struct GrepHit: Equatable, Identifiable, Sendable {
     public let path: String

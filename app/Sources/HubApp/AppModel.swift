@@ -373,6 +373,21 @@ final class AppModel: ObservableObject {
             Task { @MainActor in AppModel.shared.refreshSessions() }
         }
         readTmuxPrefix()
+        removeOldDrops()
+    }
+
+    /// Images dropped on a terminal are saved for the agent to read; a day later it has.
+    private func removeOldDrops() {
+        Task.detached(priority: .background) {
+            let folder = FileManager.default.temporaryDirectory.appendingPathComponent("EchoDrops", isDirectory: true)
+            let files = (try? FileManager.default.contentsOfDirectory(
+                at: folder, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
+            let dayAgo = Date().addingTimeInterval(-86_400)
+            for file in files {
+                let modified = (try? file.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+                if let modified, modified < dayAgo { try? FileManager.default.removeItem(at: file) }
+            }
+        }
     }
 
     // MARK: Splitting the multiplexer
@@ -452,16 +467,37 @@ final class AppModel: ObservableObject {
 
     /// Starts the daemon through a login shell when it is not running, so it, and every agent it
     /// starts, gets the human's PATH (hub, claude) rather than the bare one apps launch with.
+    /// One start at a time, as every repo's follower and the session refresh ask at once; after a
+    /// failed start, the next waits `retryStart` seconds rather than opening a login shell each time.
     nonisolated static func ensureDaemon(_ client: DaemonClient) throws {
         if (try? HubSocket(path: client.socketPath)) != nil { return }
-        let shell = Process()
-        shell.executableURL = URL(fileURLWithPath: "/bin/zsh")
-        shell.arguments = ["-lic", "hub sessions >/dev/null"]
-        shell.standardOutput = FileHandle.nullDevice
-        shell.standardError = FileHandle.nullDevice
-        try shell.run()
-        shell.waitUntilExit()
-        _ = try HubSocket(path: client.socketPath)
+        try daemonStart.lock.withLock {
+            // Started by another caller while this one waited.
+            if (try? HubSocket(path: client.socketPath)) != nil { return }
+            if let (at, error) = daemonStart.failed, Date().timeIntervalSince(at) < retryStart { throw error }
+            do {
+                let shell = Process()
+                shell.executableURL = URL(fileURLWithPath: "/bin/zsh")
+                shell.arguments = ["-lic", "hub sessions >/dev/null"]
+                shell.standardOutput = FileHandle.nullDevice
+                shell.standardError = FileHandle.nullDevice
+                try shell.run()
+                shell.waitUntilExit()
+                _ = try HubSocket(path: client.socketPath)
+                daemonStart.failed = nil
+            } catch {
+                daemonStart.failed = (Date(), error)
+                throw error
+            }
+        }
+    }
+
+    nonisolated private static let retryStart: TimeInterval = 30
+    nonisolated private static let daemonStart = DaemonStart()
+
+    private final class DaemonStart: @unchecked Sendable {
+        let lock = NSLock()
+        var failed: (at: Date, error: Error)?
     }
 
     /// Reloads the repo list and follows every repo not yet followed. A failure here means the
@@ -471,8 +507,9 @@ final class AppModel: ObservableObject {
             try Self.ensureDaemon(client)
             return try client.sessions()
         } then: { sessions in
-            self.sessions = sessions
-            self.daemonDown = false
+            // Every publish redraws the whole window; this runs every 5 seconds.
+            if self.sessions != sessions { self.sessions = sessions }
+            if self.daemonDown { self.daemonDown = false }
             for session in sessions where self.following[session.repo] == nil {
                 self.follow(repo: session.repo)
             }
@@ -482,7 +519,7 @@ final class AppModel: ObservableObject {
             }
             done?(sessions)
         } failed: {
-            self.daemonDown = true
+            if !self.daemonDown { self.daemonDown = true }
         }
     }
 
@@ -548,6 +585,12 @@ final class AppModel: ObservableObject {
             self.select(.agent(repo: opened.repo, id: opened.agent))
             self.refreshSessions()
         }
+    }
+
+    /// A plain shell in the selected repo, as a Terminal agent; nothing to ask first.
+    func openTerminal() {
+        guard let repo = selectedRepo else { return }
+        open(repo: repo, kind: .terminal, name: "", model: "")
     }
 
     /// Starts a new agent on a branch (`branch`, or `newBranch` from `base`); `done` gets nil once
@@ -649,8 +692,8 @@ final class AppModel: ObservableObject {
                     _ = try DaemonClient.result(of: socket.readLine())
                     let current = DispatchQueue.main.sync { () -> Bool in
                         guard let self, self.following[repo] == generation else { return false }
-                        self.connected = true
-                        self.daemonDown = false
+                        if !self.connected { self.connected = true }
+                        if self.daemonDown { self.daemonDown = false }
                         return true
                     }
                     guard current else { return socket.shutdown() }
@@ -661,8 +704,8 @@ final class AppModel: ObservableObject {
                 } catch {
                     let stop = DispatchQueue.main.sync { () -> Bool in
                         guard let self, self.following[repo] == generation else { return true }
-                        self.connected = false
-                        self.daemonDown = true
+                        if self.connected { self.connected = false }
+                        if !self.daemonDown { self.daemonDown = true }
                         return false
                     }
                     if stop { return }
@@ -673,7 +716,8 @@ final class AppModel: ObservableObject {
     }
 
     private func apply(_ snapshot: Snapshot, repo: String, generation: Int) {
-        guard following[repo] == generation else { return }
+        // Every publish redraws the whole window, so an unchanged snapshot is dropped here.
+        guard following[repo] == generation, snapshots[repo] != snapshot else { return }
         let before = snapshots[repo]
         snapshots[repo] = snapshot
         var tracker = trackers[repo] ?? NeedTracker()
@@ -923,13 +967,14 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func loadDiff(_ worker: WorkerRow, then done: @escaping @MainActor (Result<(diff: String, truncated: Bool), Error>) -> Void) {
-        guard let number = worker.number else { return }
+    /// The Worker's diff, read and parsed off the main thread: it runs to 2 MB.
+    func loadDiff(_ worker: WorkerRow) async throws -> (files: [DiffFile], truncated: Bool) {
+        guard let number = worker.number else { return ([], false) }
         let client = client
-        Thread.detachNewThread {
-            let result = Result { try client.workerDiff(number) }
-            DispatchQueue.main.async { done(result) }
-        }
+        return try await Task.detached(priority: .userInitiated) {
+            let read = try client.workerDiff(number)
+            return (parseDiff(read.diff), read.truncated)
+        }.value
     }
 
     /// Sends the Worker's review; on success the comments are cleared.
@@ -963,10 +1008,15 @@ final class AppModel: ObservableObject {
 
     func setRead(_ worker: WorkerRow, repo: String, _ read: Bool) {
         guard let key = reportKey(worker, repo: repo), readReports.contains(key) != read else { return }
-        if read { readReports.insert(key) } else { readReports.remove(key) }
-        // Reports leave Done within a week, so the newest few hundred keys are plenty.
-        let kept = readReports.sorted { ($0.split(separator: "|").last ?? "") > ($1.split(separator: "|").last ?? "") }.prefix(500)
-        UserDefaults.standard.set(Array(kept), forKey: "readReports")
+        var keys = readReports
+        if read { keys.insert(key) } else { keys.remove(key) }
+        // Reports leave Done within a week, so the newest few hundred keys are plenty; trimmed
+        // now and then, not on every selection.
+        if keys.count > 600 {
+            keys = Set(keys.sorted { ($0.split(separator: "|").last ?? "") > ($1.split(separator: "|").last ?? "") }.prefix(500))
+        }
+        readReports = keys
+        UserDefaults.standard.set(Array(keys), forKey: "readReports")
     }
 
     /// Takes settled Workers off the Done list.
@@ -1038,10 +1088,11 @@ extension AppModel {
         }
     }
 
-    /// Whether the terminal on screen is live, so a path can be typed into it.
+    /// Whether the terminal on screen is live, so a path can be typed into it. An agent always has
+    /// one: itself, or its shell while it is stopped.
     var terminalTypeable: Bool {
         switch selection {
-        case .agent(let repo, let id)?: return agents(repo).first { $0.id == id }?.live ?? false
+        case .agent(let repo, let id)?: return agents(repo).contains { $0.id == id }
         case .worker(let repo, let id)?:
             return snapshot(repo).workers.first { $0.id == id }.map { $0.isActive && $0.live } ?? false
         case nil: return false
@@ -1076,8 +1127,14 @@ extension AppModel {
         }
     }
 
-    /// The checkout's files, read and watched from the first time they are asked for.
+    /// The checkout's files, read and watched from the first time they are asked for. Only the
+    /// selected checkout is ever shown, so every other one stops watching and is let go: each
+    /// watched checkout runs git on every change inside it.
     func checkoutFiles(_ root: String) -> CheckoutFiles {
+        for (other, files) in checkouts where other != root {
+            files.stop()
+            checkouts[other] = nil
+        }
         if let files = checkouts[root] {
             files.start(showIgnored: showIgnoredFiles)
             return files

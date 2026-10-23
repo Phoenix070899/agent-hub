@@ -69,7 +69,7 @@ struct ContentView: View {
             }
         }
         .confirmationDialog(closeTitle, isPresented: closingShown, presenting: model.closing) { agent in
-            Button(agent.isOrchestrator ? "Close Orchestrator" : "Close Claude Code", role: .destructive) {
+            Button("Close \(agent.kindName)", role: .destructive) {
                 model.forgetAgent(agent.id)
             }
         } message: { agent in
@@ -255,7 +255,7 @@ struct RepoTab: View {
     }
 }
 
-/// The + at the end of the tabs: an Orchestrator, or a Terminal (Claude Code on its own).
+/// The + at the end of the tabs: an Orchestrator, or a Terminal (a plain shell in the repo).
 struct NewSessionMenu: View {
     @EnvironmentObject private var model: AppModel
 
@@ -265,10 +265,11 @@ struct NewSessionMenu: View {
                 Text("Orchestrator")
                 Text("Hands Tasks to Workers and reports back")
             }
-            Button { model.showNewSession(repo: model.selectedRepo, kind: .claude) } label: {
+            Button { model.openTerminal() } label: {
                 Text("Terminal")
-                Text("Claude Code on its own, in your multiplexer")
+                Text("A plain shell in the repo, in your multiplexer")
             }
+            .disabled(model.selectedRepo == nil)
             Divider()
             Button { model.showFanOut() } label: {
                 Text("Fan Out a Task")
@@ -291,7 +292,8 @@ struct NewSessionMenu: View {
     }
 }
 
-/// An agent's mark: three dots for an Orchestrator, a prompt for a Claude Code session.
+/// An agent's mark: three dots for an Orchestrator, a prompt for a Claude Code session, a framed
+/// prompt for a Terminal.
 struct AgentGlyph: View {
     let kind: Agent.Kind
 
@@ -304,6 +306,20 @@ struct AgentGlyph: View {
                         let rect = CGRect(x: (x - r) * s, y: (y - r) * s, width: 2 * r * s, height: 2 * r * s)
                         context.fill(Path(ellipseIn: rect), with: .foreground)
                     }
+                }
+            } else if kind == .terminal {
+                Canvas { context, size in
+                    let s = min(size.width, size.height) / 16
+                    let frame = CGRect(x: 1 * s, y: 2 * s, width: 14 * s, height: 12 * s)
+                    context.stroke(Path(roundedRect: frame, cornerRadius: 2.5 * s), with: .foreground, lineWidth: 1.4 * s)
+                    var chevron = Path()
+                    chevron.move(to: CGPoint(x: 4.2 * s, y: 5.8 * s))
+                    chevron.addLine(to: CGPoint(x: 6.6 * s, y: 8 * s))
+                    chevron.addLine(to: CGPoint(x: 4.2 * s, y: 10.2 * s))
+                    context.stroke(chevron, with: .foreground,
+                                   style: StrokeStyle(lineWidth: 1.4 * s, lineCap: .round, lineJoin: .round))
+                    let bar = CGRect(x: 8 * s, y: 9.5 * s, width: 3.6 * s, height: 1.4 * s)
+                    context.fill(Path(roundedRect: bar, cornerRadius: 0.7 * s), with: .foreground)
                 }
             } else {
                 Canvas { context, size in
@@ -320,7 +336,7 @@ struct AgentGlyph: View {
             }
         }
         .frame(width: 13, height: 13)
-        .accessibilityLabel(kind == .orchestrator ? "Orchestrator" : "Claude Code session")
+        .accessibilityLabel(kind == .orchestrator ? "Orchestrator" : kind == .terminal ? "Terminal" : "Claude Code session")
     }
 }
 
@@ -459,7 +475,7 @@ struct RailWorker: View {
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .help("\(worker.id) \(worker.profile): \(worker.title)\n\(worker.phaseLabel), quiet for \(formatAge(worker.quietSeconds))")
+        .help("\(worker.id) \(worker.profile): \(worker.title)\n\(worker.phaseLabel), quiet for \(formatAge(worker.quietFor()))")
     }
 }
 
@@ -661,13 +677,14 @@ struct AgentHeader: View {
         }
         .contextMenu {
             Button("Rename…") { model.renaming = agent }
-            if agent.live {
+            if agent.isTerminal {
+            } else if agent.live {
                 Button(agent.isOrchestrator ? "Stop Orchestrator" : "End Session") { model.stopAgent(agent.id) }
             } else {
                 Button(agent.isOrchestrator ? "Start Orchestrator" : "Resume Session") { model.startAgent(agent.id) }
             }
             Divider()
-            Button(agent.isOrchestrator ? "Close Orchestrator…" : "Close Claude Code…") { model.closing = agent }
+            Button("Close \(agent.kindName)…") { model.closing = agent }
         }
         .help(agent.name == nil ? "Named after your first request" : agent.displayName)
     }
@@ -725,6 +742,7 @@ extension SubHeader where Trailing == EmptyView {
 
 struct MainPanel: View {
     @EnvironmentObject private var model: AppModel
+    @Environment(\.colorScheme) private var scheme
 
     var body: some View {
         let tabs = model.openPreviews.filter { $0.root == model.selectedCheckout }
@@ -756,10 +774,12 @@ struct MainPanel: View {
             }
         }
         .ledgerSheet()
+        .task(id: scheme) { PreviewContent.warm(dark: scheme == .dark) }
     }
 }
 
-/// An Orchestrator's or a Claude Code session's terminal, or what to do while it is not running.
+/// An agent's terminal. While an Orchestrator or a Claude Code session is not running, its shell
+/// fills the panel and the header offers to start it again.
 struct AgentPanel: View {
     @EnvironmentObject private var model: AppModel
     let repo: String
@@ -775,7 +795,8 @@ struct AgentPanel: View {
                     .foregroundStyle(Ledger.ink3)
                     .lineLimit(1)
                 Spacer(minLength: 8)
-                if agent.live {
+                if agent.isTerminal {
+                } else if agent.live {
                     Button { model.stopAgent(agent.id) } label: {
                         Image(systemName: "stop.circle")
                             .font(.system(size: 14))
@@ -786,15 +807,27 @@ struct AgentPanel: View {
                     .buttonStyle(.plain)
                     .accessibilityLabel(agent.isOrchestrator ? "Stop Orchestrator" : "End session")
                     .help(agent.isOrchestrator ? "Stop the Orchestrator. Its Workers keep running." : "End this Claude Code session. You can resume it.")
+                } else if agent.isOrchestrator {
+                    Button("Start Orchestrator") { model.startAgent(agent.id) }
+                        .buttonStyle(.ledgerPrimary)
+                        .disabled(model.daemonDown)
+                        .help(stoppedHelp)
+                } else {
+                    HStack(spacing: 8) {
+                        Button("Start fresh") { model.startFresh(agent, repo: repo) }
+                            .buttonStyle(.ledger)
+                            .help("A new conversation in the same repo")
+                        Button("Resume") { model.startAgent(agent.id) }
+                            .buttonStyle(.ledgerPrimary)
+                            .help("Picks the saved conversation up where it stopped")
+                    }
+                    .disabled(model.daemonDown)
                 }
             }
-            if agent.live {
-                LiveTerminal(target: .agent(id: agent.id))
-            } else if agent.isOrchestrator {
-                StoppedPanel(repo: repo, agent: agent)
-            } else {
-                EndedPanel(repo: repo, agent: agent)
-            }
+            LiveTerminal(target: .agent(id: agent.id))
+                // A new pane whenever the agent starts or stops, so one without the multiplexer
+                // attaches to whichever runs now: the agent, or its shell.
+                .id("\(agent.id) \(agent.live)")
         }
     }
 
@@ -802,7 +835,15 @@ struct AgentPanel: View {
         let name = URL(fileURLWithPath: repo).lastPathComponent
         let model = agent.model ?? "default model"
         let place = (agent.head ?? agent.branch).map { "\(name) on \($0)" } ?? name
-        return agent.isOrchestrator ? "Orchestrator in \(place), \(model)" : "Claude Code in \(place), \(model)"
+        if agent.isTerminal { return "Shell in \(place)" }
+        if !agent.live { return "\(agent.isOrchestrator ? "Stopped" : "Exited"), a shell in \(place)" }
+        return "\(agent.kindName) in \(place), \(model)"
+    }
+
+    private var stoppedHelp: String {
+        let running = model.snapshot(repo).groups.first { $0.agent.id == agent.id }?.running.count ?? 0
+        let workers = running > 0 ? "Its \(running) running Workers carry on meanwhile. " : ""
+        return workers + "Starting it resumes the same conversation, with every report it missed."
     }
 }
 
@@ -869,84 +910,6 @@ struct TerminalBackdrop: View {
     }
 }
 
-struct StoppedPanel: View {
-    @EnvironmentObject private var model: AppModel
-    let repo: String
-    let agent: Agent
-
-    var body: some View {
-        let running = model.snapshot(repo).groups.first { $0.agent.id == agent.id }?.running.count ?? 0
-        VStack(alignment: .leading, spacing: 12) {
-            Text("The Orchestrator is stopped")
-                .font(.system(size: 24, weight: .semibold))
-            Text(running > 0
-                 ? "Its \(running) running Workers carry on, and you can still approve and answer them from the ledger. Their reports wait for the Orchestrator."
-                 : "None of its Workers are running.")
-                .font(.system(size: 15))
-                .foregroundStyle(Ledger.ink2)
-                .fixedSize(horizontal: false, vertical: true)
-            Text("Starting it resumes the same conversation, with every report it missed.")
-                .font(.system(size: 15))
-                .foregroundStyle(Ledger.ink2)
-                .fixedSize(horizontal: false, vertical: true)
-            Button("Start Orchestrator") { model.startAgent(agent.id) }
-                .buttonStyle(.ledgerLarge)
-                .padding(.top, 8)
-                .disabled(model.daemonDown)
-        }
-        .frame(maxWidth: 440, alignment: .leading)
-        .padding(40)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-}
-
-/// A Claude Code session whose terminal ended: resume it, start fresh, or close it.
-struct EndedPanel: View {
-    @EnvironmentObject private var model: AppModel
-    let repo: String
-    let agent: Agent
-
-    /// Closing it touches nothing else; said when the repo has Orchestrators that might seem at stake.
-    private var othersNote: String? {
-        let orchestrators = model.agents(repo).filter(\.isOrchestrator).count
-        guard orchestrators > 0 else { return nil }
-        let name = URL(fileURLWithPath: repo).lastPathComponent
-        return "Closing it leaves \(name)\u{2019}s Orchestrator\(orchestrators == 1 ? "" : "s") and \(orchestrators == 1 ? "its" : "their") Workers running."
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Claude Code exited")
-                .font(.system(size: 24, weight: .semibold))
-            Text("The conversation is saved. Resume picks it up where it stopped; Start fresh opens a new one in the same repo.")
-                .font(.system(size: 15))
-                .foregroundStyle(Ledger.ink2)
-                .fixedSize(horizontal: false, vertical: true)
-            if let others = othersNote {
-                Text(others)
-                    .font(.system(size: 13))
-                    .foregroundStyle(Ledger.ink3)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            HStack(spacing: 8) {
-                Button("Resume") { model.startAgent(agent.id) }
-                    .buttonStyle(.ledgerLarge)
-                Button("Start fresh") { model.startFresh(agent, repo: repo) }
-                    .buttonStyle(.ledger)
-                Spacer(minLength: 16)
-                Button("Close Claude Code…") { model.closing = agent }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(Ledger.ink2)
-            }
-            .padding(.top, 8)
-            .disabled(model.daemonDown)
-        }
-        .frame(maxWidth: 460, alignment: .leading)
-        .padding(40)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-}
-
 // MARK: - Panels shared parts
 
 /// A panel's title row: what the terminal below is showing.
@@ -954,7 +917,9 @@ struct PanelHeader<Content: View>: View {
     @ViewBuilder var content: () -> Content
 
     var body: some View {
+        // As tall as its buttons, so a header without any lines up with the rest.
         HStack(spacing: 10) { content() }
+            .frame(minHeight: 26)
             .padding(.horizontal, 18)
             .padding(.vertical, 11)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -1084,7 +1049,9 @@ struct WorkerHeader: View {
                     Fact.value(worker.modelLine ?? "From its profile")
                     Fact.value(worker.branch ?? worker.place, mono: worker.branch != nil)
                     Fact.value(worker.progress ?? "None sent yet")
-                    Fact.value(formatAge(worker.quietSeconds))
+                    TimelineView(.periodic(from: .now, by: 5)) { context in
+                        Fact.value(formatAge(worker.quietFor(at: context.date)))
+                    }
                 }
             }
         }
@@ -1233,10 +1200,12 @@ struct LedgerRow: View {
                         Circle().fill(Ledger.run).frame(width: 7, height: 7)
                             .accessibilityLabel("Unread")
                     }
-                    Text(formatAge(worker.quietSeconds))
-                        .font(.system(size: 12))
-                        .monospacedDigit()
-                        .foregroundStyle(Ledger.ink3)
+                    TimelineView(.periodic(from: .now, by: 5)) { context in
+                        Text(formatAge(worker.quietFor(at: context.date)))
+                            .font(.system(size: 12))
+                            .monospacedDigit()
+                            .foregroundStyle(Ledger.ink3)
+                    }
                 }
                 // Always drawn when there is something to say, never only on hover or selection,
                 // so a row keeps its height and the list below it never jumps.
@@ -1276,7 +1245,7 @@ struct LedgerRow: View {
         }
         .buttonStyle(.plain)
         .onHover { hovering.on = $0 }
-        .help("\(worker.id) \(worker.profile): \(worker.title)\n\(worker.phaseLabel), quiet for \(formatAge(worker.quietSeconds))")
+        .help("\(worker.id) \(worker.profile): \(worker.title)\n\(worker.phaseLabel), quiet for \(formatAge(worker.quietFor()))")
         .contextMenu {
             if worker.settledAt != nil {
                 Button(unread ? "Mark as Read" : "Mark as Unread") { model.setRead(worker, repo: repo, unread) }

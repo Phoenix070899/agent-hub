@@ -5,6 +5,8 @@ public struct Agent: Decodable, Equatable, Identifiable, Sendable {
     public enum Kind: String, Decodable, Sendable {
         case orchestrator
         case claude
+        /// A plain shell in the repo, with no agent in it.
+        case terminal
 
         public init(from decoder: Decoder) throws {
             let raw = try decoder.singleValueContainer().decode(String.self)
@@ -38,10 +40,20 @@ public struct Agent: Decodable, Equatable, Identifiable, Sendable {
     }
 
     public var isOrchestrator: Bool { kind == .orchestrator }
+    public var isTerminal: Bool { kind == .terminal }
+
+    /// What it is, as menus and titles say it.
+    public var kindName: String {
+        switch kind {
+        case .orchestrator: return "Orchestrator"
+        case .claude: return "Claude Code"
+        case .terminal: return "Terminal"
+        }
+    }
 
     /// Its name, or until the first request names it, what it is and its id ("Orchestrator a3",
     /// as `hub attach a3` reads), so two unnamed ones read apart.
-    public var displayName: String { name ?? "\(isOrchestrator ? "Orchestrator" : "Claude Code") a\(id)" }
+    public var displayName: String { name ?? "\(kindName) a\(id)" }
 }
 
 /// One agent's share of a repo's ledger: what it is waiting on, and its Workers.
@@ -123,16 +135,18 @@ public struct Snapshot: Decodable, Equatable, Sendable {
     /// longest-quiet first so a stuck one rises to the top.
     public var running: [WorkerRow] {
         let waiting = Set(needs.compactMap(\.worker))
+        let now = Date()
         return workers
             .filter { $0.isActive && !waiting.contains($0.id) }
-            .sorted { $0.quietSeconds > $1.quietSeconds }
+            .sorted { $0.quietFor(at: now) > $1.quietFor(at: now) }
     }
 
     /// The ledger's Done section: settled Workers, failed and blocked ones first, then newest.
     public var settled: [WorkerRow] {
-        workers
+        let now = Date()
+        return workers
             .filter { !$0.isActive }
-            .sorted { ($0.isTrouble ? 0 : 1, $0.quietSeconds) < ($1.isTrouble ? 0 : 1, $1.quietSeconds) }
+            .sorted { ($0.isTrouble ? 0 : 1, $0.quietFor(at: now)) < ($1.isTrouble ? 0 : 1, $1.quietFor(at: now)) }
     }
 }
 
@@ -195,7 +209,11 @@ public struct WorkerRow: Decodable, Equatable, Identifiable, Sendable {
     public let state: WorkerState
     /// The Worker's lifecycle state: starting, running, done, blocked, exited, lost.
     public let phase: String
-    public let quietSeconds: Int
+    /// When it last reported (Unix seconds), so its quiet time counts up without a new snapshot,
+    /// and an unchanged repo sends an unchanged snapshot.
+    public let quietSince: Int?
+    /// From a daemon older than `quietSince`.
+    private let quietSeconds: Int?
     public let place: String
     public let branch: String?
     public let live: Bool
@@ -217,6 +235,12 @@ public struct WorkerRow: Decodable, Equatable, Identifiable, Sendable {
 
     /// The daemon's numeric id, as `decide` and `attach` take it.
     public var number: Int? { Int(id.dropFirst()) }
+
+    /// Seconds since it last reported.
+    public func quietFor(at now: Date = Date()) -> Int {
+        guard let quietSince else { return quietSeconds ?? 0 }
+        return max(0, Int(now.timeIntervalSince1970) - quietSince)
+    }
 
     /// Still working on its Task: starting or running, waiting on the human or not.
     public var isActive: Bool { phase == "starting" || phase == "running" }
@@ -374,15 +398,18 @@ public func tmuxControlByte(_ key: String) -> UInt8? {
 /// that starts with the query beats the query inside a word, which beats its letters in order
 /// ("rfu" finds "Rerank follow-ups"). Case is ignored; an empty query matches everything.
 public func quickOpenScore(_ query: String, _ text: String) -> Int? {
-    let query = query.lowercased().trimmingCharacters(in: .whitespaces)
-    let text = text.lowercased()
+    quickOpenScore(lowered: query.lowercased().trimmingCharacters(in: .whitespaces), text.lowercased())
+}
+
+/// `quickOpenScore` for a query and text already lowercased, with the query trimmed.
+func quickOpenScore<Text: StringProtocol>(lowered query: String, _ text: Text) -> Int? {
     guard !query.isEmpty else { return 0 }
     if text.hasPrefix(query) { return 3 }
     if let range = text.range(of: query) {
         let before = range.lowerBound == text.startIndex ? " " : text[text.index(before: range.lowerBound)]
         return before.isLetter || before.isNumber ? 1 : 2
     }
-    var rest = Substring(text)
+    var rest = text[...]
     for character in query where character != " " {
         guard let found = rest.firstIndex(of: character) else { return nil }
         rest = rest[rest.index(after: found)...]
@@ -473,6 +500,8 @@ public enum CreateFrom: Equatable, Sendable {
     case branch(String)
     /// A new branch named after this, in a new worktree.
     case name(String)
+    /// A new branch with exactly this name, in a new worktree.
+    case newBranch(String)
 }
 
 /// Reads the Smart field: an issue number or link, else a branch the repo has, else a name for
@@ -483,4 +512,14 @@ public func smartCreateFrom(_ typed: String, branches: [String]) -> CreateFrom? 
     if issueReference(text) != nil { return .issue(text) }
     if branches.contains(text) { return .branch(text) }
     return .name(text)
+}
+
+/// Reads the Branch tab: the branch picked from the list, else a branch the repo has by the name
+/// typed, else a new branch by that name, with spaces as "-". Empty means the repo's own checkout.
+public func branchCreateFrom(_ typed: String, picked: String?, branches: [String]) -> CreateFrom? {
+    if let picked { return .branch(picked) }
+    let text = typed.trimmingCharacters(in: .whitespaces)
+    if text.isEmpty { return nil }
+    if branches.contains(text) { return .branch(text) }
+    return .newBranch(text.split(whereSeparator: \.isWhitespace).joined(separator: "-"))
 }

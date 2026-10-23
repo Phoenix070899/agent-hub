@@ -30,7 +30,7 @@ enum CreateFromTab: CaseIterable, Identifiable {
         switch self {
         case .smart: "Type a name, #1234, a branch, or a GitHub issue link"
         case .github: "An issue number, like 1234, or its link"
-        case .branch: "Find a branch"
+        case .branch: "Find a branch, or name a new one"
         case .name: "A name for the new branch, like Magic link login"
         }
     }
@@ -130,7 +130,7 @@ struct CreateFromSection: View {
         let shown = form.branches.filter { text.isEmpty || $0.name.lowercased().contains(text) }.prefix(5)
         return VStack(spacing: 2) {
             if shown.isEmpty {
-                Text(form.branches.isEmpty ? "Reading branches…" : "No branch matches.")
+                Text(form.branches.isEmpty ? "Reading branches…" : text.isEmpty ? "No branches." : "No branch matches; Return makes a new one.")
                     .font(.system(size: 12.5))
                     .foregroundStyle(Ledger.ink3)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -177,7 +177,7 @@ struct CreateFromSection: View {
         switch form.choice {
         case nil:
             return form.tab == .branch
-                ? ("Pick a branch, or leave it to work in the repo's checkout.", false)
+                ? ("Pick a branch or type a new one; left empty, it works in the repo's checkout.", false)
                 : ("Empty: it works in the repo's checkout\(form.current.isEmpty ? "" : " of \(form.current)").", false)
         case .issue(let typed)?:
             guard issueReference(typed) != nil else {
@@ -185,21 +185,29 @@ struct CreateFromSection: View {
             }
             return ("Reads the issue, then works on a new branch from \(base) in its own worktree.", false)
         case .branch(let name)?:
-            let branch = form.branches.first { $0.name == name }
-            if let agent = branch?.agent {
-                return ("a\(agent) already works on \(name); both would change the same files.", true)
-            }
-            if name == form.current { return ("Works in the repo's checkout, on \(name).", false) }
-            return branch?.checkout == nil
-                ? ("Works on \(name) in a new worktree.", false)
-                : ("Works on \(name) in its worktree.", false)
+            return existing(name)
+        case .newBranch(let name)?:
+            return ("No branch \(name) yet. Works on a new branch \(name) from \(base), in its own worktree.", false)
         case .name(let text)?:
             let branch = fanoutBranch(text)
             if form.branches.contains(where: { $0.name == branch }) {
-                return ("\(branch) already exists. Pick it under Branch to work on it.", true)
+                let (text, warn) = existing(branch)
+                return ("\(branch) already exists. " + text, warn)
             }
             return ("Works on a new branch \(branch) from \(base), in its own worktree.", false)
         }
+    }
+
+    /// Where an agent on existing branch `name` works: wherever the branch is checked out.
+    private func existing(_ name: String) -> (String, Bool) {
+        let branch = form.branches.first { $0.name == name }
+        if let agent = branch?.agent {
+            return ("a\(agent) already works on \(name); both would change the same files.", true)
+        }
+        if name == form.current { return ("Works in the repo's checkout, on \(name).", false) }
+        return branch?.checkout == nil
+            ? ("Works on \(name) in a new worktree.", false)
+            : ("Works on \(name) in its worktree.", false)
     }
 
     private func note(_ text: String, color: Color) -> some View {

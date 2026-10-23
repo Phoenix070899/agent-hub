@@ -66,14 +66,37 @@ struct QuickOpen: View {
         }
         .onAppear { DispatchQueue.main.async { fieldFocused = true } }
         .onChange(of: search.query) { search.picked = 0 }
+        // A big checkout has tens of thousands of files: they are matched off the main thread,
+        // once typing pauses, and only the best few come back.
+        .task(id: "\(search.query)|\(model.selectedCheckout ?? "")") {
+            guard let root = model.selectedCheckout else { return search.files = [] }
+            try? await Task.sleep(for: .milliseconds(60))
+            guard !Task.isCancelled else { return }
+            let tree = model.checkoutFiles(root).tree
+            let query = search.query
+            let job = Task.detached(priority: .userInitiated) { quickOpenFiles(query, in: tree, limit: Self.shown) }
+            let found = await withTaskCancellationHandler { await job.value } onCancel: { job.cancel() }
+            guard !Task.isCancelled else { return }
+            search.files = found.map { (root, $0.score, $0.path) }
+        }
         .onExitCommand(perform: close)
     }
 
     /// The best matches, best first; with no query, the commands and the current repo's agents.
     private var matches: [QuickOpenItem] {
-        let scored = items.compactMap { item in
+        var scored = items.compactMap { item in
             quickOpenScore(search.query, item.title).map { ($0, item) }
                 ?? quickOpenScore(search.query, item.detail).map { ($0 - 10, item) }
+        }
+        // The selected checkout's files, after everything else, so a command or agent of the
+        // same name still comes first.
+        for (root, score, path) in search.files where root == model.selectedCheckout {
+            let dir = (path as NSString).deletingLastPathComponent
+            scored.append((score, QuickOpenItem(id: "file \(path)", icon: "doc", title: (path as NSString).lastPathComponent,
+                                                detail: dir.isEmpty ? "File" : "File in \(dir)") {
+                model.fileCursor[root] = path
+                model.preview = FileRef(root: root, path: path)
+            }))
         }
         // A stable sort keeps the listing order (commands, then repos, agents, Workers) among equals.
         return scored.enumerated()
@@ -87,8 +110,8 @@ struct QuickOpen: View {
             QuickOpenItem(id: "new-orchestrator", icon: "plus", title: "New Orchestrator", detail: "Command") {
                 model.showNewSession(repo: model.selectedRepo, kind: .orchestrator)
             },
-            QuickOpenItem(id: "new-terminal", icon: "plus", title: "New Terminal", detail: "Command, Claude Code on its own") {
-                model.showNewSession(repo: model.selectedRepo, kind: .claude)
+            QuickOpenItem(id: "new-terminal", icon: "plus", title: "New Terminal", detail: "Command, a shell in the repo") {
+                model.openTerminal()
             },
             QuickOpenItem(id: "fan-out", icon: "arrow.triangle.branch", title: "Fan Out a Task", detail: "Command, several Workers try it") {
                 model.showFanOut()
@@ -119,7 +142,7 @@ struct QuickOpen: View {
                 model.selectSession(repo)
             })
             for agent in model.agents(repo) {
-                let kind = agent.isOrchestrator ? "Orchestrator" : "Claude Code"
+                let kind = agent.kindName
                 items.append(QuickOpenItem(id: "agent \(repo) \(agent.id)", icon: agent.isOrchestrator ? "circle.grid.cross" : "terminal",
                                            title: agent.displayName, detail: "\(kind) in \(session.name)") {
                     model.select(.agent(repo: repo, id: agent.id))
@@ -143,18 +166,6 @@ struct QuickOpen: View {
                                        detail: "Command, text search in files .gitignore covers") {
                 model.searchIgnoredFiles.toggle()
             })
-        }
-        // The selected checkout's files, after everything else, so a command or agent of the
-        // same name still comes first.
-        if let root = model.selectedCheckout {
-            for path in model.checkoutFiles(root).tree.files {
-                let dir = (path as NSString).deletingLastPathComponent
-                items.append(QuickOpenItem(id: "file \(path)", icon: "doc", title: (path as NSString).lastPathComponent,
-                                           detail: dir.isEmpty ? "File" : "File in \(dir)") {
-                    model.fileCursor[root] = path
-                    model.preview = FileRef(root: root, path: path)
-                })
-            }
         }
         return items
     }
@@ -180,6 +191,8 @@ final class QuickOpenSearch: ObservableObject {
     @Published var query = ""
     /// The highlighted result; Return runs it.
     @Published var picked = 0
+    /// The best files for the query, in the checkout they were matched in.
+    @Published var files: [(root: String, score: Int, path: String)] = []
 }
 
 struct QuickOpenItem: Identifiable {

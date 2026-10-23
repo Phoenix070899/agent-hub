@@ -79,12 +79,15 @@ public final class HubSocket: @unchecked Sendable {
 
     /// The next newline-terminated line, without the newline.
     public func readLine() throws -> Data {
+        // Only new bytes are searched: a 2 MB diff arrives in many reads.
+        var searched = buffer.startIndex
         while true {
-            if let newline = buffer.firstIndex(of: 0x0A) {
+            if let newline = buffer[searched...].firstIndex(of: 0x0A) {
                 let line = buffer[buffer.startIndex..<newline]
                 buffer.removeSubrange(buffer.startIndex...newline)
                 return Data(line)
             }
+            searched = buffer.endIndex
             // From the socket, not readChunk: that would hand back the partial line just buffered.
             guard let chunk = readSocket() else { throw HubError.closed }
             buffer.append(chunk)
