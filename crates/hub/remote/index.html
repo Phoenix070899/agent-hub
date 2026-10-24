@@ -1,0 +1,812 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#e9edf2" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#14171c" media="(prefers-color-scheme: dark)">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="Echo">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="apple-touch-icon" href="/icon-180.png">
+<title>Echo Remote</title>
+<style>
+:root {
+  --desk: #e9edf2; --paper: #fbfcfd; --ink: #14213d; --ink2: #56627a; --ink3: #616b80;
+  --rule: #d5dbe4; --wash: #f1f4f8; --field: #eef1f5; --need: #fffbe6; --marker: #ffe347;
+  --marker-ink: #14213d; --run: #2f5be0; --done: #23804b; --fail: #c23b3b;
+  --primary: #14213d; --on-primary: #fbfcfd;
+  --tbg: #0f1419; --tfg: #e6e1cf;
+  --c0: #01060e; --c1: #ea6c73; --c2: #91b362; --c3: #f9af4f; --c4: #53bdfa; --c5: #fae994;
+  --c6: #90e1c6; --c7: #c7c7c7; --c8: #686868; --c9: #f07178; --c10: #c2d94c; --c11: #ffb454;
+  --c12: #59c2ff; --c13: #ffee99; --c14: #95e6cb; --c15: #ffffff;
+  --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, monospace;
+  --vh: 100dvh;
+  color-scheme: light dark;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --desk: #14171c; --paper: #1b1f26; --ink: #e6e9ef; --ink2: #a6afbd; --ink3: #949dae;
+    --rule: #2e343f; --wash: #232832; --field: #232832; --need: #2e2a16;
+    --run: #7c9bff; --done: #5bc48c; --fail: #ff7a7a;
+    --primary: #e6e9ef; --on-primary: #14171c;
+  }
+}
+* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+html, body { margin: 0; background: var(--desk); color: var(--ink); }
+body {
+  font: 16px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  -webkit-text-size-adjust: 100%; overscroll-behavior-y: none;
+}
+a { color: inherit; text-decoration: none; }
+button { font: inherit; color: inherit; }
+.top {
+  position: sticky; top: 0; z-index: 5;
+  padding: env(safe-area-inset-top) max(16px, env(safe-area-inset-right)) 0 max(16px, env(safe-area-inset-left));
+  background: color-mix(in srgb, var(--desk) 82%, transparent);
+  -webkit-backdrop-filter: blur(18px); backdrop-filter: blur(18px);
+  border-bottom: 0.5px solid transparent;
+}
+.top.scrolled { border-bottom-color: var(--rule); }
+.bar { height: 48px; display: flex; align-items: center; gap: 8px; }
+.bar .title { flex: 1; min-width: 0; font-weight: 600; font-size: 17px; text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.bar .side { width: 92px; display: flex; }
+.bar .side.right { justify-content: flex-end; }
+.back { display: inline-flex; align-items: center; gap: 4px; color: var(--run); font-size: 17px; padding: 8px 4px 8px 0; background: none; border: 0; max-width: 92px; min-width: 0; }
+.back svg { flex: none; }
+.back span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.icon-btn { background: none; border: 0; color: var(--run); font-size: 17px; padding: 8px 0 8px 8px; }
+main { padding: 4px max(16px, env(safe-area-inset-right)) calc(28px + env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left)); }
+.large { display: flex; align-items: center; justify-content: space-between; margin: 6px 0 14px; }
+.large h1 { font-size: 32px; line-height: 1.1; margin: 0; letter-spacing: -0.02em; }
+.pill { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--ink2); background: var(--paper); border: 0.5px solid var(--rule); border-radius: 999px; padding: 4px 10px; }
+.pill i { width: 7px; height: 7px; border-radius: 50%; background: var(--done); display: block; }
+.pill.off i { background: var(--fail); }
+.section { display: flex; align-items: baseline; justify-content: space-between; margin: 22px 4px 8px; }
+.section h2 { font-size: 13px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; color: var(--ink3); margin: 0; }
+.count { font-size: 12px; font-weight: 700; background: var(--marker); color: var(--marker-ink); border-radius: 999px; padding: 1px 8px; }
+.empty { color: var(--ink3); font-size: 15px; padding: 14px 16px; background: var(--paper); border-radius: 12px; }
+.card { background: var(--paper); border-radius: 12px; padding: 12px 14px; margin-bottom: 10px; border: 0.5px solid var(--rule); }
+.need { background: var(--need); border-color: color-mix(in srgb, var(--marker) 45%, var(--rule)); }
+.need.flash { animation: flash 1.6s ease-out; }
+@keyframes flash { 0% { box-shadow: 0 0 0 3px var(--marker); } 100% { box-shadow: 0 0 0 0 transparent; } }
+.need.sent { opacity: 0.5; pointer-events: none; }
+.head { display: flex; align-items: baseline; gap: 8px; }
+.head .what { flex: 1; min-width: 0; font-weight: 600; }
+.mark { background: linear-gradient(transparent 55%, color-mix(in srgb, var(--marker) 75%, transparent) 55%); padding: 0 1px; }
+@media (prefers-color-scheme: dark) {
+  .mark { background: var(--marker); color: var(--marker-ink); border-radius: 4px; padding: 0 5px; -webkit-box-decoration-break: clone; box-decoration-break: clone; }
+  .term-wrap { box-shadow: inset 0 0 0 0.5px var(--rule); }
+}
+.age { font-size: 13px; color: var(--ink3); font-variant-numeric: tabular-nums; flex: none; }
+.place { font-size: 13px; color: var(--ink2); margin-top: 2px; }
+.cmd { font: 13px/1.45 var(--mono); background: var(--wash); border-radius: 8px; padding: 8px 10px; margin: 10px 0 0; white-space: pre-wrap; word-break: break-word; max-height: 9.5em; overflow: auto; }
+.body { margin-top: 8px; white-space: pre-wrap; word-break: break-word; font-size: 15px; }
+.muted { color: var(--ink2); font-size: 14px; margin-top: 8px; }
+.row { display: flex; gap: 8px; margin-top: 10px; align-items: flex-end; }
+.btn { appearance: none; border: 0.5px solid var(--rule); background: var(--paper); color: var(--ink); border-radius: 10px; padding: 0 16px; min-height: 40px; font-size: 15px; font-weight: 600; flex: none; }
+.btn.primary { background: var(--primary); color: var(--on-primary); border-color: var(--primary); }
+.btn.grow { flex: 1; }
+.btn.danger { color: var(--fail); }
+.btn:active { opacity: 0.7; }
+.btn[disabled] { opacity: 0.45; }
+textarea, input[type=text] {
+  font: 16px/1.35 -apple-system, system-ui, sans-serif; color: var(--ink); background: var(--field);
+  border: 0.5px solid var(--rule); border-radius: 10px; padding: 9px 11px; width: 100%; min-width: 0; resize: none; outline: none;
+}
+textarea:focus, input[type=text]:focus { border-color: var(--run); }
+.list { background: var(--paper); border-radius: 12px; border: 0.5px solid var(--rule); overflow: hidden; }
+.item { display: flex; align-items: center; gap: 10px; padding: 11px 14px; min-height: 52px; }
+.item + .item { border-top: 0.5px solid var(--rule); }
+.item .main { flex: 1; min-width: 0; }
+.item .name { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.item .sub { font-size: 13px; color: var(--ink2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.chev { color: var(--ink3); flex: none; }
+.dot { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--ink3); opacity: 0.5; }
+.dot.live { background: var(--done); opacity: 1; }
+.badge { font-size: 12px; font-weight: 700; border-radius: 999px; padding: 2px 8px; flex: none; }
+.badge.needs { background: var(--marker); color: var(--marker-ink); }
+.agent { padding: 0; overflow: hidden; }
+.agent > .item { min-height: 56px; }
+.workers { border-top: 0.5px solid var(--rule); }
+.worker { display: flex; gap: 10px; padding: 10px 14px 10px 32px; align-items: center; }
+.worker + .worker { border-top: 0.5px solid var(--rule); }
+.worker .main { flex: 1; min-width: 0; }
+.worker .name { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.worker .sub { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--ink2); margin-top: 3px; min-width: 0; }
+.worker .sub span:last-child { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.state { font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; border-radius: 5px; padding: 1px 5px; flex: none; }
+.state.running { color: var(--run); background: color-mix(in srgb, var(--run) 13%, transparent); }
+.state.done { color: var(--done); background: color-mix(in srgb, var(--done) 13%, transparent); }
+.state.failed { color: var(--fail); background: color-mix(in srgb, var(--fail) 13%, transparent); }
+.state.needs { color: var(--marker-ink); background: var(--marker); }
+.usage { font-size: 13px; color: var(--ink3); margin: 18px 4px 0; display: flex; gap: 14px; flex-wrap: wrap; }
+.term-page { display: flex; flex-direction: column; height: var(--vh); }
+.term-page main { flex: none; padding-bottom: 0; }
+.term-wrap { flex: 1; min-height: 0; margin: 0 max(10px, env(safe-area-inset-right)) 0 max(10px, env(safe-area-inset-left)); border-radius: 12px; background: var(--tbg); position: relative; overflow: hidden; }
+.term { --bg: var(--tbg); --fg: var(--tfg); position: absolute; inset: 0; overflow: auto; -webkit-overflow-scrolling: touch; padding: 10px 10px 14px; color: var(--tfg); }
+.term pre { margin: 0; font: var(--term-size, 11px)/1.32 var(--mono); white-space: pre; }
+.term.wrap pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+.term .rule { display: block; height: 0; border-top: 1px solid #3a4250; margin: 0.6em 0; }
+.term .note { color: #8b95a7; font: 14px/1.4 -apple-system, system-ui, sans-serif; white-space: normal; }
+.tools { display: flex; gap: 6px; padding: 8px max(10px, env(safe-area-inset-right)) 0 max(10px, env(safe-area-inset-left)); overflow-x: auto; scrollbar-width: none; }
+.viewbar { display: flex; gap: 6px; justify-content: flex-end; padding: 0 max(10px, env(safe-area-inset-right)) 8px max(10px, env(safe-area-inset-left)); }
+.viewbar .key { flex: none; }
+.tools::-webkit-scrollbar { display: none; }
+.key { flex: 1 0 auto; min-width: 40px; height: 36px; padding: 0 8px; border-radius: 8px; border: 0.5px solid var(--rule); background: var(--paper); color: var(--ink); font: 500 15px/1 -apple-system, system-ui, sans-serif; }
+.key.small { font-size: 13px; }
+.key.on { background: var(--primary); color: var(--on-primary); }
+.key:active { opacity: 0.6; }
+.composer { display: flex; gap: 8px; align-items: flex-end; padding: 8px max(10px, env(safe-area-inset-right)) calc(8px + env(safe-area-inset-bottom)) max(10px, env(safe-area-inset-left)); }
+.composer textarea { max-height: 7.5em; }
+.banner { margin: 0 max(10px, env(safe-area-inset-right)) 8px max(10px, env(safe-area-inset-left)); }
+.banner .card { margin: 0; }
+.status-line { font-size: 13px; color: var(--ink2); text-align: center; margin: -4px 0 8px; }
+.report { white-space: pre-wrap; word-break: break-word; font-size: 15px; max-height: 40vh; overflow: auto; }
+.sheet-back { position: fixed; inset: 0; background: rgba(10, 14, 22, 0.35); z-index: 20; display: flex; align-items: flex-end; animation: fade 0.18s ease-out; }
+@keyframes fade { from { opacity: 0; } }
+.sheet { width: 100%; max-height: 92vh; overflow: auto; background: var(--desk); border-radius: 16px 16px 0 0; padding: 8px 16px calc(20px + env(safe-area-inset-bottom)); animation: rise 0.22s ease-out; }
+@keyframes rise { from { transform: translateY(40px); } }
+.grabber { width: 36px; height: 5px; border-radius: 3px; background: var(--rule); margin: 0 auto 10px; }
+.sheet h3 { margin: 4px 0 14px; font-size: 20px; }
+.field { margin-bottom: 14px; }
+.field label { display: block; font-size: 13px; color: var(--ink2); margin: 0 4px 6px; }
+.hint { font-size: 13px; color: var(--ink3); margin: 6px 4px 0; }
+.seg { display: flex; background: var(--field); border-radius: 10px; padding: 2px; border: 0.5px solid var(--rule); }
+.seg button { flex: 1; border: 0; background: none; border-radius: 8px; min-height: 36px; font-size: 15px; font-weight: 600; color: var(--ink2); }
+.seg button.on { background: var(--paper); color: var(--ink); box-shadow: 0 1px 3px rgba(0,0,0,0.12); }
+.error { color: var(--fail); font-size: 14px; margin: 8px 4px 0; }
+.toast { position: fixed; left: 16px; right: 16px; margin: 0 auto; width: fit-content; bottom: calc(24px + env(safe-area-inset-bottom)); z-index: 30; background: var(--primary); color: var(--on-primary); border-radius: 12px; padding: 10px 16px; font-size: 14px; max-width: calc(100% - 32px); box-shadow: 0 6px 24px rgba(0,0,0,0.2); animation: rise 0.2s ease-out; }
+.pair { max-width: 420px; margin: 0 auto; padding: calc(48px + env(safe-area-inset-top)) 20px 40px; text-align: center; }
+.pair img { width: 84px; height: 84px; border-radius: 19px; box-shadow: 0 4px 18px rgba(20,33,61,0.18); }
+.pair h1 { font-size: 26px; margin: 18px 0 8px; }
+.pair p { color: var(--ink2); margin: 0 0 18px; }
+.pair .row { margin-top: 10px; }
+</style>
+</head>
+<body>
+<div id="app"></div>
+<script>
+"use strict";
+const $app = document.getElementById("app");
+const state = {
+  world: null,
+  online: false,
+  paired: true,
+  drafts: {},
+  denying: {},
+  sent: {},
+  sheet: null,
+  stale: false,
+  screen: { key: null, html: "", live: false, timer: null, follow: true },
+};
+const prefs = load("echo-remote-prefs", { size: 11, wrap: true });
+
+function load(key, fallback) {
+  try { return Object.assign({}, fallback, JSON.parse(localStorage.getItem(key) || "{}")); } catch { return fallback; }
+}
+function save(key, value) { try { localStorage.setItem(key, JSON.stringify(value)); } catch {} }
+function esc(text) {
+  return String(text == null ? "" : text).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+function base(path) { return String(path || "").split("/").filter(Boolean).pop() || path; }
+function age(at) {
+  const s = Math.max(0, Math.floor(Date.now() / 1000) - (at || 0));
+  if (s < 60) return "now";
+  if (s < 3600) return Math.floor(s / 60) + "m";
+  if (s < 86400) return Math.floor(s / 3600) + "h";
+  return Math.floor(s / 86400) + "d";
+}
+const chevron = '<svg class="chev" width="8" height="13" viewBox="0 0 8 13"><path d="M1.5 1.5 6.5 6.5 1.5 11.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+const backArrow = '<svg width="12" height="20" viewBox="0 0 12 20"><path d="M10 2 2 10l8 8" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+
+// ---- Routes: #, #repo=<path>, #agent=<id>, #worker=<n>, #need=<key>, #pair=<token>
+function route() {
+  const hash = location.hash.slice(1);
+  const [key, ...rest] = hash.split("=");
+  return { name: key || "home", value: decodeURIComponent(rest.join("=")) };
+}
+function go(hash) { if (location.hash !== hash) location.hash = hash; else render(); }
+
+// ---- The ledger, from the daemon's stream
+function repos() { return (state.world && state.world.repos) || []; }
+function allNeeds() {
+  const out = [];
+  for (const repo of repos()) for (const need of repo.needs || []) out.push({ need, repo });
+  return out.sort((a, b) => a.need.at - b.need.at);
+}
+function needKey(need) {
+  return need.worker ? `${need.kind}-${need.message}` : `${need.kind}-agent-${need.agent || 0}-${need.at}`;
+}
+function agentName(agent) {
+  if (agent.name) return agent.name;
+  return { claude: "Claude Code", terminal: "Terminal" }[agent.kind] || "Orchestrator";
+}
+function kindName(kind) { return { claude: "Claude Code", terminal: "Terminal" }[kind] || "Orchestrator"; }
+function findAgent(id) {
+  for (const repo of repos()) for (const agent of repo.agents || []) if (agent.id === id) return { agent, repo };
+  return null;
+}
+function findWorker(n) {
+  for (const repo of repos()) for (const worker of repo.workers || []) if (worker.id === "w" + n) return { worker, repo };
+  return null;
+}
+function headline(need) {
+  const who = need.worker ? `${need.worker} ${need.profile}` : (need.profile === "orchestrator" ? "The Orchestrator" : "Claude Code");
+  return { question: `${who} asks`, permission_prompt: `${who} wants to run`, idle_prompt: `${who} is idle` }[need.kind] || `${who} needs you`;
+}
+function command(need) {
+  const lines = String(need.prompt || "").split("\n").map(l => l.trim()).filter(l => l && !l.startsWith("Do you want"));
+  if (!lines.length) return need.body || "";
+  return lines.length > 1 ? lines.slice(1).join(" ") : lines[0];
+}
+function stateClass(row) { return { "needs you": "needs", running: "running", done: "done", failed: "failed" }[row.state] || "running"; }
+function stateLabel(row) { return { "needs you": "Needs you", running: "Running", done: "Done", failed: "Failed" }[row.state] || row.state; }
+
+// ---- Talking to the daemon
+async function api(path, body) {
+  const options = body === undefined ? {} : { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) };
+  const response = await fetch(path, Object.assign({ credentials: "same-origin" }, options));
+  if (response.status === 401) { state.paired = false; render(); throw new Error("not paired"); }
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+  return data;
+}
+async function call(method, params) {
+  const data = await api("/api/call/" + method, params);
+  if (data.ok === false) throw new Error(data.error || "the Hub Daemon refused");
+  return data.result;
+}
+let toastTimer;
+function toast(text) {
+  document.querySelectorAll(".toast").forEach(t => t.remove());
+  const el = document.createElement("div");
+  el.className = "toast";
+  el.textContent = text;
+  document.body.appendChild(el);
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.remove(), 3200);
+}
+
+let source = null;
+function connect() {
+  if (source) source.close();
+  source = new EventSource("/api/stream");
+  source.onopen = () => { state.online = true; state.paired = true; renderSoon(); };
+  source.onmessage = event => {
+    state.world = JSON.parse(event.data);
+    state.online = true;
+    state.sent = {};
+    renderSoon();
+  };
+  source.onerror = () => {
+    state.online = false;
+    renderSoon();
+    // A stream refused for want of pairing never opens: ask why.
+    fetch("/api/push/key", { credentials: "same-origin" }).then(r => {
+      if (r.status === 401) { source.close(); state.paired = false; render(); }
+    }).catch(() => {});
+  };
+}
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState !== "visible") return;
+  if (!source || source.readyState === EventSource.CLOSED) connect();
+  pollScreen();
+});
+
+// ---- Rendering. A field being typed in is never redrawn under the thumb: the page waits for it
+// to lose focus.
+function typing() {
+  const el = document.activeElement;
+  return el && (el.tagName === "TEXTAREA" || el.tagName === "INPUT") && $app.contains(el);
+}
+function renderSoon() {
+  if (typing()) { state.stale = true; return; }
+  render();
+}
+document.addEventListener("focusout", () => setTimeout(() => { if (state.stale && !typing()) { state.stale = false; render(); } }, 50));
+
+function render() {
+  const r = route();
+  if (r.name === "pair") return pair(r.value);
+  if (!state.paired) return renderPair();
+  document.body.classList.toggle("is-term", r.name === "agent" || r.name === "worker");
+  let html;
+  if (r.name === "repo") html = renderRepo(r.value);
+  else if (r.name === "agent") html = renderTerm({ agent: Number(r.value) });
+  else if (r.name === "worker") html = renderTerm({ worker: Number(r.value) });
+  else html = renderHome(r.name === "need" ? r.value : null);
+  const term = $app.querySelector(".term");
+  const keep = term && { top: term.scrollTop, left: term.scrollLeft };
+  $app.innerHTML = html + renderSheet();
+  const fresh = $app.querySelector(".term");
+  if (fresh) {
+    fresh.querySelector("pre").innerHTML = screenMarkup();
+    if (keep && !state.screen.follow) { fresh.scrollTop = keep.top; fresh.scrollLeft = keep.left; }
+    else fresh.scrollTop = fresh.scrollHeight;
+    fresh.addEventListener("scroll", () => {
+      state.screen.follow = fresh.scrollTop + fresh.clientHeight >= fresh.scrollHeight - 24;
+    }, { passive: true });
+  }
+  if (r.name === "need") {
+    const card = $app.querySelector(`[data-need="${CSS.escape(r.value)}"]`);
+    if (card) { card.classList.add("flash"); card.scrollIntoView({ block: "center" }); }
+  }
+  watchScreen(r);
+}
+
+function topBar(title, back, right) {
+  return `<header class="top"><div class="bar">
+    <div class="side">${back ? `<button class="back" data-go="${esc(back.href)}">${backArrow}<span>${esc(back.label)}</span></button>` : ""}</div>
+    <div class="title">${esc(title)}</div>
+    <div class="side right">${right || ""}</div></div></header>`;
+}
+
+function renderHome(flash) {
+  const needs = allNeeds();
+  const online = state.online
+    ? '<span class="pill"><i></i>Live</span>'
+    : '<span class="pill off"><i></i>Reconnecting</span>';
+  let html = `<header class="top"><div class="bar"><div class="side"></div><div class="title"></div>
+    <div class="side right"><button class="icon-btn" data-sheet="settings" aria-label="Settings">Settings</button></div></div></header>
+    <main><div class="large"><h1>Echo</h1>${online}</div>`;
+  if (!state.world) return html + '<div class="empty">Connecting to your Mac…</div></main>';
+  html += `<div class="section"><h2>Needs you</h2>${needs.length ? `<span class="count">${needs.length}</span>` : ""}</div>`;
+  html += needs.length ? needs.map(({ need, repo }) => needCard(need, repo, true)).join("") : '<div class="empty">Nothing is waiting on you.</div>';
+  html += '<div class="section"><h2>Repos</h2></div>';
+  if (!repos().length) html += '<div class="empty">No agents yet. Start one in Echo on your Mac.</div>';
+  else html += '<div class="list">' + repos().map(repo => {
+    const live = (repo.agents || []).filter(a => a.live && a.kind !== "terminal").length;
+    const running = (repo.workers || []).filter(w => w.state === "running").length;
+    const waiting = (repo.needs || []).length;
+    const parts = [`${live} agent${live === 1 ? "" : "s"} running`];
+    if (running) parts.push(`${running} Worker${running === 1 ? "" : "s"} working`);
+    return `<a class="item" href="#repo=${encodeURIComponent(repo.repo)}">
+      <div class="main"><div class="name">${esc(base(repo.repo))}</div><div class="sub">${esc(parts.join(", "))}</div></div>
+      ${waiting ? `<span class="badge needs">${waiting}</span>` : ""}${chevron}</a>`;
+  }).join("") + "</div>";
+  const limits = (state.world.usage && state.world.usage.limits) || [];
+  if (limits.length) html += '<div class="usage">' + limits.slice(0, 3).map(l => `<span>${esc(l.name)} ${esc(l.percent)}%</span>`).join("") + "</div>";
+  return html + "</main>";
+}
+
+function needCard(need, repo, withPlace) {
+  const key = needKey(need);
+  const agent = (repo.agents || []).find(a => a.id === need.agent);
+  const place = withPlace ? [base(repo.repo), agent ? agentName(agent) : null].filter(Boolean).join(", ") : agent ? agentName(agent) : "";
+  const target = need.worker ? `#worker=${need.worker.slice(1)}` : `#agent=${need.agent}`;
+  let body = "";
+  if (need.kind === "permission_prompt") {
+    body = `<pre class="cmd">${esc(command(need))}</pre>`;
+    if (state.denying[key]) {
+      body += `<div class="row"><textarea rows="1" data-draft="${esc(key)}" placeholder="Why, for ${esc(need.worker || "it")} (optional)">${esc(state.drafts[key] || "")}</textarea>
+        <button class="btn primary" data-act="deny" data-key="${esc(key)}">Deny</button></div>`;
+    } else {
+      body += `<div class="row"><button class="btn primary grow" data-act="approve" data-key="${esc(key)}">Approve</button>
+        <button class="btn grow danger" data-act="deny-ask" data-key="${esc(key)}">Deny</button>
+        <button class="btn" data-go="${target}">Open</button></div>`;
+    }
+  } else if (need.kind === "question") {
+    body = `<div class="body">${esc(need.body)}</div>
+      <div class="row"><textarea rows="1" data-draft="${esc(key)}" placeholder="Reply to ${esc(need.worker || "it")}">${esc(state.drafts[key] || "")}</textarea>
+      <button class="btn primary" data-act="reply" data-key="${esc(key)}">Send</button></div>`;
+  } else {
+    const text = need.kind === "idle_prompt" ? "Idle at its prompt with no Final Report. The Orchestrator nudges it." : String(need.body || "").split("\n").slice(0, 3).join("\n");
+    body = `<div class="muted">${esc(text)}</div><div class="row"><button class="btn" data-go="${target}">Open</button></div>`;
+  }
+  return `<div class="card need${state.sent[key] ? " sent" : ""}" data-need="${esc(key)}">
+    <div class="head"><div class="what"><span class="mark">${esc(headline(need))}</span></div><span class="age">${age(need.at)}</span></div>
+    ${place ? `<div class="place">${esc(place)}</div>` : ""}${body}</div>`;
+}
+
+function renderRepo(path) {
+  const repo = repos().find(r => r.repo === path);
+  const add = `<button class="icon-btn" data-sheet="new" aria-label="New agent">New</button>`;
+  let html = topBar(base(path), { href: "#", label: "Echo" }, repo ? add : "") + "<main>";
+  if (!repo) return html + (state.world ? '<div class="empty">This repo has no agents any more.</div>' : '<div class="empty">Connecting…</div>') + "</main>";
+  if ((repo.needs || []).length) {
+    html += `<div class="section"><h2>Needs you</h2><span class="count">${repo.needs.length}</span></div>`;
+    html += repo.needs.map(n => needCard(n, repo, false)).join("");
+  }
+  html += '<div class="section"><h2>Agents</h2></div>';
+  const agents = repo.agents || [];
+  if (!agents.length) html += '<div class="empty">No agents. Tap New to start one.</div>';
+  for (const agent of agents) {
+    const workers = (repo.workers || []).filter(w => w.agent === agent.id);
+    const where = agent.branch || agent.head || "";
+    const sub = [kindName(agent.kind), agent.live ? "running" : "stopped", where].filter(Boolean).join(", ");
+    html += `<div class="card agent"><a class="item" href="#agent=${agent.id}"><span class="dot${agent.live ? " live" : ""}"></span>
+      <div class="main"><div class="name">${esc(agentName(agent))}</div><div class="sub">${esc(sub)}</div></div>${chevron}</a>`;
+    if (workers.length) html += '<div class="workers">' + workers.map(workerRow).join("") + "</div>";
+    html += "</div>";
+  }
+  const loose = (repo.workers || []).filter(w => !agents.some(a => a.id === w.agent));
+  if (loose.length) html += '<div class="section"><h2>Other Workers</h2></div><div class="card agent"><div class="workers" style="border:0">' + loose.map(workerRow).join("") + "</div></div>";
+  return html + "</main>";
+}
+
+function workerRow(w) {
+  const line = w.state === "running" ? (w.progress || `quiet for ${age(w.quietSince)}`)
+    : (w.state === "done" || w.state === "failed") ? firstLine(w.finalReport)
+    : ((w.openQuestions || []).length ? "Asks a question" : w.blocker === "permission_prompt" ? "Wants to run a command" : "Waiting on you");
+  return `<a class="worker" href="#worker=${w.id.slice(1)}">
+    <div class="main"><div class="name">${esc(w.id)} ${esc(w.title)}</div>
+    <div class="sub"><span class="state ${stateClass(w)}">${esc(stateLabel(w))}</span><span>${esc(line)}</span></div></div>${chevron}</a>`;
+}
+function firstLine(text) { return String(text || "").split("\n").map(l => l.trim()).find(Boolean) || ""; }
+
+function renderTerm(target) {
+  const found = target.agent ? findAgent(target.agent) : findWorker(target.worker);
+  const repo = found && found.repo;
+  const back = repo ? { href: "#repo=" + encodeURIComponent(repo.repo), label: base(repo.repo) } : { href: "#", label: "Echo" };
+  let title = "";
+  let status = "";
+  let live = state.screen.live;
+  let extra = "";
+  let needs = [];
+  if (found && target.agent) {
+    const a = found.agent;
+    title = agentName(a);
+    status = [kindName(a.kind), a.live ? "running" : "stopped", a.branch || a.head].filter(Boolean).join(", ");
+    needs = (repo.needs || []).filter(n => !n.worker && n.agent === a.id);
+  } else if (found) {
+    const w = found.worker;
+    title = `${w.id} ${w.title}`;
+    status = [stateLabel(w), w.profile, w.branch].filter(Boolean).join(", ");
+    needs = (repo.needs || []).filter(n => n.worker === w.id);
+    if (w.finalReport) {
+      extra = `<div class="banner"><div class="card"><div class="head"><div class="what">Final Report</div><span class="age">${age(w.settledAt)}</span></div>
+        <div class="report">${esc(w.finalReport)}</div>
+        ${w.state === "done" || w.state === "failed" ? `<div class="row"><button class="btn" data-act="dismiss" data-worker="${w.id.slice(1)}">Clear from Done</button></div>` : ""}</div></div>`;
+    }
+  } else if (state.world) {
+    title = target.agent ? "Agent" : `w${target.worker}`;
+    status = "Gone from the ledger";
+  }
+  const banner = needs.map(n => `<div class="banner">${needCard(n, repo, false)}</div>`).join("");
+  const stopped = found && target.agent && !found.agent.live;
+  const keys = [["esc", "Esc", "small"], ["up", "↑"], ["down", "↓"], ["enter", "⏎"], ["tab", "Tab", "small"], ["shift-tab", "⇧Tab", "small"], ["ctrl-c", "⌃C", "small"]]
+    .map(([k, label, size]) => `<button class="key${size ? " " + size : ""}" data-key-press="${k}" aria-label="${k}">${label}</button>`).join("");
+  const view = state.viewbar ? `<div class="viewbar"><button class="key small${prefs.wrap ? " on" : ""}" data-act="wrap">Wrap lines</button>
+    <button class="key" data-act="smaller" aria-label="Smaller text">A−</button><button class="key" data-act="bigger" aria-label="Bigger text">A+</button></div>` : "";
+  let bottom;
+  if (stopped && found.agent.kind !== "terminal") {
+    bottom = `<div class="composer"><button class="btn primary grow" data-act="start" data-agent="${found.agent.id}">Start ${esc(agentName(found.agent))} again</button></div>`;
+  } else if (!live && state.screen.key) {
+    bottom = `<div class="composer"><div class="muted" style="margin:0 auto 4px">Not running.</div></div>`;
+  } else {
+    const key = termKey(target);
+    bottom = `<div class="tools">${keys}</div>
+      <div class="composer"><textarea rows="1" data-draft="${esc(key)}" placeholder="Message ${esc(title || "it")}">${esc(state.drafts[key] || "")}</textarea>
+      <button class="btn primary" data-act="send">Send</button></div>`;
+  }
+  const aa = `<button class="icon-btn" data-act="viewbar" aria-label="Text size and wrapping">Aa</button>`;
+  return `<div class="term-page">${topBar(title, back, aa)}<div class="status-line">${esc(status)}</div>
+    ${view}${banner}${extra}<div class="term-wrap"><div class="term${prefs.wrap ? " wrap" : ""}" style="--term-size:${prefs.size}px"><pre></pre></div></div>${bottom}</div>`;
+}
+function termKey(target) { return target.agent ? `agent-${target.agent}` : `worker-${target.worker}`; }
+
+// A line drawn only with box rules becomes one thin rule, so it does not wrap into rows of dashes.
+function screenMarkup() {
+  if (!state.screen.key) return "";
+  if (!state.screen.live && !state.screen.html) return '<span class="note">Nothing on screen: it is not running.</span>';
+  return state.screen.html.split("\n").map(line => {
+    const text = line.replace(/<[^>]*>/g, "");
+    return text.length > 8 && /^[\s─━═╌┄╍-]+$/.test(text) ? '<span class="rule"></span>' : line;
+  }).join("\n");
+}
+
+// ---- The screen of the agent or Worker shown, read once a second while visible
+function watchScreen(r) {
+  const key = r.name === "agent" || r.name === "worker" ? `${r.name}=${r.value}` : null;
+  if (key !== state.screen.key) {
+    state.screen = { key, html: "", live: true, timer: state.screen.timer, follow: true };
+  }
+  clearTimeout(state.screen.timer);
+  if (key) state.screen.timer = setTimeout(pollScreen, state.screen.html ? 1000 : 0);
+}
+async function pollScreen() {
+  const key = state.screen.key;
+  clearTimeout(state.screen.timer);
+  if (!key || document.visibilityState !== "visible") return;
+  const [name, value] = key.split("=");
+  try {
+    const data = await api(`/api/screen?${name}=${encodeURIComponent(value)}`);
+    if (state.screen.key !== key) return;
+    const changedLive = data.live !== state.screen.live;
+    if (data.html !== state.screen.html || changedLive) {
+      state.screen.html = data.html;
+      state.screen.live = data.live;
+      const pre = $app.querySelector(".term pre");
+      if (changedLive) renderSoon();
+      else if (pre) {
+        pre.innerHTML = screenMarkup();
+        const term = pre.parentElement;
+        if (state.screen.follow) term.scrollTop = term.scrollHeight;
+      }
+    }
+  } catch {}
+  if (state.screen.key === key) state.screen.timer = setTimeout(pollScreen, 1000);
+}
+
+// ---- Sheets: a new agent, and settings
+function renderSheet() {
+  if (!state.sheet) return "";
+  if (state.sheet.name === "new") {
+    const s = state.sheet;
+    return `<div class="sheet-back" data-act="close-sheet"><div class="sheet" role="dialog">
+      <div class="grabber"></div><h3>New agent in ${esc(base(route().value))}</h3>
+      <div class="field"><div class="seg">
+        <button data-kind="orchestrator" class="${s.kind === "orchestrator" ? "on" : ""}">Orchestrator</button>
+        <button data-kind="claude" class="${s.kind === "claude" ? "on" : ""}">Claude Code</button></div>
+        <div class="hint">${s.kind === "orchestrator" ? "Hands Tasks to Workers and reports back." : "A plain Claude Code session."}</div></div>
+      <div class="field"><label for="new-request">What to do</label><textarea id="new-request" rows="3" data-draft="new-request" placeholder="Optional; you can type it later">${esc(state.drafts["new-request"] || "")}</textarea></div>
+      <div class="field"><label for="new-name">Name</label><input id="new-name" type="text" data-draft="new-name" placeholder="Optional; else named after the request" value="${esc(state.drafts["new-name"] || "")}" autocapitalize="off"></div>
+      <div class="field"><label for="new-branch">Branch</label><input id="new-branch" type="text" data-draft="new-branch" placeholder="Optional, e.g. fix/login" value="${esc(state.drafts["new-branch"] || "")}" autocapitalize="off" autocorrect="off" spellcheck="false">
+        <div class="hint">An existing branch is worked on where it is; a new one gets its own worktree. Empty: the repo's own checkout.</div></div>
+      ${s.error ? `<div class="error">${esc(s.error)}</div>` : ""}
+      <div class="row"><button class="btn grow" data-act="close-sheet">Cancel</button><button class="btn primary grow" data-act="create"${s.busy ? " disabled" : ""}>${s.busy ? "Starting…" : "Start"}</button></div>
+    </div></div>`;
+  }
+  const s = state.sheet;
+  const standalone = window.matchMedia("(display-mode: standalone)").matches || navigator.standalone;
+  const supported = "serviceWorker" in navigator && "PushManager" in window && "Notification" in window;
+  let note;
+  if (!supported && !standalone) note = "On iPhone, notifications need Echo on the Home Screen: tap Share, then Add to Home Screen, and open Echo from there.";
+  else if (!supported) note = "This browser cannot get web notifications.";
+  else if (Notification.permission === "denied") note = "Notifications are blocked for Echo. Allow them in the phone's Settings, under Notifications.";
+  else note = s.subscribed ? "On. New Needs and Final Reports arrive here, even with Echo closed." : "Get a notification for each new Need and Final Report.";
+  const buttons = !supported || Notification.permission === "denied" ? "" : s.subscribed
+    ? `<div class="row"><button class="btn grow" data-act="push-test">Send a test</button><button class="btn grow danger" data-act="push-off">Turn off</button></div>`
+    : `<div class="row"><button class="btn primary grow" data-act="push-on"${s.busy ? " disabled" : ""}>Turn on notifications</button></div>`;
+  return `<div class="sheet-back" data-act="close-sheet"><div class="sheet" role="dialog">
+    <div class="grabber"></div><h3>Settings</h3>
+    <div class="section" style="margin-top:0"><h2>Notifications</h2></div>
+    <div class="card"><div class="body" style="margin:0">${esc(note)}</div>${buttons}
+    ${s.error ? `<div class="error">${esc(s.error)}</div>` : ""}</div>
+    <div class="hint">Pairing: to unpair every phone, choose New pairing link in Echo's settings on your Mac.</div>
+    <div class="row"><button class="btn grow" data-act="close-sheet">Done</button></div>
+  </div></div>`;
+}
+
+async function openSettings() {
+  state.sheet = { name: "settings", subscribed: false };
+  render();
+  try {
+    const registration = await navigator.serviceWorker.getRegistration();
+    const subscription = registration && await registration.pushManager.getSubscription();
+    if (state.sheet && state.sheet.name === "settings") { state.sheet.subscribed = !!subscription; render(); }
+  } catch {}
+}
+
+function b64ToBytes(b64) {
+  const raw = atob(b64.replace(/-/g, "+").replace(/_/g, "/") + "===".slice((b64.length + 3) % 4));
+  return Uint8Array.from(raw, c => c.charCodeAt(0));
+}
+async function pushOn() {
+  const s = state.sheet;
+  s.busy = true; s.error = null; render();
+  try {
+    if (await Notification.requestPermission() !== "granted") throw new Error("Notifications were not allowed.");
+    const registration = await navigator.serviceWorker.register("/sw.js");
+    await navigator.serviceWorker.ready;
+    const { key } = await api("/api/push/key");
+    const subscription = await registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64ToBytes(key) });
+    await api("/api/push/subscribe", subscription.toJSON());
+    s.subscribed = true;
+    toast("Notifications are on.");
+  } catch (error) { s.error = error.message; }
+  s.busy = false; render();
+}
+async function pushOff() {
+  const s = state.sheet;
+  try {
+    const registration = await navigator.serviceWorker.getRegistration();
+    const subscription = registration && await registration.pushManager.getSubscription();
+    if (subscription) {
+      await api("/api/push/unsubscribe", { endpoint: subscription.endpoint });
+      await subscription.unsubscribe();
+    }
+    s.subscribed = false;
+  } catch (error) { s.error = error.message; }
+  render();
+}
+async function pushTest() {
+  const s = state.sheet;
+  try {
+    const registration = await navigator.serviceWorker.getRegistration();
+    const subscription = registration && await registration.pushManager.getSubscription();
+    if (!subscription) throw new Error("Turn notifications on first.");
+    const result = await api("/api/push/test", { endpoint: subscription.endpoint });
+    if (result.error) throw new Error(result.error);
+    toast("Sent. It should arrive in a few seconds.");
+  } catch (error) { s.error = error.message; render(); }
+}
+
+// ---- Pairing
+function renderPair(error) {
+  document.body.classList.remove("is-term");
+  $app.innerHTML = `<div class="pair"><img src="/icon-180.png" alt="">
+    <h1>Pair this phone</h1>
+    <p>On your Mac, open Echo's Settings, then Remote, and scan the QR code with this phone's camera. Or paste the pairing link here.</p>
+    <div class="row"><input type="text" id="pair-link" placeholder="https://…/#pair=…" autocapitalize="off" autocorrect="off" spellcheck="false">
+    <button class="btn primary" data-act="pair">Pair</button></div>
+    ${error ? `<div class="error">${esc(error)}</div>` : ""}</div>`;
+}
+async function pair(token) {
+  history.replaceState(null, "", location.pathname);
+  try {
+    const response = await fetch("/api/pair", { method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ token }) });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.error || "Pairing failed.");
+    state.paired = true;
+    connect();
+    render();
+    toast("Paired. Add Echo to the Home Screen to get notifications.");
+  } catch (error) {
+    state.paired = false;
+    renderPair(error.message);
+  }
+}
+
+// ---- Actions
+function needFor(key) {
+  for (const { need, repo } of allNeeds()) if (needKey(need) === key) return { need, repo };
+  return null;
+}
+async function decide(key, approve) {
+  const found = needFor(key);
+  if (!found) return;
+  const { need } = found;
+  const params = need.worker ? { worker: Number(need.worker.slice(1)), approve } : { agent: need.agent, approve };
+  const note = (state.drafts[key] || "").trim();
+  if (!approve && note) params.note = note;
+  state.sent[key] = true; render();
+  try {
+    await call("decide", params);
+    delete state.drafts[key]; delete state.denying[key];
+    const what = command(need);
+    toast(need.worker ? `${approve ? "Approved" : "Denied"} ${need.worker}'s request. Its Orchestrator knows.` : `${approve ? "Approved" : "Denied"}${what ? ": " + what : "."}`);
+  } catch (error) { delete state.sent[key]; render(); toast(error.message); }
+}
+async function reply(key) {
+  const found = needFor(key);
+  const text = (state.drafts[key] || "").trim();
+  if (!found || !text) return;
+  state.sent[key] = true; render();
+  try {
+    await call("reply", { id: found.need.message, body: text });
+    delete state.drafts[key];
+    toast(`Sent your answer to ${found.need.worker}. Its Orchestrator gets a copy.`);
+  } catch (error) { delete state.sent[key]; render(); toast(error.message); }
+}
+function termTarget() {
+  const r = route();
+  return r.name === "agent" ? { agent: Number(r.value) } : { id: Number(r.value) };
+}
+async function sendText() {
+  const r = route();
+  const key = termKey(r.name === "agent" ? { agent: r.value } : { worker: r.value });
+  const text = state.drafts[key] || "";
+  if (!text.trim()) return;
+  try {
+    await call("terminal.send", Object.assign(termTarget(), { text }));
+    state.drafts[key] = "";
+    const field = $app.querySelector(`[data-draft="${CSS.escape(key)}"]`);
+    if (field) { field.value = ""; grow(field); }
+    state.screen.follow = true;
+    setTimeout(pollScreen, 250);
+  } catch (error) { toast(error.message); }
+}
+async function pressKey(key) {
+  try {
+    await call("terminal.key", Object.assign(termTarget(), { keys: [key] }));
+    setTimeout(pollScreen, 150);
+  } catch (error) { toast(error.message); }
+}
+async function create() {
+  const s = state.sheet;
+  const params = { repo: route().value, kind: s.kind };
+  const value = id => (state.drafts[id] || "").trim();
+  if (value("new-name")) params.name = value("new-name");
+  if (value("new-request")) params.request = value("new-request");
+  if (value("new-branch")) params.new_branch = value("new-branch").replace(/\s+/g, "-");
+  s.busy = true; s.error = null; render();
+  try {
+    const result = await call("agent.open", params);
+    for (const id of ["new-name", "new-request", "new-branch"]) delete state.drafts[id];
+    state.sheet = null;
+    go("#agent=" + result.agent);
+  } catch (error) { s.busy = false; s.error = error.message; render(); }
+}
+
+function grow(field) {
+  field.style.height = "auto";
+  field.style.height = Math.min(field.scrollHeight + 1, 160) + "px";
+}
+
+$app.addEventListener("input", event => {
+  const field = event.target.closest("[data-draft]");
+  if (!field) return;
+  state.drafts[field.dataset.draft] = field.value;
+  if (field.tagName === "TEXTAREA") grow(field);
+});
+$app.addEventListener("keydown", event => {
+  if (event.key !== "Enter" || event.shiftKey || event.isComposing) return;
+  const field = event.target.closest("[data-draft]");
+  if (!field) return;
+  if (event.target.id === "pair-link") return;
+  const key = field.dataset.draft;
+  if (key.startsWith("agent-") || key.startsWith("worker-")) { event.preventDefault(); sendText(); }
+  else if (needFor(key) && needFor(key).need.kind === "question") { event.preventDefault(); reply(key); }
+});
+$app.addEventListener("click", event => {
+  const el = event.target.closest("[data-act], [data-go], [data-sheet], [data-key-press], [data-kind]");
+  if (!el) return;
+  if (el.dataset.act === "close-sheet" && el !== event.target && el.classList.contains("sheet-back")) return;
+  if (el.dataset.go) return go(el.dataset.go);
+  if (el.dataset.keyPress) return pressKey(el.dataset.keyPress);
+  if (el.dataset.kind) { state.sheet.kind = el.dataset.kind; return render(); }
+  if (el.dataset.sheet === "settings") return openSettings();
+  if (el.dataset.sheet === "new") { state.sheet = { name: "new", kind: "orchestrator" }; return render(); }
+  const key = el.dataset.key;
+  switch (el.dataset.act) {
+    case "approve": return decide(key, true);
+    case "deny-ask": {
+      const found = needFor(key);
+      // A Normal session's prompt has only the human to tell: deny it outright.
+      if (found && !found.need.worker) return decide(key, false);
+      state.denying[key] = true; render();
+      const field = $app.querySelector(`[data-draft="${CSS.escape(key)}"]`);
+      if (field) field.focus();
+      return;
+    }
+    case "deny": return decide(key, false);
+    case "reply": return reply(key);
+    case "send": return sendText();
+    case "start":
+      return call("agent.open", { agent: Number(el.dataset.agent) }).then(() => toast("Starting…")).catch(e => toast(e.message));
+    case "dismiss":
+      return call("worker.dismiss", { id: Number(el.dataset.worker) }).then(() => go("#")).catch(e => toast(e.message));
+    case "viewbar": state.viewbar = !state.viewbar; return render();
+    case "wrap": prefs.wrap = !prefs.wrap; save("echo-remote-prefs", prefs); return render();
+    case "smaller": prefs.size = Math.max(7, prefs.size - 1); save("echo-remote-prefs", prefs); return render();
+    case "bigger": prefs.size = Math.min(16, prefs.size + 1); save("echo-remote-prefs", prefs); return render();
+    case "close-sheet": state.sheet = null; return render();
+    case "create": return create();
+    case "push-on": return pushOn();
+    case "push-off": return pushOff();
+    case "push-test": return pushTest();
+    case "pair": {
+      const link = ($app.querySelector("#pair-link") || {}).value || "";
+      const token = (link.split("#pair=")[1] || link).trim();
+      if (token) pair(token);
+      return;
+    }
+  }
+});
+window.addEventListener("hashchange", () => { state.sheet = null; render(); window.scrollTo(0, 0); });
+window.addEventListener("scroll", () => {
+  const top = document.querySelector(".top");
+  if (top) top.classList.toggle("scrolled", window.scrollY > 4);
+}, { passive: true });
+// The terminal page fills what the keyboard leaves.
+if (window.visualViewport) {
+  const fit = () => {
+    document.documentElement.style.setProperty("--vh", window.visualViewport.height + "px");
+    if (document.body.classList.contains("is-term")) window.scrollTo(0, 0);
+  };
+  window.visualViewport.addEventListener("resize", fit);
+  fit();
+}
+// Ages tick on their own; the ledger changes arrive on the stream.
+setInterval(() => { if (route().name !== "agent" && route().name !== "worker") renderSoon(); }, 30000);
+if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});
+
+if (route().name === "pair") pair(route().value);
+else { connect(); render(); }
+</script>
+</body>
+</html>

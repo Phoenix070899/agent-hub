@@ -304,6 +304,24 @@ public struct Need: Decodable, Equatable, Identifiable, Sendable {
     }
 }
 
+/// Echo Remote, the phone web app the daemon serves (ADR 0008).
+public struct RemoteStatus: Decodable, Equatable, Sendable {
+    public let enabled: Bool
+    public let running: Bool
+    /// Why it is not serving as asked: the port taken, or Tailscale failing.
+    public let error: String?
+    /// Its address on this Mac, `http://127.0.0.1:7480`.
+    public let local: String
+    /// Its HTTPS address on the tailnet, once Tailscale is connected.
+    public let url: String?
+    /// "ready", "missing", "test", or what is wrong with Tailscale.
+    public let tailscale: String
+    /// The address with the pairing token; whoever opens it controls the agents.
+    public let pairLink: String?
+    /// Phones that turned on notifications.
+    public let phones: Int
+}
+
 /// A repo the daemon knows, with its agents.
 public struct SessionInfo: Decodable, Equatable, Identifiable, Sendable {
     public let repo: String

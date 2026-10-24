@@ -124,6 +124,11 @@ impl Live {
         self.parser.lock().unwrap().screen().contents()
     }
 
+    /// Reads the parsed screen itself: its cells, colours, and modes.
+    pub fn with_screen<T>(&self, read: impl FnOnce(&vt100::Screen) -> T) -> T {
+        read(self.parser.lock().unwrap().screen())
+    }
+
     pub fn write(&self, bytes: &[u8]) -> Result<()> {
         let mut writer = self.writer.lock().unwrap();
         writer.write_all(bytes)?;

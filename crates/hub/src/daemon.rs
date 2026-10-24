@@ -21,6 +21,7 @@ use crate::paths;
 use crate::profile::{self, Launch};
 use crate::proto;
 use crate::pty::{Live, Spawn};
+use crate::remote::{self, Remote};
 use crate::repo;
 use crate::screen::{self, Look};
 
@@ -50,6 +51,8 @@ pub struct Hub {
     hub_dir: PathBuf,
     /// Tests only: run this program with the spec instead of `claude`.
     test_agent: Option<String>,
+    /// Echo Remote, the phone web app (ADR 0008).
+    remote: Remote,
 }
 
 /// How often account usage is re-read while someone watches the events stream.
@@ -159,8 +162,10 @@ pub fn run() -> Result<()> {
         usage: Mutex::new(Usage::default()),
         hub_dir: paths::hub_dir(),
         test_agent: std::env::var("HUB_TEST_AGENT").ok(),
+        remote: Remote::load(),
     });
     hub.recover()?;
+    remote::start_if_enabled(&hub);
     eprintln!("hubd {}: listening on {}", std::process::id(), socket.display());
 
     for stream in listener.incoming() {
@@ -235,6 +240,59 @@ impl Hub {
     fn notify(&self) {
         *self.tick.lock().unwrap() += 1;
         self.changed.notify_all();
+    }
+
+    pub(crate) fn tick(&self) -> u64 {
+        *self.tick.lock().unwrap()
+    }
+
+    /// Waits until something changes after `seen`, or `timeout` passes; the tick it is at now.
+    pub(crate) fn wait_change(&self, seen: u64, timeout: Duration) -> u64 {
+        let guard = self.tick.lock().unwrap();
+        if *guard != seen {
+            return *guard;
+        }
+        *self.changed.wait_timeout(guard, timeout).unwrap().0
+    }
+
+    pub(crate) fn remote(&self) -> &Remote {
+        &self.remote
+    }
+
+    /// Under test: nothing outside the test's own folder, like Tailscale, is touched.
+    pub(crate) fn is_test(&self) -> bool {
+        self.test_agent.is_some()
+    }
+
+    /// Every repo's snapshot, for Echo Remote.
+    pub(crate) fn world(&self) -> Result<Value> {
+        let mut repos: Vec<String> = db::agents(&self.db(), None)?.into_iter().map(|a| a.repo).collect();
+        repos.sort();
+        repos.dedup();
+        let mut out = Vec::new();
+        for repo in &repos {
+            let mut snapshot = self.snapshot(repo)?;
+            snapshot.as_object_mut().map(|s| s.remove("usage"));
+            out.push(snapshot);
+        }
+        Ok(json!({ "repos": out, "usage": self.usage.lock().unwrap().view() }))
+    }
+
+    /// An agent's terminal (or, while it is stopped, its shell) or a Worker's, if one runs; never
+    /// starts one.
+    pub(crate) fn running_terminal(&self, agent: Option<i64>, worker: Option<i64>) -> Option<Arc<Live>> {
+        match (agent, worker) {
+            (Some(id), _) => self.agent_live(id).ok().or_else(|| {
+                self.shells
+                    .lock()
+                    .unwrap()
+                    .get(&id)
+                    .filter(|live| live.is_alive())
+                    .cloned()
+            }),
+            (None, Some(id)) => self.live(id).ok(),
+            (None, None) => None,
+        }
     }
 
     /// Re-runs `check` after every change until it yields, `timeout` passes, or `gone` says stop.
@@ -680,6 +738,45 @@ impl Hub {
                 live.resize(id_param(p, "rows")? as u16, id_param(p, "cols")? as u16)?;
                 Ok(json!({}))
             }
+            // Echo Remote's message box and keys: an agent's or Worker's running terminal only.
+            "terminal.send" => {
+                let agent = p.get("agent").and_then(Value::as_i64);
+                let live = self
+                    .running_terminal(agent, p.get("id").and_then(Value::as_i64))
+                    .context("it is not running")?;
+                let text = str_param(p, "text")?;
+                // Several lines as one paste, so the first line break does not send the rest early.
+                if text.contains('\n') && live.with_screen(|s| s.bracketed_paste()) {
+                    live.write(format!("\x1b[200~{text}\x1b[201~").as_bytes())?;
+                } else {
+                    live.write(text.as_bytes())?;
+                }
+                if p.get("enter").and_then(Value::as_bool).unwrap_or(true) {
+                    std::thread::sleep(Duration::from_millis(150));
+                    live.write(b"\r")?;
+                }
+                if let Some(id) = agent.filter(|&id| self.agent_is_live(id)) {
+                    self.name_from_input(id, text.lines().next().unwrap_or(""))?;
+                }
+                Ok(json!({}))
+            }
+            "terminal.key" => {
+                let live = self
+                    .running_terminal(
+                        p.get("agent").and_then(Value::as_i64),
+                        p.get("id").and_then(Value::as_i64),
+                    )
+                    .context("it is not running")?;
+                for key in param(p, "keys")?.as_array().context("keys must be a list")? {
+                    live.write(&key_bytes(key.as_str().unwrap_or_default())?)?;
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                Ok(json!({}))
+            }
+            "remote.status" => Ok(remote::status(self)),
+            "remote.enable" => remote::enable(self, p.get("port").and_then(Value::as_u64).map(|p| p as u16)),
+            "remote.disable" => remote::disable(self),
+            "remote.pair" => remote::new_pairing(self),
             "session.open" => self.open_session(p),
             "session.close" => {
                 let repo = repo::root(Path::new(str_param(p, "repo")?))?.display().to_string();

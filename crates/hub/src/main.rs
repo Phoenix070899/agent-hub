@@ -8,6 +8,8 @@ mod paths;
 mod profile;
 mod proto;
 mod pty;
+mod push;
+mod remote;
 mod repo;
 mod screen;
 
@@ -117,6 +119,15 @@ enum Command {
     },
     /// Open the Worker's terminal in a new Ghostty window.
     Open { worker: String },
+    /// Echo Remote, the phone web app over Tailscale: turn it on or off, make a new pairing link
+    /// (unpairing every phone), or show how it stands.
+    Remote {
+        #[arg(value_enum, default_value_t = RemoteAction::Status)]
+        action: RemoteAction,
+        /// The local port to serve on (with `on`).
+        #[arg(long)]
+        port: Option<u16>,
+    },
     /// Echo's multiplexer panes: runs the line in `HUB_MUX` (from the daemon's `mux.command`) in
     /// a login shell, in place of this process.
     #[command(hide = true)]
@@ -173,6 +184,14 @@ enum WorkerCommand {
     Close { worker: String },
     /// Restart a lost or exited Worker on its Claude session.
     Resume { worker: String },
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum RemoteAction {
+    On,
+    Off,
+    Pair,
+    Status,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -250,6 +269,32 @@ fn print_json(value: &Value) -> Result<()> {
     Ok(())
 }
 
+fn print_remote(status: &Value) {
+    let on = status["enabled"].as_bool() == Some(true);
+    println!("Echo Remote is {}.", if on { "on" } else { "off" });
+    if let Some(error) = status["error"].as_str() {
+        println!("Problem: {error}");
+    }
+    match status["tailscale"].as_str() {
+        Some("missing") => {
+            println!("Tailscale: not installed. Get it on this Mac and the phone: https://tailscale.com/download")
+        }
+        Some("ready") | Some("test") => {}
+        Some(other) => println!("Tailscale: {other}"),
+        None => {}
+    }
+    if on {
+        match status["url"].as_str() {
+            Some(url) => println!("Phone address: {url}"),
+            None => println!("On this Mac only: {}", status["local"].as_str().unwrap_or("")),
+        }
+        if let Some(link) = status["pairLink"].as_str() {
+            println!("Pair a phone by opening this link on it (keep it private): {link}");
+        }
+        println!("Phones with notifications: {}", status["phones"]);
+    }
+}
+
 fn run(cli: Cli) -> Result<ExitCode> {
     match cli.command {
         Command::Daemon => daemon::run()?,
@@ -278,6 +323,15 @@ fn run(cli: Cli) -> Result<ExitCode> {
         }
         Command::Shutdown { force } => {
             proto::call("shutdown", json!({ "force": force }))?;
+        }
+        Command::Remote { action, port } => {
+            let status = match action {
+                RemoteAction::On => proto::call("remote.enable", json!({ "port": port }))?,
+                RemoteAction::Off => proto::call("remote.disable", json!({}))?,
+                RemoteAction::Pair => proto::call("remote.pair", json!({}))?,
+                RemoteAction::Status => proto::call("remote.status", json!({}))?,
+            };
+            print_remote(&status);
         }
         Command::Status { json, repo } => {
             let result = proto::call("status", json!({ "repo": repo_arg(repo)? }))?;

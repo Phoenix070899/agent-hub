@@ -631,3 +631,12 @@ func row(_ id: String, phase: String, quiet: Int, model: String? = nil, effort: 
     image.backgroundImage = "/tmp/a.png"
     #expect(image.ghosttyConfig.contains("background-opacity = 0\n"))
 }
+
+@Test func decodesEchoRemotesStatus() throws {
+    let json = #"{"enabled":true,"running":true,"error":null,"local":"http://127.0.0.1:7480","url":"https://mac.tail1.ts.net:8443","tailscale":"ready","pairLink":"https://mac.tail1.ts.net:8443/#pair=abc","phones":1}"#
+    let status = try JSONDecoder().decode(RemoteStatus.self, from: Data(json.utf8))
+    #expect(status.enabled && status.running)
+    #expect(status.url == "https://mac.tail1.ts.net:8443")
+    #expect(status.pairLink?.hasSuffix("#pair=abc") == true)
+    #expect(status.phones == 1)
+}

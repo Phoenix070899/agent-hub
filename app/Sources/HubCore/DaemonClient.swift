@@ -189,6 +189,13 @@ public struct DaemonClient: Sendable {
         try call("worker.review", ["id": id, "to": toWorker ? "worker" : "orchestrator", "body": body])
     }
 
+    /// Echo Remote (ADR 0008): `remote.status`, `remote.enable`, `remote.disable`, or
+    /// `remote.pair` (a new pairing link, which unpairs every phone); each answers with the status.
+    public func remote(_ method: String) throws -> RemoteStatus {
+        let result = try call(method)
+        return try JSONDecoder().decode(RemoteStatus.self, from: JSONSerialization.data(withJSONObject: result))
+    }
+
     public func decide(worker: Int, approve: Bool, note: String? = nil) throws {
         var params: [String: Any] = ["worker": worker, "approve": approve]
         if let note, !note.isEmpty { params["note"] = note }

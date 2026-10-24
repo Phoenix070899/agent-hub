@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- Echo's icon for the phone: full bleed, as iOS rounds the corners itself; the echoes are
+       solid tints, as some renderers drop stroke-opacity. -->
+  <rect width="1024" height="1024" fill="#fbfcfd"/>
+  <g transform="translate(-51.2 -40) scale(1.1)">
+    <g fill="none" stroke-width="14">
+      <rect x="500" y="200" width="300" height="300" rx="72" stroke="#dbdde2"/>
+      <rect x="450" y="250" width="300" height="300" rx="72" stroke="#c8ccd3"/>
+      <rect x="400" y="300" width="300" height="300" rx="72" stroke="#b1b6c0"/>
+      <rect x="350" y="350" width="300" height="300" rx="72" stroke="#9399a7"/>
+      <rect x="300" y="400" width="300" height="300" rx="72" stroke="#6c7486"/>
+    </g>
+    <rect x="224" y="476" width="324" height="324" rx="78" fill="#14213d"/>
+    <rect x="420" y="672" width="72" height="72" rx="14" fill="#ffe347"/>
+  </g>
+</svg>

@@ -1295,3 +1295,154 @@ fn a_new_branch_that_exists_is_worked_on_where_it_is() {
     assert!(agent["cwd"].is_null(), "{agent}");
     assert_eq!(agent["branch"], "feat/here", "{agent}");
 }
+
+/// One HTTP request to Echo Remote: its status, headers, and body.
+fn http(port: u16, method: &str, path: &str, headers: &[&str], body: &str) -> (u16, String, String) {
+    let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+    let mut request = format!(
+        "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Length: {}\r\n",
+        body.len()
+    );
+    for header in headers {
+        request.push_str(header);
+        request.push_str("\r\n");
+    }
+    request.push_str("\r\n");
+    request.push_str(body);
+    stream.write_all(request.as_bytes()).unwrap();
+    let mut response = String::new();
+    stream.read_to_string(&mut response).unwrap();
+    let (head, body) = response.split_once("\r\n\r\n").unwrap();
+    let status = head.split_whitespace().nth(1).unwrap().parse().unwrap();
+    (status, head.to_string(), body.to_string())
+}
+
+fn free_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
+}
+
+#[test]
+fn echo_remote_pairs_a_phone_and_drives_an_agent() {
+    let hub = Hub::new("remote");
+    let port = free_port();
+    let on = hub.ok(&["remote", "on", "--port", &port.to_string()]);
+    assert!(on.contains("Echo Remote is on."), "{on}");
+    let config: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(hub.state.join("remote.json")).unwrap()).unwrap();
+    let token = config["token"].as_str().unwrap().to_string();
+    assert!(on.contains(&format!("/#pair={token}")), "{on}");
+    let mode = std::fs::metadata(hub.state.join("remote.json")).unwrap().permissions();
+    assert_eq!(std::os::unix::fs::PermissionsExt::mode(&mode) & 0o777, 0o600);
+
+    // The page is open; the ledger is not, until the phone pairs.
+    let (status, _, page) = http(port, "GET", "/", &[], "");
+    assert_eq!(status, 200);
+    assert!(page.contains("Echo Remote"));
+    assert_eq!(http(port, "GET", "/api/screen?agent=1", &[], "").0, 401);
+    let json = "Content-Type: application/json";
+    assert_eq!(http(port, "POST", "/api/pair", &[json], r#"{"token":"wrong"}"#).0, 403);
+    let (status, head, _) = http(port, "POST", "/api/pair", &[json], &format!(r#"{{"token":"{token}"}}"#));
+    assert_eq!(status, 200);
+    assert!(
+        head.contains(&format!(
+            "Set-Cookie: echo_remote={token}; Path=/; HttpOnly; SameSite=Strict"
+        )),
+        "{head}"
+    );
+    let cookie = format!("Cookie: echo_remote={token}");
+
+    // Only Echo's own actions, and only from its own page.
+    let (status, _, body) = http(port, "POST", "/api/call/worker.start", &[json, &cookie], "{}");
+    assert_eq!(status, 403, "{body}");
+    let evil = "Origin: https://evil.example";
+    assert_eq!(
+        http(port, "POST", "/api/call/decide", &[json, &cookie, evil], "{}").0,
+        403
+    );
+    assert_eq!(
+        http(
+            port,
+            "POST",
+            "/api/call/decide",
+            &["Content-Type: text/plain", &cookie],
+            "{}"
+        )
+        .0,
+        403
+    );
+
+    // A new agent from the phone, then a message to it, read back off its screen.
+    let repo = hub.repo_key();
+    let (_, _, opened) = http(
+        port,
+        "POST",
+        "/api/call/agent.open",
+        &[json, &cookie],
+        &serde_json::json!({ "repo": repo, "kind": "claude", "name": "echo" }).to_string(),
+    );
+    let opened: serde_json::Value = serde_json::from_str(&opened).unwrap();
+    let agent = opened["result"]["agent"].as_i64().unwrap();
+    let send = serde_json::json!({ "agent": agent, "text": "hello from the phone" }).to_string();
+    let (_, _, sent) = http(port, "POST", "/api/call/terminal.send", &[json, &cookie], &send);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&sent).unwrap()["ok"],
+        true,
+        "{sent}"
+    );
+    hub.eventually("the phone's message on the agent's screen", || {
+        let (_, _, screen) = http(port, "GET", &format!("/api/screen?agent={agent}"), &[&cookie], "");
+        screen.contains("got: hello from the phone")
+    });
+
+    // The ledger streams, and a permission prompt is settled from it.
+    let opened = hub.call(
+        "agent.open",
+        serde_json::json!({ "repo": repo, "kind": "claude", "name": "prompt me" }),
+    );
+    let prompted = opened["result"]["agent"].as_i64().unwrap();
+    let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+    write!(
+        stream,
+        "GET /api/stream HTTP/1.1\r\nHost: 127.0.0.1\r\n{cookie}\r\n\r\n"
+    )
+    .unwrap();
+    let mut reader = BufReader::new(stream);
+    let mut world = serde_json::Value::Null;
+    hub.eventually("the prompt in the stream", || {
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        if let Some(data) = line.strip_prefix("data: ") {
+            world = serde_json::from_str(data).unwrap();
+        }
+        world["repos"][0]["needs"]
+            .as_array()
+            .is_some_and(|needs| !needs.is_empty())
+    });
+    assert_eq!(world["repos"][0]["needs"][0]["agent"], prompted);
+    let decide = serde_json::json!({ "agent": prompted, "approve": true }).to_string();
+    let (_, _, decided) = http(port, "POST", "/api/call/decide", &[json, &cookie], &decide);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&decided).unwrap()["ok"],
+        true,
+        "{decided}"
+    );
+    hub.eventually("the approval on screen", || {
+        let (_, _, screen) = http(port, "GET", &format!("/api/screen?agent={prompted}"), &[&cookie], "");
+        screen.contains("approved")
+    });
+
+    // A new pairing link unpairs every phone; off lets the port go.
+    hub.ok(&["remote", "pair"]);
+    assert_eq!(
+        http(port, "GET", &format!("/api/screen?agent={agent}"), &[&cookie], "").0,
+        401
+    );
+    assert!(hub.ok(&["remote", "off"]).contains("Echo Remote is off."));
+    hub.eventually("the port to close", || {
+        std::net::TcpStream::connect(("127.0.0.1", port)).is_err()
+    });
+}
