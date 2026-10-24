@@ -237,8 +237,19 @@ final class AppModel: ObservableObject {
     }
     /// The tree's cursor in each checkout.
     @Published var fileCursor: [String: String] = [:]
-    /// The Files tree has the keyboard, so the terminal lets go of it.
-    @Published var treeFocused = false
+    /// Which of the Files column's lists has the keyboard, if one does. Set and cleared only by
+    /// that list, as switching tabs can report the new list's focus before the old one's loss.
+    @Published private(set) var filesFocus: FilesTab?
+    /// The Files column has the keyboard, so the terminal lets go of it.
+    var treeFocused: Bool { filesFocus != nil }
+
+    func filesFocused(_ tab: FilesTab, _ focused: Bool) {
+        if focused {
+            filesFocus = tab
+        } else if filesFocus == tab {
+            filesFocus = nil
+        }
+    }
     /// Bumped to move the keyboard to the Files tree.
     @Published var filesFocusRequest = 0
     /// Bumped to hand the keyboard to the previewed file (Tab in the tree).
@@ -1210,8 +1221,17 @@ extension AppModel {
             filesFocusRequest += 1
             return
         }
-        if !filesShown { filesFocusRequest += 1 }
-        withAnimation(.easeOut(duration: 0.15)) { filesShown.toggle() }
+        if filesShown {
+            hideFiles()
+        } else {
+            filesFocusRequest += 1
+            withAnimation(.easeOut(duration: 0.15)) { filesShown = true }
+        }
+    }
+
+    /// The column's close button: hides it whichever tab shows and wherever the keyboard is.
+    func hideFiles() {
+        withAnimation(.easeOut(duration: 0.15)) { filesShown = false }
     }
 }
 

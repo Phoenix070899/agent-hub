@@ -101,8 +101,8 @@ private struct FilesTree: View {
                 }
                 // Selecting an agent or Worker in the ledger hands the keyboard to its terminal.
                 .onChange(of: model.terminalFocusRequest) { focused = false }
-                .onChange(of: focused) { model.treeFocused = focused }
-                .onDisappear { model.treeFocused = false }
+                .onChange(of: focused) { model.filesFocused(.files, focused) }
+                .onDisappear { model.filesFocused(.files, false) }
                 .onChange(of: cursor) {
                     if let cursor { proxy.scrollTo(cursor) }
                 }
@@ -132,7 +132,7 @@ private struct FilesTree: View {
                 .help(model.showIgnoredFiles ? "Hide ignored files" : "Show ignored files")
                 .accessibilityLabel(model.showIgnoredFiles ? "Hide ignored files" : "Show ignored files")
             }
-            Button { model.toggleFiles() } label: {
+            Button { model.hideFiles() } label: {
                 Image(systemName: "xmark")
                     .font(.system(size: 11, weight: .semibold))
                     .frame(width: 24, height: 24)
@@ -637,6 +637,7 @@ private struct FilesTabBar: View {
 /// selecting an agent hands it to the terminal, and the preview knows while the list holds it.
 private struct FilesListFocus: ViewModifier {
     @EnvironmentObject private var model: AppModel
+    let tab: FilesTab
     var focused: FocusState<Bool>.Binding
     @StateObject private var handled = FocusRequest()
 
@@ -656,8 +657,8 @@ private struct FilesListFocus: ViewModifier {
                 focused.wrappedValue = true
             }
             .onChange(of: model.terminalFocusRequest) { focused.wrappedValue = false }
-            .onChange(of: focused.wrappedValue) { model.treeFocused = focused.wrappedValue }
-            .onDisappear { model.treeFocused = false }
+            .onChange(of: focused.wrappedValue) { model.filesFocused(tab, focused.wrappedValue) }
+            .onDisappear { model.filesFocused(tab, false) }
     }
 }
 
@@ -737,7 +738,7 @@ private struct ChangedFilesList: View {
                     }
                     .padding(.vertical, 6)
                 }
-                .modifier(FilesListFocus(focused: $focused))
+                .modifier(FilesListFocus(tab: .changes, focused: $focused))
                 .onKeyPress(phases: .down) { press in
                     listKey(press, ids: changed.map(\.path), cursor: cursor, model: model) { path, typePath in
                         let file = FileRef(root: root, path: path)
@@ -858,7 +859,7 @@ private struct CommitsList: View {
                 }
                 .padding(.bottom, 6)
             }
-            .modifier(FilesListFocus(focused: $focused))
+            .modifier(FilesListFocus(tab: .commits, focused: $focused))
             .onKeyPress(phases: .down) { press in
                 listKey(press, ids: ids, cursor: cursor, model: model) { id, typePath in
                     let parts = id.split(separator: "\t", maxSplits: 2).map(String.init)
