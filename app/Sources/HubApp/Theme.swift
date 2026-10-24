@@ -5,41 +5,41 @@ import SwiftUI
 /// The Ledger look: cool paper, ink blue, and a highlighter that only ever means "this needs you".
 /// Every colour has a dark-mode twin.
 enum Ledger {
-    static let desk = dynamic(0xE9EDF2, 0x14171C)
-    static let paper = dynamic(0xFBFCFD, 0x1B1F26)
-    static let ink = dynamic(0x14213D, 0xE6E9EF)
-    static let ink2 = dynamic(0x56627A, 0xA6AFBD)
+    static let desk = dynamic(0xE9EDF2, 0x14171C) { $0.background }
+    static let paper = dynamic(0xFBFCFD, 0x1B1F26) { $0.surface }
+    static let ink = dynamic(0x14213D, 0xE6E9EF) { $0.text }
+    static let ink2 = dynamic(0x56627A, 0xA6AFBD) { CustomLook.mix($0.text, $0.surface, 0.3) }
     /// The quietest text; still 4.5:1 or better on every fill it sits on.
-    static let ink3 = dynamic(0x616B80, 0x949DAE)
-    static let rule = dynamic(0xD5DBE4, 0x2E343F)
-    static let wash = dynamic(0xF1F4F8, 0x232832)
-    static let selected = dynamic(0xEEF2FA, 0x253049)
+    static let ink3 = dynamic(0x616B80, 0x949DAE) { CustomLook.mix($0.text, $0.surface, 0.4) }
+    static let rule = dynamic(0xD5DBE4, 0x2E343F) { CustomLook.mix($0.surface, $0.text, 0.14) }
+    static let wash = dynamic(0xF1F4F8, 0x232832) { CustomLook.mix($0.surface, $0.text, 0.05) }
+    static let selected = dynamic(0xEEF2FA, 0x253049) { CustomLook.mix($0.surface, $0.accent, 0.12) }
     // Areas are told apart by fills, not lines.
     /// The strip the repo tabs sit on.
-    static let strip = dynamic(0xEEF1F5, 0x20252D)
+    static let strip = dynamic(0xEEF1F5, 0x20252D) { CustomLook.mix($0.background, $0.surface, 0.4) }
     /// The picked repo tab.
-    static let pill = dynamic(0xFFFFFF, 0x2C323D)
+    static let pill = dynamic(0xFFFFFF, 0x2C323D) { CustomLook.mix($0.surface, $0.dark ? $0.text : "#ffffff", 0.1) }
     /// An agent's header band in the ledger, and a panel's title row.
-    static let band = dynamic(0xF4F6F9, 0x1F242C)
+    static let band = dynamic(0xF4F6F9, 0x1F242C) { CustomLook.mix($0.background, $0.surface, 0.6) }
     /// A Needs you item's card.
-    static let needCard = dynamic(0xFFFBE6, 0x2E2A16)
+    static let needCard = dynamic(0xFFFBE6, 0x2E2A16) { CustomLook.mix($0.surface, $0.highlighter, $0.dark ? 0.12 : 0.16) }
     /// Secondary buttons.
-    static let fill = dynamic(0xE9EDF2, 0x2A303A)
+    static let fill = dynamic(0xE9EDF2, 0x2A303A) { CustomLook.mix($0.surface, $0.text, 0.09) }
     /// Text fields and pickers.
-    static let field = dynamic(0xEEF1F5, 0x232832)
+    static let field = dynamic(0xEEF1F5, 0x232832) { CustomLook.mix($0.surface, $0.text, 0.06) }
     /// The picked one of a few choices, like a mode card.
-    static let chosen = dynamic(0xDFE6F3, 0x2C3956)
+    static let chosen = dynamic(0xDFE6F3, 0x2C3956) { CustomLook.mix($0.surface, $0.accent, 0.22) }
     /// The highlighter. Text on it is always dark ink, in both modes.
-    static let marker = rgb(0xFFE347)
+    static let marker = dynamic(0xFFE347, 0xFFE347) { $0.highlighter }
     static let markerInk = rgb(0x14213D)
-    static let markerWash = dynamic(0xFFFBE0, 0x302B14)
-    static let run = dynamic(0x2F5BE0, 0x7C9BFF)
+    static let markerWash = dynamic(0xFFFBE0, 0x302B14) { CustomLook.mix($0.surface, $0.highlighter, $0.dark ? 0.12 : 0.14) }
+    static let run = dynamic(0x2F5BE0, 0x7C9BFF) { $0.accent }
     static let done = dynamic(0x23804B, 0x5BC48C)
     static let fail = dynamic(0xC63A2E, 0xF07A6F)
     /// A file changed but not committed, in the Files column; amber, apart from added green.
     static let changed = dynamic(0x9A6700, 0xE3B341)
     /// Lines an agent just changed in an open preview, for a moment.
-    static let justChanged = dynamic(0xFFF4C2, 0x3A3418)
+    static let justChanged = dynamic(0xFFF4C2, 0x3A3418) { CustomLook.mix($0.surface, $0.highlighter, $0.dark ? 0.18 : 0.3) }
     static let okWash = dynamic(0xEAF5EE, 0x1C2E24)
     static let okInk = dynamic(0x1D5C38, 0x95DAB3)
     static let failWash = dynamic(0xFBECEB, 0x3A1F1D)
@@ -60,9 +60,35 @@ enum Ledger {
         )
     }
 
-    private static func dynamic(_ light: Int, _ dark: Int) -> Color {
+    /// The human's colours while Window's Appearance is Custom; nil for Echo's own.
+    nonisolated(unsafe) private(set) static var custom: CustomLook?
+
+    /// Sets the whole app's appearance (nil follows macOS) and Custom's colours.
+    @MainActor static func apply(custom: CustomLook?, appearance name: NSAppearance.Name?) {
+        let recolour = custom != self.custom
+        self.custom = custom
+        guard let app = NSApp else { return }
+        if recolour {
+            // The colours resolve again only when the appearance changes: pass through the same
+            // mode's high-contrast twin for a moment, so every view redraws with the new ones.
+            let dark = name.map { $0 == .darkAqua }
+                ?? (app.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua)
+            app.appearance = NSAppearance(named: dark ? .accessibilityHighContrastDarkAqua : .accessibilityHighContrastAqua)
+        }
+        app.appearance = name.flatMap { NSAppearance(named: $0) }
+    }
+
+    /// A token with its light and dark value, and how Custom makes it from the picked colours; a
+    /// token without one takes its value for Custom's base mode.
+    private static func dynamic(_ light: Int, _ dark: Int, custom: ((CustomLook) -> String)? = nil) -> Color {
         Color(nsColor: NSColor(name: nil) { appearance in
-            appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? nsColor(dark) : nsColor(light)
+            if let look = Ledger.custom {
+                if let custom, let c = TerminalTheme.rgb(custom(look)) {
+                    return NSColor(srgbRed: c.red, green: c.green, blue: c.blue, alpha: 1)
+                }
+                return nsColor(look.dark ? dark : light)
+            }
+            return appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? nsColor(dark) : nsColor(light)
         })
     }
 }

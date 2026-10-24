@@ -146,3 +146,70 @@ extension TerminalAppearance {
         return lines.joined(separator: "\n") + "\n"
     }
 }
+
+/// The human's own colours for Echo itself, when Window's Appearance is Custom (ui-ux/0036): five
+/// picked colours and a light or dark base; every other shade of the Ledger is mixed from them.
+public struct CustomLook: Codable, Equatable, Sendable, Identifiable {
+    /// A preset's name, or "Custom" once a colour is changed by hand.
+    public var name: String
+    /// Light or dark system controls, and the done, failed, and changed colours of that mode.
+    public var dark: Bool
+    /// Behind everything: the window and its columns.
+    public var background: String
+    /// Cards, panels, and the ledger.
+    public var surface: String
+    public var text: String
+    /// Running agents and Workers, links, and the picked row.
+    public var accent: String
+    /// What needs you.
+    public var highlighter: String
+
+    public var id: String { name }
+
+    public init(name: String, dark: Bool, background: String, surface: String, text: String, accent: String, highlighter: String) {
+        self.name = name
+        self.dark = dark
+        self.background = background
+        self.surface = surface
+        self.text = text
+        self.accent = accent
+        self.highlighter = highlighter
+    }
+
+    /// Echo's own Ledger colours, to start from.
+    public static let light = CustomLook(
+        name: "Echo Light", dark: false, background: "#e9edf2", surface: "#fbfcfd", text: "#14213d", accent: "#2f5be0", highlighter: "#ffe347"
+    )
+    public static let dark = CustomLook(
+        name: "Echo Dark", dark: true, background: "#14171c", surface: "#1b1f26", text: "#e6e9ef", accent: "#7c9bff", highlighter: "#ffe347"
+    )
+
+    /// Echo's own looks, then one made from each terminal preset.
+    public static let presets = [light, dark] + TerminalTheme.presets.map { from($0) }
+
+    /// Echo coloured like a terminal theme: its background and text, a panel a shade toward the
+    /// text, its blue for accent, and its yellow (a bright one on light themes) for the highlighter.
+    public static func from(_ theme: TerminalTheme) -> CustomLook {
+        let dark = theme.isDark
+        return CustomLook(
+            name: theme.name,
+            dark: dark,
+            background: theme.background,
+            surface: mix(theme.background, theme.foreground, 0.05),
+            text: theme.foreground,
+            accent: theme.ansi[dark ? 12 : 4],
+            highlighter: dark ? theme.ansi[11] : "#ffe347"
+        )
+    }
+
+    /// `a` moved `amount` of the way to `b`, in sRGB.
+    public static func mix(_ a: String, _ b: String, _ amount: Double) -> String {
+        guard let x = TerminalTheme.rgb(a), let y = TerminalTheme.rgb(b) else { return a }
+        let t = min(max(amount, 0), 1)
+        return TerminalTheme.hex(
+            red: x.red + (y.red - x.red) * t,
+            green: x.green + (y.green - x.green) * t,
+            blue: x.blue + (y.blue - x.blue) * t
+        )
+    }
+}

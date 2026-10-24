@@ -29,7 +29,7 @@ struct NewSessionRequest: Equatable {
 /// How the window looks. By default it follows the terminal theme, so a dark terminal gets a
 /// dark window around it.
 enum WindowLook: String, CaseIterable, Identifiable, Codable {
-    case matchTerminal, system, light, dark
+    case matchTerminal, system, light, dark, custom
 
     var id: String { rawValue }
 
@@ -39,6 +39,7 @@ enum WindowLook: String, CaseIterable, Identifiable, Codable {
         case .system: return "Follow macOS"
         case .light: return "Light"
         case .dark: return "Dark"
+        case .custom: return "Custom"
         }
     }
 }
@@ -282,6 +283,16 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Echo's own colours while the look is Custom; starts as Echo's look in the terminal's mode.
+    @Published var customLook: CustomLook = AppModel.load(CustomLook.self, key: "customLook")
+        ?? (AppModel.loadAppearance().theme.isDark ? .dark : .light)
+    {
+        didSet {
+            Self.save(customLook, key: "customLook")
+            applyWindowLook()
+        }
+    }
+
     @Published var multiplexer: MultiplexerSettings =
         AppModel.load(MultiplexerSettings.self, key: "multiplexer") ?? MultiplexerSettings()
     {
@@ -314,8 +325,9 @@ final class AppModel: ObservableObject {
         case .system: name = nil
         case .light: name = .aqua
         case .dark: name = .darkAqua
+        case .custom: name = customLook.dark ? .darkAqua : .aqua
         }
-        NSApp?.appearance = name.flatMap { NSAppearance(named: $0) }
+        Ledger.apply(custom: windowLook == .custom ? customLook : nil, appearance: name)
     }
 
     private var trackers: [String: NeedTracker] = [:]

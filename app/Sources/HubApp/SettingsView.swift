@@ -25,6 +25,37 @@ struct SettingsView: View {
                             .foregroundStyle(.secondary)
                     }
                 }
+                if model.windowLook == .custom {
+                    Section {
+                        Picker("Preset", selection: lookPresetBinding) {
+                            ForEach(CustomLook.presets) { look in
+                                Text(look.name).tag(look.name)
+                            }
+                            if !isLookPreset {
+                                Text("Custom").tag("Custom")
+                            }
+                        }
+                        Picker("Mode", selection: lookBinding(\.dark)) {
+                            Text("Light").tag(false)
+                            Text("Dark").tag(true)
+                        }
+                        .pickerStyle(.segmented)
+                        ColorPicker("Background", selection: lookColour(\.background), supportsOpacity: false)
+                        ColorPicker("Surface", selection: lookColour(\.surface), supportsOpacity: false)
+                        ColorPicker("Text", selection: lookColour(\.text), supportsOpacity: false)
+                        ColorPicker("Accent", selection: lookColour(\.accent), supportsOpacity: false)
+                        ColorPicker("Highlighter", selection: lookColour(\.highlighter), supportsOpacity: false)
+                        Text("Lines, fields, and cards are mixed from these. Mode sets the system controls and the done, failed, and changed colours.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Section {
+                        Button("Match the Terminal Theme (\(model.appearance.theme.name))") {
+                            model.customLook = CustomLook.from(model.appearance.theme)
+                        }
+                    }
+                }
             }
             .tabItem { Label("Window", systemImage: "macwindow") }
             page {
@@ -179,6 +210,41 @@ struct SettingsView: View {
             return "Each agent and Worker shows in a plain terminal, without splits or extra windows."
         case .custom:
             return "Runs in a login shell. {session} is a name per agent or Worker, like echo-lanh-a3; {dir} is where it works; {command} shows it and must run in the first pane."
+        }
+    }
+
+    private var isLookPreset: Bool { CustomLook.presets.contains(model.customLook) }
+
+    private var lookPresetBinding: Binding<String> {
+        Binding {
+            isLookPreset ? model.customLook.name : "Custom"
+        } set: { name in
+            if let preset = CustomLook.presets.first(where: { $0.name == name }) {
+                model.customLook = preset
+            }
+        }
+    }
+
+    /// One part of the Custom look; changing it makes the look custom, as with the terminal theme.
+    private func lookBinding<Value>(_ key: WritableKeyPath<CustomLook, Value>) -> Binding<Value> {
+        Binding {
+            model.customLook[keyPath: key]
+        } set: { value in
+            var look = model.customLook
+            look[keyPath: key] = value
+            if CustomLook.presets.contains(where: { $0.name == look.name && $0 != look }) {
+                look.name = "Custom"
+            }
+            model.customLook = look
+        }
+    }
+
+    private func lookColour(_ key: WritableKeyPath<CustomLook, String>) -> Binding<Color> {
+        Binding {
+            TerminalTheme.color(model.customLook[keyPath: key])
+        } set: { picked in
+            guard let rgb = NSColor(picked).usingColorSpace(.sRGB) else { return }
+            lookBinding(key).wrappedValue = TerminalTheme.hex(red: rgb.redComponent, green: rgb.greenComponent, blue: rgb.blueComponent)
         }
     }
 

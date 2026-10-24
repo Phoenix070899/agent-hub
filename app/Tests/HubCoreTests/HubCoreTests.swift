@@ -640,3 +640,14 @@ func row(_ id: String, phase: String, quiet: Int, model: String? = nil, effort: 
     #expect(status.pairLink?.hasSuffix("#pair=abc") == true)
     #expect(status.phones == 1)
 }
+
+@Test func customLooksMixAndComeFromTerminalThemes() {
+    #expect(CustomLook.mix("#000000", "#ffffff", 0.5) == "#808080")
+    #expect(CustomLook.mix("#102030", "#102030", 0.3) == "#102030")
+    let ayu = CustomLook.from(.ayuDark)
+    #expect(ayu.name == "Ayu Dark" && ayu.dark)
+    #expect(ayu.background == "#0a0e14" && ayu.text == "#b3b1ad" && ayu.accent == "#59c2ff")
+    let tango = CustomLook.from(.tangoLight)
+    #expect(!tango.dark && tango.highlighter == "#ffe347" && tango.accent == "#3465a4")
+    #expect(CustomLook.presets.map(\.name) == ["Echo Light", "Echo Dark", "Ayu Dark", "Tango Light", "Hub Dark"])
+}
