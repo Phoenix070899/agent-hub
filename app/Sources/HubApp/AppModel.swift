@@ -327,8 +327,14 @@ final class AppModel: ObservableObject {
         case .dark: name = .darkAqua
         case .custom: name = customLook.dark ? .darkAqua : .aqua
         }
-        Ledger.apply(custom: windowLook == .custom ? customLook : nil, appearance: name)
+        guard Ledger.apply(custom: windowLook == .custom ? customLook : nil, appearance: name) else { return }
+        // Back only after a redraw: two changes in one turn of the run loop count as none.
+        lookFlipped = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { self.lookFlipped = false }
     }
+
+    /// True for the moment `LookRefresh` flips the colour scheme views see.
+    @Published private(set) var lookFlipped = false
 
     private var trackers: [String: NeedTracker] = [:]
     /// What each repo last showed, so switching back returns to it.

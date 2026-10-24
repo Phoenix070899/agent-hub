@@ -63,19 +63,14 @@ enum Ledger {
     /// The human's colours while Window's Appearance is Custom; nil for Echo's own.
     nonisolated(unsafe) private(set) static var custom: CustomLook?
 
-    /// Sets the whole app's appearance (nil follows macOS) and Custom's colours.
-    @MainActor static func apply(custom: CustomLook?, appearance name: NSAppearance.Name?) {
+    /// Sets the whole app's appearance (nil follows macOS) and Custom's colours; true when the
+    /// colours changed, so views must resolve them again (`LookRefresh`).
+    @MainActor @discardableResult
+    static func apply(custom: CustomLook?, appearance name: NSAppearance.Name?) -> Bool {
         let recolour = custom != self.custom
         self.custom = custom
-        guard let app = NSApp else { return }
-        if recolour {
-            // The colours resolve again only when the appearance changes: pass through the same
-            // mode's high-contrast twin for a moment, so every view redraws with the new ones.
-            let dark = name.map { $0 == .darkAqua }
-                ?? (app.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua)
-            app.appearance = NSAppearance(named: dark ? .accessibilityHighContrastDarkAqua : .accessibilityHighContrastAqua)
-        }
-        app.appearance = name.flatMap { NSAppearance(named: $0) }
+        NSApp?.appearance = name.flatMap { NSAppearance(named: $0) }
+        return recolour
     }
 
     /// A token with its light and dark value, and how Custom makes it from the picked colours; a
@@ -256,5 +251,18 @@ struct EchoMark: View {
             context.fill(square(5.6, 11.1, 2, 0.5), with: .color(Ledger.marker))
         }
         .accessibilityHidden(true)
+    }
+}
+
+/// Makes the window's views resolve the Ledger's colours again after Custom's colours changed.
+/// SwiftUI does so only when the colour scheme changes, so the scheme it sees flips for a
+/// moment; Ledger colours ignore it while Custom, and the window itself keeps its appearance,
+/// so nothing visibly flashes (ui-ux/0037).
+struct LookRefresh: ViewModifier {
+    @EnvironmentObject private var model: AppModel
+    @Environment(\.colorScheme) private var scheme
+
+    func body(content: Content) -> some View {
+        content.environment(\.colorScheme, model.lookFlipped ? (scheme == .dark ? .light : .dark) : scheme)
     }
 }

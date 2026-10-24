@@ -7,6 +7,8 @@ import UniformTypeIdentifiers
 /// by hand), its background image, the font, the multiplexer agents run inside, and Echo Remote.
 struct SettingsView: View {
     @EnvironmentObject private var model: AppModel
+    /// The Custom look being edited; it reaches the app only on Apply.
+    @StateObject private var draft = LookDraft()
 
     var body: some View {
         TabView {
@@ -52,12 +54,26 @@ struct SettingsView: View {
                     }
                     Section {
                         Button("Match the Terminal Theme (\(model.appearance.theme.name))") {
-                            model.customLook = CustomLook.from(model.appearance.theme)
+                            draft.look = CustomLook.from(model.appearance.theme)
+                        }
+                    }
+                    Section {
+                        HStack {
+                            Text(draft.look == model.customLook ? "Applied." : "Not applied yet.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                            Button("Revert") { draft.look = model.customLook }
+                                .disabled(draft.look == model.customLook)
+                            Button("Apply") { model.customLook = draft.look }
+                                .keyboardShortcut(.defaultAction)
+                                .disabled(draft.look == model.customLook)
                         }
                     }
                 }
             }
             .tabItem { Label("Window", systemImage: "macwindow") }
+            .onAppear { draft.look = model.customLook }
             page {
                 Section {
                     Picker("Preset", selection: presetBinding) {
@@ -213,35 +229,36 @@ struct SettingsView: View {
         }
     }
 
-    private var isLookPreset: Bool { CustomLook.presets.contains(model.customLook) }
+    private var isLookPreset: Bool { CustomLook.presets.contains(draft.look) }
 
     private var lookPresetBinding: Binding<String> {
         Binding {
-            isLookPreset ? model.customLook.name : "Custom"
+            isLookPreset ? draft.look.name : "Custom"
         } set: { name in
             if let preset = CustomLook.presets.first(where: { $0.name == name }) {
-                model.customLook = preset
+                draft.look = preset
             }
         }
     }
 
-    /// One part of the Custom look; changing it makes the look custom, as with the terminal theme.
+    /// One part of the Custom look being edited; changing it makes the look custom, as with the
+    /// terminal theme.
     private func lookBinding<Value>(_ key: WritableKeyPath<CustomLook, Value>) -> Binding<Value> {
         Binding {
-            model.customLook[keyPath: key]
+            draft.look[keyPath: key]
         } set: { value in
-            var look = model.customLook
+            var look = draft.look
             look[keyPath: key] = value
             if CustomLook.presets.contains(where: { $0.name == look.name && $0 != look }) {
                 look.name = "Custom"
             }
-            model.customLook = look
+            draft.look = look
         }
     }
 
     private func lookColour(_ key: WritableKeyPath<CustomLook, String>) -> Binding<Color> {
         Binding {
-            TerminalTheme.color(model.customLook[keyPath: key])
+            TerminalTheme.color(draft.look[keyPath: key])
         } set: { picked in
             guard let rgb = NSColor(picked).usingColorSpace(.sRGB) else { return }
             lookBinding(key).wrappedValue = TerminalTheme.hex(red: rgb.redComponent, green: rgb.greenComponent, blue: rgb.blueComponent)
@@ -295,4 +312,9 @@ struct Swatches: View {
         .padding(4)
         .background(TerminalTheme.color(theme.background), in: RoundedRectangle(cornerRadius: 5))
     }
+}
+
+/// The Custom look while it is edited in Settings, before Apply.
+final class LookDraft: ObservableObject {
+    @Published var look = CustomLook.light
 }

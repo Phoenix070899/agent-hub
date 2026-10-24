@@ -11,6 +11,7 @@ struct HubApp: App {
     var body: some Scene {
         Window("Echo", id: "main") {
             ContentView()
+                .modifier(LookRefresh())
                 .environmentObject(model)
                 .frame(minWidth: 900, minHeight: 560)
         }
