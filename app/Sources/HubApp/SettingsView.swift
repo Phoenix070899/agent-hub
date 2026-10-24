@@ -3,138 +3,160 @@ import HubCore
 import SwiftUI
 import UniformTypeIdentifiers
 
-/// Settings: the window's look, the terminal theme (a preset, then any colour changed by hand),
-/// the font, and the multiplexer agents run inside.
+/// Settings, one tab each: the window's look, the terminal theme (a preset, then any colour changed
+/// by hand), its background image, the font, the multiplexer agents run inside, and Echo Remote.
 struct SettingsView: View {
     @EnvironmentObject private var model: AppModel
 
     var body: some View {
-        Form {
-            Section("Window") {
-                Picker("Appearance", selection: $model.windowLook) {
-                    ForEach(WindowLook.allCases) { look in
-                        Text(look.title).tag(look)
+        TabView {
+            page {
+                Section {
+                    Picker("Appearance", selection: $model.windowLook) {
+                        ForEach(WindowLook.allCases) { look in
+                            Text(look.title).tag(look)
+                        }
+                    }
+                    if model.windowLook == .matchTerminal {
+                        Text(model.appearance.theme.isDark
+                             ? "Dark, because the terminal theme is dark."
+                             : "Light, because the terminal theme is light.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                     }
                 }
-                if model.windowLook == .matchTerminal {
-                    Text(model.appearance.theme.isDark
-                         ? "Dark, because the terminal theme is dark."
-                         : "Light, because the terminal theme is light.")
+            }
+            .tabItem { Label("Window", systemImage: "macwindow") }
+            page {
+                Section {
+                    Picker("Preset", selection: presetBinding) {
+                        ForEach(TerminalTheme.presets) { theme in
+                            Text(theme.name).tag(theme.name)
+                        }
+                        if !isPreset {
+                            Text("Custom").tag("Custom")
+                        }
+                    }
+                    ColorPicker("Background", selection: colour(\.background), supportsOpacity: false)
+                    ColorPicker("Text", selection: colour(\.foreground), supportsOpacity: false)
+                    ColorPicker("Cursor", selection: colour(\.cursor), supportsOpacity: false)
+                    ColorPicker("Selection", selection: colour(\.selection), supportsOpacity: false)
+                    LabeledContent("Palette") { Swatches(theme: model.appearance.theme) }
+                }
+                Section {
+                    Button("Match Orca (Ayu Dark, JetBrainsMono Nerd Font 14)") { model.appearance = .orca }
+                }
+            }
+            .tabItem { Label("Theme", systemImage: "paintpalette") }
+            page {
+                Section {
+                    LabeledContent("Image") {
+                        HStack(spacing: 8) {
+                            Text(model.appearance.backgroundImage.map { URL(fileURLWithPath: $0).lastPathComponent } ?? "None")
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                            Button("Choose…", action: chooseImage)
+                            if model.appearance.backgroundImage != nil {
+                                Button("Remove") { model.appearance.backgroundImage = nil }
+                            }
+                        }
+                    }
+                    // Always shown, so the controls can be found before an image is chosen.
+                    Group {
+                        LabeledContent {
+                            HStack(spacing: 10) {
+                                Slider(value: $model.appearance.backgroundImageDim, in: 0.3...0.95)
+                                Text("\(Int((model.appearance.backgroundImageDim * 100).rounded()))%")
+                                    .monospacedDigit()
+                                    .foregroundStyle(.secondary)
+                                    .frame(width: 40, alignment: .trailing)
+                            }
+                        } label: {
+                            Text("Dim")
+                        }
+                        LabeledContent {
+                            HStack(spacing: 10) {
+                                Slider(value: $model.appearance.backgroundImageBlur, in: 0...30)
+                                Text("\(Int(model.appearance.backgroundImageBlur.rounded())) pt")
+                                    .monospacedDigit()
+                                    .foregroundStyle(.secondary)
+                                    .frame(width: 40, alignment: .trailing)
+                            }
+                        } label: {
+                            Text("Blur")
+                        }
+                    }
+                    .disabled(model.appearance.backgroundImage == nil)
+                    if let path = model.appearance.backgroundImage {
+                        if !FileManager.default.fileExists(atPath: path) {
+                            Text("The image is gone; terminals show the theme background.")
+                                .font(.caption)
+                                .foregroundStyle(.orange)
+                        }
+                    }
+                    Text("Choose an image to show behind every terminal. Text and coloured cells stay solid; dim or blur the image until the text reads easily.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
-            Section("Terminal theme") {
-                Picker("Preset", selection: presetBinding) {
-                    ForEach(TerminalTheme.presets) { theme in
-                        Text(theme.name).tag(theme.name)
+            .tabItem { Label("Background", systemImage: "photo") }
+            page {
+                Section {
+                    TextField("Family", text: $model.appearance.fontName)
+                    Stepper(value: $model.appearance.fontSize, in: 9...28, step: 0.5) {
+                        LabeledContent("Size", value: "\(model.appearance.fontSize.formatted()) pt")
                     }
-                    if !isPreset {
-                        Text("Custom").tag("Custom")
-                    }
-                }
-                ColorPicker("Background", selection: colour(\.background), supportsOpacity: false)
-                ColorPicker("Text", selection: colour(\.foreground), supportsOpacity: false)
-                ColorPicker("Cursor", selection: colour(\.cursor), supportsOpacity: false)
-                ColorPicker("Selection", selection: colour(\.selection), supportsOpacity: false)
-                LabeledContent("Palette") { Swatches(theme: model.appearance.theme) }
-            }
-            Section("Terminal background") {
-                LabeledContent("Image") {
-                    HStack(spacing: 8) {
-                        Text(model.appearance.backgroundImage.map { URL(fileURLWithPath: $0).lastPathComponent } ?? "None")
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                        Button("Choose…", action: chooseImage)
-                        if model.appearance.backgroundImage != nil {
-                            Button("Remove") { model.appearance.backgroundImage = nil }
-                        }
-                    }
-                }
-                // Always shown, so the controls can be found before an image is chosen.
-                Group {
-                    LabeledContent {
-                        HStack(spacing: 10) {
-                            Slider(value: $model.appearance.backgroundImageDim, in: 0.3...0.95)
-                            Text("\(Int((model.appearance.backgroundImageDim * 100).rounded()))%")
-                                .monospacedDigit()
-                                .foregroundStyle(.secondary)
-                                .frame(width: 40, alignment: .trailing)
-                        }
-                    } label: {
-                        Text("Dim")
-                    }
-                    LabeledContent {
-                        HStack(spacing: 10) {
-                            Slider(value: $model.appearance.backgroundImageBlur, in: 0...30)
-                            Text("\(Int(model.appearance.backgroundImageBlur.rounded())) pt")
-                                .monospacedDigit()
-                                .foregroundStyle(.secondary)
-                                .frame(width: 40, alignment: .trailing)
-                        }
-                    } label: {
-                        Text("Blur")
-                    }
-                }
-                .disabled(model.appearance.backgroundImage == nil)
-                if let path = model.appearance.backgroundImage {
-                    if !FileManager.default.fileExists(atPath: path) {
-                        Text("The image is gone; terminals show the theme background.")
+                    if NSFont(name: model.appearance.fontName, size: 12) == nil {
+                        Text("Not installed; the system monospaced font is used.")
                             .font(.caption)
                             .foregroundStyle(.orange)
                     }
                 }
-                Text("Choose an image to show behind every terminal. Text and coloured cells stay solid; dim or blur the image until the text reads easily.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
             }
-            Section("Font") {
-                TextField("Family", text: $model.appearance.fontName)
-                Stepper(value: $model.appearance.fontSize, in: 9...28, step: 0.5) {
-                    LabeledContent("Size", value: "\(model.appearance.fontSize.formatted()) pt")
-                }
-                if NSFont(name: model.appearance.fontName, size: 12) == nil {
-                    Text("Not installed; the system monospaced font is used.")
-                        .font(.caption)
-                        .foregroundStyle(.orange)
-                }
-            }
-            Section {
-                Button("Match Orca (Ayu Dark, JetBrainsMono Nerd Font 14)") { model.appearance = .orca }
-            }
-            Section("Multiplexer") {
-                Picker("Show agents and Workers inside", selection: $model.multiplexer.kind) {
-                    ForEach(Multiplexer.allCases) { kind in
-                        Text(kind.title).tag(kind)
+            .tabItem { Label("Font", systemImage: "textformat") }
+            page {
+                Section {
+                    Picker("Show agents and Workers inside", selection: $model.multiplexer.kind) {
+                        ForEach(Multiplexer.allCases) { kind in
+                            Text(kind.title).tag(kind)
+                        }
                     }
-                }
-                if model.multiplexer.kind == .custom {
-                    TextField("Command", text: $model.multiplexer.command, axis: .vertical)
-                        .font(.system(size: 12, design: .monospaced))
-                        .lineLimit(1...3)
-                } else if model.multiplexer.enabled {
-                    LabeledContent("Command") {
-                        Text(model.multiplexer.command)
+                    if model.multiplexer.kind == .custom {
+                        TextField("Command", text: $model.multiplexer.command, axis: .vertical)
                             .font(.system(size: 12, design: .monospaced))
-                            .foregroundStyle(.secondary)
-                            .textSelection(.enabled)
-                            .multilineTextAlignment(.trailing)
+                            .lineLimit(1...3)
+                    } else if model.multiplexer.enabled {
+                        LabeledContent("Command") {
+                            Text(model.multiplexer.command)
+                                .font(.system(size: 12, design: .monospaced))
+                                .foregroundStyle(.secondary)
+                                .textSelection(.enabled)
+                                .multilineTextAlignment(.trailing)
+                        }
                     }
+                    Text(help)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text("A change applies to terminals opened after it.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
-                Text(help)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                Text("A change applies to terminals opened after it.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
             }
+            .tabItem { Label("Multiplexer", systemImage: "rectangle.split.2x1") }
+            page { RemoteSettings() }
+                .tabItem { Label("Remote", systemImage: "iphone") }
         }
-        .formStyle(.grouped)
         .frame(width: 520)
-        .fixedSize(horizontal: false, vertical: true)
+    }
+
+    /// One tab: its sections, as tall as they need.
+    private func page<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
+        Form(content: content)
+            .formStyle(.grouped)
+            .fixedSize(horizontal: false, vertical: true)
     }
 
     private func chooseImage() {
